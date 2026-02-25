@@ -5926,33 +5926,12 @@ dependencies = [
 
 [[package]]
 name = "modular-bitfield"
-version = "0.11.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a53d79ba8304ac1c4f9eb3b9d281f21f7be9d4626f72ce7df4ad8fbde4f38a74"
-dependencies = [
- "modular-bitfield-impl 0.11.2",
- "static_assertions",
-]
-
-[[package]]
-name = "modular-bitfield"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2956e537fc68236d2aa048f55704f231cc93f1c4de42fe1ecb5bd7938061fc4a"
 dependencies = [
- "modular-bitfield-impl 0.13.1",
+ "modular-bitfield-impl",
  "static_assertions",
-]
-
-[[package]]
-name = "modular-bitfield-impl"
-version = "0.11.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a7d5f7076603ebc68de2dc6a650ec331a062a13abaa346975be747bbfa4b789"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
 ]
 
 [[package]]
@@ -7938,7 +7917,7 @@ dependencies = [
  "alloy-trie",
  "arbitrary",
  "bytes",
- "modular-bitfield 0.13.1",
+ "modular-bitfield",
  "op-alloy-consensus",
  "reth-codecs-derive",
  "reth-zstd-compressors",
@@ -8063,7 +8042,7 @@ dependencies = [
  "bytes",
  "derive_more",
  "metrics",
- "modular-bitfield 0.13.1",
+ "modular-bitfield",
  "op-alloy-consensus",
  "parity-scale-codec",
  "proptest",
@@ -8118,7 +8097,7 @@ dependencies = [
  "alloy-primitives",
  "arbitrary",
  "bytes",
- "modular-bitfield 0.13.1",
+ "modular-bitfield",
  "reth-codecs",
  "reth-primitives-traits",
  "serde",
@@ -8738,7 +8717,7 @@ dependencies = [
  "alloy-rpc-types-eth",
  "alloy-serde",
  "arbitrary",
- "modular-bitfield 0.13.1",
+ "modular-bitfield",
  "reth-codecs",
  "reth-primitives-traits",
  "reth-zstd-compressors",
@@ -9526,7 +9505,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "derive_more",
- "modular-bitfield 0.13.1",
+ "modular-bitfield",
  "once_cell",
  "op-alloy-consensus",
  "proptest",
@@ -9623,7 +9602,7 @@ dependencies = [
  "alloy-primitives",
  "arbitrary",
  "derive_more",
- "modular-bitfield 0.13.1",
+ "modular-bitfield",
  "reth-codecs",
  "serde",
  "strum",
@@ -10050,7 +10029,7 @@ dependencies = [
  "alloy-primitives",
  "arbitrary",
  "bytes",
- "modular-bitfield 0.13.1",
+ "modular-bitfield",
  "reth-codecs",
  "reth-trie-common",
  "serde",
@@ -11953,7 +11932,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-math",
  "commonware-utils",
- "modular-bitfield 0.11.2",
+ "modular-bitfield",
  "rand 0.8.5",
 ]
 
@@ -12221,7 +12200,7 @@ dependencies = [
  "arbitrary",
  "base64 0.22.1",
  "derive_more",
- "modular-bitfield 0.11.2",
+ "modular-bitfield",
  "once_cell",
  "p256",
  "proptest",

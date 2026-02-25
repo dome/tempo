@@ -344,7 +344,7 @@ impl ValidatorConfigV2 {
     ///
     /// **FORMAT**:
     /// - Namespace: [`VALIDATOR_NS_ADD`] or [`VALIDATOR_NS_ROTATE`]
-    /// - Message: `keccak256(chainId || contractAddr || validatorAddr || uint8(ingress.len) || ingress || egress))`
+    /// - Message: `keccak256(chainId || contractAddr || validatorAddr || uint8(ingress.len) || ingress || uint8(egress.len) || egress))`
     fn verify_validator_signature(
         &self,
         namespace: &[u8],
@@ -360,6 +360,7 @@ impl ValidatorConfigV2 {
         hasher.update(validator_address.as_slice());
         hasher.update([ingress.len() as u8]);
         hasher.update(ingress.as_bytes());
+        hasher.update([egress.len() as u8]);
         hasher.update(egress.as_bytes());
         let message = hasher.finalize();
 
@@ -666,6 +667,7 @@ mod tests {
         data.extend_from_slice(validator_address.as_slice());
         data.push(ingress.len() as u8);
         data.extend_from_slice(ingress.as_bytes());
+        data.push(egress.len() as u8);
         data.extend_from_slice(egress.as_bytes());
         let message = keccak256(&data);
 

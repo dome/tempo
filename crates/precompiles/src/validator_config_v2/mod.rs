@@ -584,8 +584,13 @@ impl ValidatorConfigV2 {
         self.require_new_address(v1_val.validatorAddress)?;
         self.require_new_pubkey(v1_val.publicKey)?;
 
-        PublicKey::decode(v1_val.publicKey.as_slice())
-            .map_err(|_| ValidatorConfigV2Error::invalid_public_key())?;
+        let deactivated_at_height = if v1_val.active {
+            PublicKey::decode(v1_val.publicKey.as_slice())
+                .map_err(|_| ValidatorConfigV2Error::invalid_public_key())?;
+            0
+        } else {
+            block_height
+        };
 
         let egress = v1_val
             .outboundAddress
@@ -594,8 +599,6 @@ impl ValidatorConfigV2 {
             .unwrap_or(v1_val.outboundAddress);
 
         let ingress_hash = self.require_unique_ingress_ip(&v1_val.inboundAddress)?;
-
-        let deactivated_at_height = if v1_val.active { 0 } else { block_height };
 
         self.append_validator(
             v1_val.validatorAddress,

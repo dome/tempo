@@ -22,7 +22,7 @@ pub struct Args {
     signing_key: Option<PathBuf>,
 
     /// The file containing a share of the bls12-381 threshold signing key.
-    #[arg(long = "consensus.signing-share")]
+    #[arg(long = "consensus.signing-share", conflicts_with = "follow")]
     pub signing_share: Option<PathBuf>,
 
     /// The socket address that will be bound to listen for consensus communication from

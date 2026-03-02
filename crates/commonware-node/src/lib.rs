@@ -107,6 +107,7 @@ pub async fn run_consensus_stack(
         time_for_peer_response: config.wait_for_peer_response.into_duration(),
         views_to_track: config.views_to_track,
         views_until_leader_skip: config.inactive_views_until_leader_skip,
+        payload_interrupt_time: config.time_to_build_interrupt.into_duration(),
         new_payload_wait_time: config.time_to_build_proposal.into_duration(),
         time_to_build_subblock: config.time_to_build_subblock.into_duration(),
         subblock_broadcast_interval: config.subblock_broadcast_interval.into_duration(),

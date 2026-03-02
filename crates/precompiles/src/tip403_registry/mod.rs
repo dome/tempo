@@ -611,6 +611,15 @@ impl AuthRole {
     }
 }
 
+/// Returns `true` if the error indicates a failed policy lookup — the policy type is invalid
+/// or the policy doesn't exist. Covers the legacy `Panic(UnderOverflow)` sentinel (pre-T1C)
+/// and the typed TIP403 errors (T1C+/T2+).
+pub fn is_policy_lookup_error(e: &TempoPrecompileError) -> bool {
+    *e == TempoPrecompileError::under_overflow()
+        || *e == TIP403RegistryError::invalid_policy_type().into()
+        || *e == TIP403RegistryError::policy_not_found().into()
+}
+
 trait PolicyTypeExt {
     fn ensure_is_simple(&self) -> Result<u8>;
 }

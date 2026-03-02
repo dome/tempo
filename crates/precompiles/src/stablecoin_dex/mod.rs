@@ -19,7 +19,7 @@ use crate::{
     storage::{Handler, Mapping},
     tip20::{ITIP20, TIP20Token, is_tip20_prefix, validate_usd_currency},
     tip20_factory::TIP20Factory,
-    tip403_registry::{AuthRole, TIP403Registry},
+    tip403_registry::{AuthRole, TIP403Registry, is_policy_lookup_error},
 };
 use alloy::primitives::{Address, B256, U256};
 use tempo_precompiles_macros::contract;
@@ -1115,11 +1115,12 @@ impl StablecoinDEX {
         };
 
         let policy_id = TIP20Token::from_address(token)?.transfer_policy_id()?;
-        // If the policy lookup fails with a domain error (invalid type, not found, etc.),
-        // the order's policy is no longer valid — treat as stale. Only propagate system errors.
+        // If the policy lookup fails because the policy is invalid or missing, the order is stale.
+        // Pre-T1C this surfaces as Panic(UnderOverflow); T1C+ returns TIP403RegistryError variants.
         match TIP403Registry::new().is_authorized_as(policy_id, order.maker(), AuthRole::sender()) {
             Ok(true) => Err(StablecoinDEXError::order_not_stale().into()),
-            Err(e) if e.is_system_error() => Err(e),
+            Err(e) if is_policy_lookup_error(&e) => self.cancel_active_order(order),
+            Err(e) => Err(e),
             _ => self.cancel_active_order(order),
         }
     }
@@ -3982,6 +3983,94 @@ mod tests {
 
             Ok(())
         })
+    }
+
+    #[test]
+    fn test_cancel_stale_order_with_invalid_policy_type() -> eyre::Result<()> {
+        // An order whose token references a legacy-invalid policy (e.g. COMPOUND stored pre-T2)
+        // should be cancellable as stale across all specs. The error returned by `policy_type()`
+        // changes across hardforks:
+        //   - Pre-T1C: Panic(UnderOverflow)
+        //   - T1C+:    TIP403RegistryError::InvalidPolicyType
+        // Both are domain errors, so `cancel_stale_order` must treat them as "stale".
+        for spec in [TempoHardfork::T0, TempoHardfork::T1C, TempoHardfork::T2] {
+            // Create the order on T0 with a valid policy, then swap to an invalid one.
+            // We can't place an order with an invalid policy (ensure_transfer_authorized rejects).
+            let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T0);
+
+            let alice = Address::random();
+            let admin = Address::random();
+
+            let (order_id, base_token, invalid_policy_id) =
+                StorageCtx::enter(&mut storage, || {
+                    let mut exchange = StablecoinDEX::new();
+                    exchange.initialize()?;
+
+                    let mut base = TIP20Setup::create("USDC", "USDC", admin)
+                        .with_issuer(admin)
+                        .with_mint(alice, U256::from(MIN_ORDER_AMOUNT * 2))
+                        .with_approval(
+                            alice,
+                            exchange.address,
+                            U256::from(MIN_ORDER_AMOUNT * 2),
+                        )
+                        .apply()?;
+
+                    exchange.create_pair(base.address())?;
+                    let order_id =
+                        exchange.place(alice, base.address(), MIN_ORDER_AMOUNT, false, 0)?;
+
+                    // Now create an invalid policy (COMPOUND on T0 stores as __Invalid = 255)
+                    // and reassign the token to it, simulating a legacy-broken policy reference.
+                    let mut registry = TIP403Registry::new();
+                    let invalid_policy_id = registry.create_policy(
+                        admin,
+                        ITIP403Registry::createPolicyCall {
+                            admin,
+                            policyType: ITIP403Registry::PolicyType::COMPOUND,
+                        },
+                    )?;
+                    base.change_transfer_policy_id(
+                        admin,
+                        ITIP20::changeTransferPolicyIdCall {
+                            newPolicyId: invalid_policy_id,
+                        },
+                    )?;
+
+                    Ok::<_, TempoPrecompileError>((
+                        order_id,
+                        base.address(),
+                        invalid_policy_id,
+                    ))
+                })?;
+
+            // Upgrade to the target spec and attempt cancel
+            let mut storage = storage.with_spec(spec);
+            StorageCtx::enter(&mut storage, || {
+                let mut exchange = StablecoinDEX::new();
+
+                // Sanity: the policy lookup itself fails (the error we're testing tolerance of)
+                let registry = TIP403Registry::new();
+                let auth_result =
+                    registry.is_authorized_as(invalid_policy_id, alice, AuthRole::sender());
+                assert!(
+                    auth_result.is_err(),
+                    "[{spec:?}] is_authorized_as should fail for invalid policy type"
+                );
+
+                // cancel_stale_order must succeed — the domain error means "policy gone → stale"
+                exchange.cancel_stale_order(order_id)?;
+
+                assert_eq!(
+                    exchange.balance_of(alice, base_token)?,
+                    MIN_ORDER_AMOUNT,
+                    "[{spec:?}] alice should get her funds back"
+                );
+
+                Ok::<_, eyre::Report>(())
+            })?;
+        }
+        Ok(())
     }
 
     #[test]

@@ -1115,10 +1115,11 @@ impl StablecoinDEX {
         };
 
         let policy_id = TIP20Token::from_address(token)?.transfer_policy_id()?;
-        // Invalid policy ids throw under_overflow. Treat as unauthorized to clear the orders.
+        // If the policy lookup fails with a domain error (invalid type, not found, etc.),
+        // the order's policy is no longer valid — treat as stale. Only propagate system errors.
         match TIP403Registry::new().is_authorized_as(policy_id, order.maker(), AuthRole::sender()) {
             Ok(true) => Err(StablecoinDEXError::order_not_stale().into()),
-            Err(e) if e != TempoPrecompileError::under_overflow() => Err(e),
+            Err(e) if e.is_system_error() => Err(e),
             _ => self.cancel_active_order(order),
         }
     }

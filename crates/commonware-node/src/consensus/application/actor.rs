@@ -579,7 +579,7 @@ impl Inner<Init> {
             return_time_ms = self.payload_return_time.as_millis(),
             "sleeping before payload builder resolving"
         );
-        let payload_return_time_fut = context.sleep(self.payload_return_time);
+        let payload_return_time = context.current() + self.payload_return_time;
         context.sleep(self.payload_resolve_time).await;
 
         interrupt_handle.interrupt();
@@ -597,7 +597,7 @@ impl Inner<Init> {
             .and_then(|rsp| rsp.map_err(Into::<eyre::Report>::into))
             .wrap_err_with(|| format!("failed getting payload for payload ID `{payload_id}`"))?;
 
-        payload_return_time_fut.await;
+        context.sleep_until(payload_return_time).await;
 
         Ok(Block::from_execution_block(payload.block().clone()))
     }

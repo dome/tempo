@@ -4009,11 +4009,7 @@ mod tests {
                     let mut base = TIP20Setup::create("USDC", "USDC", admin)
                         .with_issuer(admin)
                         .with_mint(alice, U256::from(MIN_ORDER_AMOUNT * 2))
-                        .with_approval(
-                            alice,
-                            exchange.address,
-                            U256::from(MIN_ORDER_AMOUNT * 2),
-                        )
+                        .with_approval(alice, exchange.address, U256::from(MIN_ORDER_AMOUNT * 2))
                         .apply()?;
 
                     exchange.create_pair(base.address())?;
@@ -4037,11 +4033,7 @@ mod tests {
                         },
                     )?;
 
-                    Ok::<_, TempoPrecompileError>((
-                        order_id,
-                        base.address(),
-                        invalid_policy_id,
-                    ))
+                    Ok::<_, TempoPrecompileError>((order_id, base.address(), invalid_policy_id))
                 })?;
 
             // Upgrade to the target spec and attempt cancel

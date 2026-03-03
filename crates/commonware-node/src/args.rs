@@ -104,7 +104,9 @@ pub struct Args {
     #[arg(long = "consensus.time-to-build-interrupt", default_value = "200ms")]
     pub time_to_build_interrupt: PositiveDuration,
 
-    /// The amount of time this node will use to construct a block as a proposal.
+    /// The minimum amount of time this node waits before sending a proposal
+    ///
+    /// The intention is to keep block times stable even if there is low load on the network.
     /// This value should be well below `consensus.wait-for-proposal` to account
     /// for the leader to enter the view, build and broadcast the proposal, and
     /// have the other peers receive the proposal.

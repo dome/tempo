@@ -111,18 +111,28 @@ impl PolicyData {
     /// Decodes the raw `policy_type` u8 into a [`PolicyType`] enum.
     ///
     /// * `WHITELIST` and `BLACKLIST` are valid on all specs.
-    /// * `COMPOUND` is only valid (spec T2+).
-    /// * invalid values return `TIP403RegistryError::invalid_policy_type` (spec T1C+), otherwise `TempoPrecompileError::under_overflow`
+    /// * `COMPOUND` is only valid post T2+.
+    /// * invalid types throw `TIP403RegistryError::invalid_policy_type` (T1C+), otherwise `TempoPrecompileError::under_overflow`
     fn policy_type(&self) -> Result<PolicyType> {
+        let res = self.policy_type.try_into();
         let spec = StorageCtx.spec();
 
-        match self.policy_type.try_into() {
-            Ok(PolicyType::COMPOUND) if spec.is_t2() => Ok(PolicyType::COMPOUND),
-            Ok(PolicyType::COMPOUND) | Err(_) if spec.is_t1c() => {
-                Err(TIP403RegistryError::invalid_policy_type().into())
+        // T2+: WHITELIST, BLACKLIST, COMPOUND are valid
+        if spec.is_t2() {
+            return res.map_err(|_| TIP403RegistryError::invalid_policy_type().into());
+        }
+
+        // Pre T2: only WHITELIST, BLACKLIST, are valid
+        match res {
+            Ok(ty @ (PolicyType::WHITELIST | PolicyType::BLACKLIST)) => Ok(ty),
+            _ => {
+                // T1C+: revert with typed TIP403 errors
+                if spec.is_t1c() {
+                    Err(TIP403RegistryError::invalid_policy_type().into())
+                } else {
+                    Err(TempoPrecompileError::under_overflow())
+                }
             }
-            Ok(PolicyType::COMPOUND) | Err(_) => Err(TempoPrecompileError::under_overflow()),
-            Ok(ty) => Ok(ty),
         }
     }
 
@@ -612,12 +622,15 @@ impl AuthRole {
 }
 
 /// Returns `true` if the error indicates a failed policy lookup — the policy type is invalid
-/// or the policy doesn't exist. Covers the legacy `Panic(UnderOverflow)` sentinel (pre-T1C)
-/// and the typed TIP403 errors (T1C+/T2+).
+/// or the policy doesn't exist.
+/// Covers the legacy `Panic(UnderOverflow)` sentinel (pre-T1C) and typed TIP403 errors (T1C+).
 pub fn is_policy_lookup_error(e: &TempoPrecompileError) -> bool {
-    *e == TempoPrecompileError::under_overflow()
-        || *e == TIP403RegistryError::invalid_policy_type().into()
-        || *e == TIP403RegistryError::policy_not_found().into()
+    if StorageCtx.spec().is_t1c() {
+        *e == TIP403RegistryError::invalid_policy_type().into()
+            || *e == TIP403RegistryError::policy_not_found().into()
+    } else {
+        *e == TempoPrecompileError::under_overflow()
+    }
 }
 
 trait PolicyTypeExt {

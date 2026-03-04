@@ -5059,4 +5059,265 @@ mod tests {
             "MAX_TOKEN_LIMITS + 1 should be rejected, got: {result:?}"
         );
     }
+
+    /// Test `valid_before` boundary for expiring nonce transactions.
+    /// `valid_before` exactly at `current_time + TEMPO_EXPIRING_NONCE_MAX_EXPIRY_SECS` passes,
+    /// one second beyond fails with `ExpiringNonceValidBeforeTooFar`.
+    #[test]
+    fn test_valid_before_expiring_nonce_boundary() {
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let dummy_tx = create_aa_transaction(None, None);
+        let validator = setup_validator(&dummy_tx, current_time);
+        let max_allowed = current_time.saturating_add(TEMPO_EXPIRING_NONCE_MAX_EXPIRY_SECS);
+
+        let base_tx = TempoTransaction {
+            chain_id: 1,
+            max_priority_fee_per_gas: 1_000_000_000,
+            max_fee_per_gas: 20_000_000_000,
+            gas_limit: 1_000_000,
+            calls: vec![Call {
+                to: TxKind::Call(Address::random()),
+                value: U256::ZERO,
+                input: Default::default(),
+            }],
+            nonce_key: TEMPO_EXPIRING_NONCE_KEY,
+            nonce: 0,
+            fee_token: Some(address!("0000000000000000000000000000000000000002")),
+            ..Default::default()
+        };
+
+        // Exactly at max_allowed — should pass
+        let tx_at = TempoTransaction {
+            valid_before: Some(max_allowed),
+            ..base_tx.clone()
+        };
+        assert!(
+            validator.ensure_valid_conditionals(&tx_at).is_ok(),
+            "valid_before == max_allowed should pass"
+        );
+
+        // One beyond — should fail
+        let tx_over = TempoTransaction {
+            valid_before: Some(max_allowed + 1),
+            ..base_tx
+        };
+        assert!(
+            matches!(
+                validator.ensure_valid_conditionals(&tx_over),
+                Err(TempoPoolTransactionError::ExpiringNonceValidBeforeTooFar { .. })
+            ),
+            "valid_before > max_allowed should be rejected"
+        );
+    }
+
+    /// Test expiring nonce AA intrinsic gas: 50k gas passes (needs ~37k with 13k
+    /// EXPIRING_NONCE_GAS), 21k gas fails.
+    #[tokio::test]
+    async fn test_expiring_nonce_gas_boundary() {
+        use alloy_primitives::Signature;
+        use tempo_primitives::transaction::{
+            tempo_transaction::Call as TxCall,
+            tt_signature::{PrimitiveSignature, TempoSignature},
+            tt_signed::AASigned,
+        };
+
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let create_expiring_tx = |gas_limit: u64| {
+            let tx = TempoTransaction {
+                chain_id: 1,
+                max_priority_fee_per_gas: 1_000_000_000,
+                max_fee_per_gas: 20_000_000_000,
+                gas_limit,
+                calls: vec![TxCall {
+                    to: TxKind::Call(Address::from([1u8; 20])),
+                    value: U256::ZERO,
+                    input: alloy_primitives::Bytes::from(vec![0xd0, 0x9d, 0xe0, 0x8a]),
+                }],
+                nonce_key: TEMPO_EXPIRING_NONCE_KEY,
+                nonce: 0,
+                valid_before: Some(current_time + TEST_VALIDITY_WINDOW),
+                fee_token: Some(address!("0000000000000000000000000000000000000002")),
+                ..Default::default()
+            };
+            let signed = AASigned::new_unhashed(
+                tx,
+                TempoSignature::Primitive(PrimitiveSignature::Secp256k1(
+                    Signature::test_signature(),
+                )),
+            );
+            TempoPooledTransaction::new(TempoTxEnvelope::from(signed).try_into_recovered().unwrap())
+        };
+
+        let is_intrinsic_gas_err = |outcome: &TransactionValidationOutcome<_>| {
+            matches!(
+                outcome,
+                TransactionValidationOutcome::Invalid(_, err)
+                    if matches!(
+                        err.downcast_other_ref::<TempoPoolTransactionError>(),
+                        Some(TempoPoolTransactionError::InsufficientGasForAAIntrinsicCost { .. })
+                    )
+            )
+        };
+
+        // 50k gas: base ~24k + 13k EXPIRING_NONCE_GAS ≈ 37k — should pass
+        let tx_ok = create_expiring_tx(50_000);
+        let v = setup_validator(&tx_ok, current_time);
+        let out = v
+            .validate_transaction(TransactionOrigin::External, tx_ok)
+            .await;
+        assert!(
+            !is_intrinsic_gas_err(&out),
+            "50k gas should pass intrinsic gas check"
+        );
+
+        // 21k gas: not enough when EXPIRING_NONCE_GAS (13k) is added — should fail
+        let tx_low = create_expiring_tx(21_000);
+        let v = setup_validator(&tx_low, current_time);
+        let out = v
+            .validate_transaction(TransactionOrigin::External, tx_low)
+            .await;
+        assert!(
+            is_intrinsic_gas_err(&out),
+            "21k gas should fail intrinsic gas check"
+        );
+    }
+
+    /// Test `ensure_intrinsic_gas_tempo_tx` exact boundary for nonce=0.
+    /// nonce=0 adds new_account_cost (250k). Gas exactly at intrinsic passes, one below fails.
+    #[test]
+    fn test_ensure_intrinsic_gas_tempo_tx_nonce_zero_boundary() {
+        use tempo_chainspec::hardfork::TempoHardfork;
+        use tempo_revm::gas_params::tempo_gas_params;
+
+        let spec = TempoHardfork::T1;
+        let gas_params = tempo_gas_params(spec);
+
+        // build_eip1559 always produces nonce=0, so the 250k new_account_cost applies
+        let probe = TxBuilder::eip1559(Address::random())
+            .gas_limit(10_000_000)
+            .build_eip1559();
+        let base_gas = gas_params.initial_tx_gas(
+            probe.input(),
+            probe.is_create(),
+            probe.access_list().map(|l| l.len()).unwrap_or_default() as u64,
+            probe
+                .access_list()
+                .map(|l| l.iter().map(|i| i.storage_keys.len()).sum::<usize>())
+                .unwrap_or_default() as u64,
+            probe
+                .authorization_list()
+                .map(|l| l.len())
+                .unwrap_or_default() as u64,
+        );
+        let intrinsic = std::cmp::max(
+            base_gas.initial_gas + gas_params.get(GasId::new_account_cost()),
+            base_gas.floor_gas,
+        );
+
+        // Exactly at intrinsic — should pass
+        let tx_exact = TxBuilder::eip1559(Address::random())
+            .gas_limit(intrinsic)
+            .build_eip1559();
+        assert!(
+            ensure_intrinsic_gas_tempo_tx(&tx_exact, spec).is_ok(),
+            "gas == intrinsic should pass, intrinsic={intrinsic}"
+        );
+
+        // One below — should fail
+        let tx_below = TxBuilder::eip1559(Address::random())
+            .gas_limit(intrinsic - 1)
+            .build_eip1559();
+        assert!(
+            matches!(
+                ensure_intrinsic_gas_tempo_tx(&tx_below, spec),
+                Err(InvalidPoolTransactionError::IntrinsicGasTooLow)
+            ),
+            "gas == intrinsic-1 should fail"
+        );
+    }
+
+    /// Test AA floor gas (EIP-7623) boundary with large calldata.
+    /// 1M gas passes, 30k gas fails because floor_gas exceeds gas_limit.
+    #[tokio::test]
+    async fn test_aa_floor_gas_boundary() {
+        use alloy_primitives::Signature;
+        use tempo_primitives::transaction::{
+            tempo_transaction::Call as TxCall,
+            tt_signature::{PrimitiveSignature, TempoSignature},
+            tt_signed::AASigned,
+        };
+
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // 10k non-zero bytes → floor_gas well above 30k
+        let big_calldata = vec![0xFF; 10_000];
+        let create_tx = |gas_limit: u64| {
+            let tx = TempoTransaction {
+                chain_id: 1,
+                max_priority_fee_per_gas: 1_000_000_000,
+                max_fee_per_gas: 20_000_000_000,
+                gas_limit,
+                calls: vec![TxCall {
+                    to: TxKind::Call(Address::from([1u8; 20])),
+                    value: U256::ZERO,
+                    input: alloy_primitives::Bytes::from(big_calldata.clone()),
+                }],
+                nonce_key: U256::ZERO,
+                nonce: 0,
+                fee_token: Some(address!("0000000000000000000000000000000000000002")),
+                ..Default::default()
+            };
+            let signed = AASigned::new_unhashed(
+                tx,
+                TempoSignature::Primitive(PrimitiveSignature::Secp256k1(
+                    Signature::test_signature(),
+                )),
+            );
+            TempoPooledTransaction::new(TempoTxEnvelope::from(signed).try_into_recovered().unwrap())
+        };
+
+        let is_intrinsic_gas_err = |outcome: &TransactionValidationOutcome<_>| {
+            matches!(
+                outcome,
+                TransactionValidationOutcome::Invalid(_, err)
+                    if matches!(
+                        err.downcast_other_ref::<TempoPoolTransactionError>(),
+                        Some(TempoPoolTransactionError::InsufficientGasForAAIntrinsicCost { .. })
+                    )
+            )
+        };
+
+        // 1M gas — should pass
+        let tx_ok = create_tx(1_000_000);
+        let v = setup_validator(&tx_ok, current_time);
+        let out = v
+            .validate_transaction(TransactionOrigin::External, tx_ok)
+            .await;
+        assert!(
+            !is_intrinsic_gas_err(&out),
+            "1M gas should pass floor gas check"
+        );
+
+        // 30k gas — should fail (floor gas for 10k non-zero bytes >> 30k)
+        let tx_low = create_tx(30_000);
+        let v = setup_validator(&tx_low, current_time);
+        let out = v
+            .validate_transaction(TransactionOrigin::External, tx_low)
+            .await;
+        assert!(
+            is_intrinsic_gas_err(&out),
+            "30k gas should fail floor gas check"
+        );
+    }
 }

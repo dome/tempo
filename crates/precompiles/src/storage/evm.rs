@@ -696,7 +696,6 @@ mod tests {
         Ok(())
     }
 
-
     #[test]
     fn test_sstore_insufficient_gas_for_cold_load() -> eyre::Result<()> {
         // Test sstore with insufficient gas for cold storage cost
@@ -712,11 +711,8 @@ mod tests {
         let dynamic_gas = 25000u64;
         let required_gas = static_gas + dynamic_gas;
 
-        let mut provider = EvmPrecompileStorageProvider::new_with_gas_limit(
-            evm_internals,
-            &ctx.cfg,
-            required_gas,
-        );
+        let mut provider =
+            EvmPrecompileStorageProvider::new_with_gas_limit(evm_internals, &ctx.cfg, required_gas);
 
         let initial_gas = provider.gas_used();
         let address = address!("2000000000000000000000000000000000000001");
@@ -728,7 +724,10 @@ mod tests {
         let gas_after_sstore = provider.gas_used();
 
         // Verify gas was consumed
-        assert!(gas_after_sstore > initial_gas, "Gas should be consumed by sstore");
+        assert!(
+            gas_after_sstore > initial_gas,
+            "Gas should be consumed by sstore"
+        );
 
         // Verify the value was stored
         let loaded = provider.sload(address, key)?;
@@ -736,7 +735,10 @@ mod tests {
         let gas_after_sload = provider.gas_used();
 
         // Verify additional gas was consumed by sload
-        assert!(gas_after_sload > gas_after_sstore, "Gas should be consumed by sload");
+        assert!(
+            gas_after_sload > gas_after_sstore,
+            "Gas should be consumed by sload"
+        );
 
         Ok(())
     }
@@ -780,7 +782,10 @@ mod tests {
 
         let gas_after_sload = provider.gas_used();
         // Verify gas was consumed by the sload operation
-        assert!(gas_after_sload > initial_gas, "Gas should be consumed by sload");
+        assert!(
+            gas_after_sload > initial_gas,
+            "Gas should be consumed by sload"
+        );
 
         Ok(())
     }
@@ -812,7 +817,10 @@ mod tests {
 
         assert_eq!(retrieved_nonce, 0);
         let gas_after_load = provider.gas_used();
-        assert!(gas_after_load > initial_gas, "Gas should be consumed by with_account_info");
+        assert!(
+            gas_after_load > initial_gas,
+            "Gas should be consumed by with_account_info"
+        );
 
         Ok(())
     }
@@ -832,8 +840,11 @@ mod tests {
 
         let evm_internals =
             EvmInternals::new(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, &ctx.tx);
-        let mut provider =
-            EvmPrecompileStorageProvider::new_with_gas_limit(evm_internals, &ctx.cfg, total_gas_needed);
+        let mut provider = EvmPrecompileStorageProvider::new_with_gas_limit(
+            evm_internals,
+            &ctx.cfg,
+            total_gas_needed,
+        );
 
         let address = address!("5000000000000000000000000000000000000001");
         let mut prev_gas = provider.gas_used();
@@ -846,7 +857,10 @@ mod tests {
 
             // Verify gas was consumed per operation
             let current_gas = provider.gas_used();
-            assert!(current_gas > prev_gas, "Gas should increase with each sstore");
+            assert!(
+                current_gas > prev_gas,
+                "Gas should increase with each sstore"
+            );
             prev_gas = current_gas;
         }
 

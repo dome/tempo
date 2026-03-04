@@ -5739,7 +5739,6 @@ mod tests {
     #[tokio::test]
     async fn test_create_2d_nonce_account_creation_gas_boundary() {
         let current_time = 100u64;
-        let sender = Address::random();
         let nonce_key = U256::from(42);
 
         // Setup a CREATE call with 2D nonce (nonce_key != 0)

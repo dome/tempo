@@ -3,6 +3,28 @@
 //! This module provides helper functions for setting up and managing test environments,
 //! including test token creation and node setup for integration testing.
 
+/// Returns true when `TEMPO_PRE_HARDFORK_TEST=1` is set, indicating that the
+/// test suite should run against a chain spec with the latest hardforks
+/// (t1cTime, t2Time) deactivated. This simulates the "new binary, old fork"
+/// window that exists between deploying a new binary and activating a hardfork.
+pub(crate) fn is_pre_hardfork() -> bool {
+    std::env::var("TEMPO_PRE_HARDFORK_TEST").is_ok_and(|v| v == "1")
+}
+
+/// Skips the current test when running in pre-hardfork mode.
+///
+/// Use this for tests that require T1C/T2 features (V2 keychain signatures,
+/// 2D nonces, etc.) which are expected to fail when those hardforks are
+/// deactivated.
+macro_rules! skip_pre_hardfork {
+    () => {
+        if $crate::utils::is_pre_hardfork() {
+            eprintln!("skipping test in pre-hardfork mode");
+            return Ok(());
+        }
+    };
+}
+
 /// Standard test mnemonic phrase used across integration tests
 pub(crate) const TEST_MNEMONIC: &str =
     "test test test test test test test test test test test junk";
@@ -338,6 +360,12 @@ impl TestNodeBuilder {
         let mut genesis: serde_json::Value = serde_json::from_str(&self.genesis_content)?;
         if let Some(gas_limit) = &self.custom_gas_limit {
             genesis["gasLimit"] = serde_json::json!(gas_limit);
+        }
+
+        if is_pre_hardfork() {
+            let config = genesis["config"].as_object_mut().unwrap();
+            config.insert("t1cTime".to_string(), serde_json::json!(u64::MAX));
+            config.insert("t2Time".to_string(), serde_json::json!(u64::MAX));
         }
 
         Ok(TempoChainSpec::from_genesis(serde_json::from_value(

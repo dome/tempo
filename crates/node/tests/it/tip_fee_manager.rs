@@ -580,6 +580,7 @@ async fn test_fee_payer_transfer_whitelist_pre_t1c() -> eyre::Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_fee_payer_transfer_whitelist_post_t1c() -> eyre::Result<()> {
+    skip_pre_hardfork!();
     reth_tracing::init_test_tracing();
 
     let setup = TestNodeBuilder::new().build_http_only().await?;
@@ -722,6 +723,7 @@ async fn test_fee_payer_transfer_whitelist_post_t1c() -> eyre::Result<()> {
 /// [TIP-1007]: <https://docs.tempo.xyz/protocol/tips/tip-1007>
 #[tokio::test(flavor = "multi_thread")]
 async fn test_get_fee_token_eth_call() -> eyre::Result<()> {
+    skip_pre_hardfork!();
     reth_tracing::init_test_tracing();
 
     let setup = TestNodeBuilder::new().build_http_only().await?;
@@ -751,6 +753,7 @@ async fn test_get_fee_token_eth_call() -> eyre::Result<()> {
 /// [TIP-1007]: <https://docs.tempo.xyz/protocol/tips/tip-1007>
 #[tokio::test(flavor = "multi_thread")]
 async fn test_get_fee_token_during_execution() -> eyre::Result<()> {
+    skip_pre_hardfork!();
     reth_tracing::init_test_tracing();
 
     let setup = TestNodeBuilder::new().build_http_only().await?;

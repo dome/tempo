@@ -1,3 +1,6 @@
+#[macro_use]
+mod utils;
+
 mod backfill;
 mod base_fee;
 mod block_building;
@@ -16,7 +19,6 @@ mod tip20_factory;
 mod tip20_gas_fees;
 mod tip_fee_amm;
 mod tip_fee_manager;
-mod utils;
 
 use tempo_node as _;
 

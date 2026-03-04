@@ -2969,6 +2969,7 @@ async fn run_send_transaction_test_case(test_case: &SendTestCase) -> eyre::Resul
 #[tokio::test(flavor = "multi_thread")]
 // Covers key type (secp256k1/p256/webauthn) x fee payer; P256/WebAuthn also cover access key and batch calls.
 async fn test_eth_send_transaction_matrix() -> eyre::Result<()> {
+    skip_pre_hardfork!();
     reth_tracing::init_test_tracing();
 
     let transfer_amount = U256::from(1u64) * U256::from(10).pow(U256::from(6));
@@ -3180,6 +3181,7 @@ where
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_eth_send_raw_transaction_matrix() -> eyre::Result<()> {
+    skip_pre_hardfork!();
     reth_tracing::init_test_tracing();
 
     let test_matrix = [
@@ -3812,6 +3814,7 @@ async fn test_tempo_authorization_list() -> eyre::Result<()> {
 /// Test that keychain signatures in tempo_authorization_list are rejected.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_keychain_authorization_in_auth_list_is_skipped() -> eyre::Result<()> {
+    skip_pre_hardfork!();
     reth_tracing::init_test_tracing();
 
     // Setup test node with funded sender account
@@ -3941,6 +3944,7 @@ async fn test_keychain_authorization_in_auth_list_is_skipped() -> eyre::Result<(
 /// Outer sig is a normal secp256k1 primitive, only the auth list entry carries V1 keychain.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_v1_keychain_in_auth_list_rejected_post_t1c() -> eyre::Result<()> {
+    skip_pre_hardfork!();
     reth_tracing::init_test_tracing();
 
     let (setup, provider, sender_signer, sender_addr) = setup_test_with_funded_account().await?;
@@ -4064,6 +4068,7 @@ async fn test_aa_bump_nonce_on_failure() -> eyre::Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_aa_access_key() -> eyre::Result<()> {
+    skip_pre_hardfork!();
     use p256::{ecdsa::SigningKey, elliptic_curve::rand_core::OsRng};
     use tempo_primitives::transaction::TokenLimit;
 
@@ -4484,6 +4489,7 @@ async fn test_aa_access_key() -> eyre::Result<()> {
 /// Tests: zero public key, duplicate key, unauthorized authorize
 #[tokio::test]
 async fn test_aa_keychain_negative_cases() -> eyre::Result<()> {
+    skip_pre_hardfork!();
     use tempo_precompiles::account_keychain::{SignatureType, authorizeKeyCall};
     use tempo_primitives::transaction::TokenLimit;
 
@@ -4734,6 +4740,7 @@ async fn test_aa_keychain_negative_cases() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_transaction_key_authorization_and_spending_limits() -> eyre::Result<()> {
+    skip_pre_hardfork!();
     use alloy::sol_types::SolCall;
     use tempo_contracts::precompiles::ITIP20::{balanceOfCall, transferCall};
     use tempo_precompiles::account_keychain::updateSpendingLimitCall;
@@ -5014,6 +5021,7 @@ async fn test_transaction_key_authorization_and_spending_limits() -> eyre::Resul
 /// Test enforce_limits flag behavior with unlimited and restricted spending keys
 #[tokio::test]
 async fn test_aa_keychain_enforce_limits() -> eyre::Result<()> {
+    skip_pre_hardfork!();
     reth_tracing::init_test_tracing();
 
     println!("\n=== Testing enforce_limits Flag Behavior ===\n");
@@ -5290,6 +5298,7 @@ async fn test_aa_keychain_enforce_limits() -> eyre::Result<()> {
 /// - expiry < block.timestamp (past) - should fail during block building (rejected by builder)
 #[tokio::test]
 async fn test_aa_keychain_expiry() -> eyre::Result<()> {
+    skip_pre_hardfork!();
     reth_tracing::init_test_tracing();
 
     println!("\n=== Testing Key Expiry Functionality ===\n");
@@ -5602,6 +5611,7 @@ async fn test_aa_keychain_expiry() -> eyre::Result<()> {
 /// Tests both positive (authorized key) and negative (unauthorized key) cases in a single test
 #[tokio::test]
 async fn test_aa_keychain_rpc_validation() -> eyre::Result<()> {
+    skip_pre_hardfork!();
     use p256::{ecdsa::SigningKey, elliptic_curve::rand_core::OsRng};
     use tempo_primitives::transaction::TokenLimit;
 
@@ -5990,6 +6000,7 @@ async fn test_aa_keychain_rpc_validation() -> eyre::Result<()> {
 /// Tests both secp256k1 and P256.
 #[tokio::test]
 async fn test_v2_keychain_blocks_cross_account_replay() -> eyre::Result<()> {
+    skip_pre_hardfork!();
     reth_tracing::init_test_tracing();
 
     let mut setup = TestNodeBuilder::new().build_with_node_access().await?;
@@ -6342,6 +6353,7 @@ async fn test_propagate_2d_transactions() -> eyre::Result<()> {
 /// 2. A KeyAuthorization with chain_id = 0 (wildcard) is accepted on any chain
 #[tokio::test]
 async fn test_aa_key_authorization_chain_id_validation() -> eyre::Result<()> {
+    skip_pre_hardfork!();
     use tempo_primitives::transaction::TokenLimit;
 
     let mut setup = TestNodeBuilder::new().build_with_node_access().await?;
@@ -6622,6 +6634,7 @@ async fn test_aa_create_correct_contract_address() -> eyre::Result<()> {
 /// Verifies that transactions signed with a revoked access key cannot be executed.
 #[tokio::test]
 async fn test_aa_keychain_revocation_toctou_dos() -> eyre::Result<()> {
+    skip_pre_hardfork!();
     reth_tracing::init_test_tracing();
 
     println!("\n=== Testing AA Keychain Revocation TOCTOU DoS ===\n");
@@ -7396,6 +7409,7 @@ async fn test_aa_expiring_nonce_independent_from_protocol_nonce() -> eyre::Resul
 /// 4. Transactions should be evicted from the mempool
 #[tokio::test]
 async fn test_aa_keychain_spending_limit_toctou_dos() -> eyre::Result<()> {
+    skip_pre_hardfork!();
     use tempo_precompiles::account_keychain::updateSpendingLimitCall;
 
     reth_tracing::init_test_tracing();
@@ -8372,6 +8386,7 @@ async fn test_e2e_fill_sign_send_matrix() -> eyre::Result<()> {
 /// Also verifies that V1 signatures are rejected (current chain runs post-T1C).
 #[tokio::test(flavor = "multi_thread")]
 async fn test_aa_keychain_v2_signature() -> eyre::Result<()> {
+    skip_pre_hardfork!();
     reth_tracing::init_test_tracing();
 
     let mut setup = TestNodeBuilder::new().build_with_node_access().await?;

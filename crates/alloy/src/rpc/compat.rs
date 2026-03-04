@@ -9,6 +9,8 @@ use reth_rpc_convert::{
     transaction::FromConsensusHeader,
 };
 use reth_rpc_eth_types::EthApiError;
+use std::any::Any;
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_evm::TempoBlockEnv;
 use tempo_primitives::{
     SignatureType, TempoHeader, TempoSignature, TempoTxEnvelope, TempoTxType,
@@ -93,7 +95,7 @@ impl TryIntoSimTx<TempoTxEnvelope> for TempoTransactionRequest {
 impl TryIntoTxEnv<TempoTxEnv, TempoBlockEnv> for TempoTransactionRequest {
     type Err = EthApiError;
 
-    fn try_into_tx_env<Spec>(
+    fn try_into_tx_env<Spec: 'static>(
         self,
         evm_env: &EvmEnv<Spec, TempoBlockEnv>,
     ) -> Result<TempoTxEnv, Self::Err> {
@@ -124,6 +126,11 @@ impl TryIntoTxEnv<TempoTxEnv, TempoBlockEnv> for TempoTransactionRequest {
             fee_payer_signature: _,
         } = self;
 
+        // Determine if T1C is active from the spec to create the correct mock keychain version.
+        let is_t1c = (&evm_env.cfg_env.spec as &dyn Any)
+            .downcast_ref::<TempoHardfork>()
+            .is_some_and(|h| h.is_t1c());
+
         Ok(TempoTxEnv {
             fee_token,
             is_system_tx: false,
@@ -138,8 +145,13 @@ impl TryIntoTxEnv<TempoTxEnv, TempoBlockEnv> for TempoTransactionRequest {
                 // If key_type is not provided, default to secp256k1
                 // For Keychain signatures, use the caller's address as the root key address
                 let key_type = key_type.unwrap_or(SignatureType::Secp256k1);
-                let mock_signature =
-                    create_mock_tempo_signature(&key_type, key_data.as_ref(), key_id, caller_addr);
+                let mock_signature = create_mock_tempo_signature(
+                    &key_type,
+                    key_data.as_ref(),
+                    key_id,
+                    caller_addr,
+                    is_t1c,
+                );
 
                 let mut calls = calls;
                 if let Some(to) = &inner.to {
@@ -190,19 +202,27 @@ impl TryIntoTxEnv<TempoTxEnv, TempoBlockEnv> for TempoTransactionRequest {
 /// - `key_data`: Type-specific data (e.g., WebAuthn size)
 /// - `key_id`: If Some, wraps the signature in a Keychain wrapper (+3,000 gas for key validation)
 /// - `caller_addr`: The transaction caller address (used as root key address for Keychain)
+/// - `is_t1c`: Whether T1C is active — determines keychain version (V1 pre-T1C, V2 post-T1C)
 fn create_mock_tempo_signature(
     key_type: &SignatureType,
     key_data: Option<&Bytes>,
     key_id: Option<Address>,
     caller_addr: alloy_primitives::Address,
+    is_t1c: bool,
 ) -> TempoSignature {
     use tempo_primitives::transaction::tt_signature::{KeychainSignature, TempoSignature};
 
     let inner_sig = create_mock_primitive_signature(key_type, key_data.cloned());
 
     if key_id.is_some() {
-        // For Keychain signatures, the root_key_address is the caller (account owner)
-        TempoSignature::Keychain(KeychainSignature::new(caller_addr, inner_sig))
+        // Use the keychain version matching the active hardfork to pass handler validation.
+        // Gas cost is identical for V1 and V2.
+        let keychain_sig = if is_t1c {
+            KeychainSignature::new(caller_addr, inner_sig)
+        } else {
+            KeychainSignature::new_v1(caller_addr, inner_sig)
+        };
+        TempoSignature::Keychain(keychain_sig)
     } else {
         TempoSignature::Primitive(inner_sig)
     }

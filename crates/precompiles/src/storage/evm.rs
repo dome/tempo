@@ -101,7 +101,7 @@ impl<'a> PrecompileStorageProvider for EvmPrecompileStorageProvider<'a> {
 
         let mut insufficient_gas_for_cold_load = false;
         if self.spec.is_t2() {
-            self.deduct_gas(self.gas_params.sstore_static_gas())?;
+            self.deduct_gas(self.gas_params.warm_storage_read_cost())?;
             insufficient_gas_for_cold_load = self.gas_remaining < additional_cost;
         }
 
@@ -308,6 +308,7 @@ mod tests {
         database::{CacheDB, EmptyDB},
         interpreter::StateLoad,
     };
+    use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_evm::TempoEvmFactory;
 
     #[test]
@@ -596,6 +597,7 @@ mod tests {
         let db = CacheDB::new(EmptyDB::new());
         let mut evm = TempoEvmFactory::default().create_evm(db, EvmEnv::default());
         let ctx = evm.ctx_mut();
+        ctx.cfg.spec = TempoHardfork::T2;
         let evm_internals =
             EvmInternals::new(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, &ctx.tx);
         let mut provider = EvmPrecompileStorageProvider::new_max_gas(evm_internals, &ctx.cfg);
@@ -618,6 +620,7 @@ mod tests {
         let db = CacheDB::new(EmptyDB::new());
         let mut evm = TempoEvmFactory::default().create_evm(db, EvmEnv::default());
         let ctx = evm.ctx_mut();
+        ctx.cfg.spec = TempoHardfork::T2;
         let evm_internals =
             EvmInternals::new(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, &ctx.tx);
 
@@ -647,6 +650,7 @@ mod tests {
         let db = CacheDB::new(EmptyDB::new());
         let mut evm = TempoEvmFactory::default().create_evm(db, EvmEnv::default());
         let ctx = evm.ctx_mut();
+        ctx.cfg.spec = TempoHardfork::T2;
         let evm_internals =
             EvmInternals::new(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, &ctx.tx);
 
@@ -671,6 +675,7 @@ mod tests {
         let db = CacheDB::new(EmptyDB::new());
         let mut evm = TempoEvmFactory::default().create_evm(db, EvmEnv::default());
         let ctx = evm.ctx_mut();
+        ctx.cfg.spec = TempoHardfork::T2;
         let evm_internals =
             EvmInternals::new(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, &ctx.tx);
 
@@ -698,10 +703,11 @@ mod tests {
 
     #[test]
     fn test_sstore_insufficient_gas_for_cold_load() -> eyre::Result<()> {
-        // Test sstore with insufficient gas for cold storage cost
+        // Test sstore with insufficient gas for cold storage cost in T2 fork
         let db = CacheDB::new(EmptyDB::new());
         let mut evm = TempoEvmFactory::default().create_evm(db, EvmEnv::default());
         let ctx = evm.ctx_mut();
+        ctx.cfg.spec = TempoHardfork::T2;
         let evm_internals =
             EvmInternals::new(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, &ctx.tx);
 

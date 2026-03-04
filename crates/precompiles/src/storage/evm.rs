@@ -99,15 +99,22 @@ impl<'a> PrecompileStorageProvider for EvmPrecompileStorageProvider<'a> {
     ) -> Result<(), TempoPrecompileError> {
         let additional_cost = self.gas_params.cold_account_additional_cost();
 
+        let mut insufficient_gas_for_cold_load = false;
+        if self.spec.is_t2() {
+            self.deduct_gas(self.gas_params.sstore_static_gas())?;
+            insufficient_gas_for_cold_load = self.gas_remaining < additional_cost;
+        }
+
         let mut account = self
             .internals
-            .load_account_mut_skip_cold_load(address, false)?;
+            .load_account_mut_skip_cold_load(address, insufficient_gas_for_cold_load)?;
 
-        // TODO(rakita) can be moved to the beginning of the function. Requires fork.
-        deduct_gas(
-            &mut self.gas_remaining,
-            self.gas_params.warm_storage_read_cost(),
-        )?;
+        if !self.spec.is_t2() {
+            deduct_gas(
+                &mut self.gas_remaining,
+                self.gas_params.warm_storage_read_cost(),
+            )?;
+        }
 
         // dynamic gas
         if account.is_cold {
@@ -127,13 +134,24 @@ impl<'a> PrecompileStorageProvider for EvmPrecompileStorageProvider<'a> {
         key: U256,
         value: U256,
     ) -> Result<(), TempoPrecompileError> {
-        let result = self
-            .internals
-            .load_account_mut(address)?
-            .sstore(key, value, false)?;
+        let mut insufficient_gas_for_cold_load = false;
 
-        // TODO(rakita) can be moved to the beginning of the function. Requires fork.
-        self.deduct_gas(self.gas_params.sstore_static_gas())?;
+        // do static deduction before loading storage to avoid cheap loads.
+        if self.spec.is_t2() {
+            self.deduct_gas(self.gas_params.sstore_static_gas())?;
+            insufficient_gas_for_cold_load =
+                self.gas_remaining < self.gas_params.cold_storage_additional_cost();
+        }
+
+        let result = self.internals.load_account_mut(address)?.sstore(
+            key,
+            value,
+            insufficient_gas_for_cold_load,
+        )?;
+
+        if !self.spec.is_t2() {
+            self.deduct_gas(self.gas_params.sstore_static_gas())?;
+        }
 
         // dynamic gas
         self.deduct_gas(
@@ -180,19 +198,29 @@ impl<'a> PrecompileStorageProvider for EvmPrecompileStorageProvider<'a> {
     fn sload(&mut self, address: Address, key: U256) -> Result<U256, TempoPrecompileError> {
         let additional_cost = self.gas_params.cold_storage_additional_cost();
 
+        let mut insufficient_gas_for_cold_load = false;
+
+        // do static before loading account to avoid cheap loads.
+        if self.spec.is_t2() {
+            self.deduct_gas(self.gas_params.warm_storage_read_cost())?;
+            insufficient_gas_for_cold_load = self.gas_remaining < additional_cost;
+        }
+
         let value;
         let is_cold;
         {
             let mut account = self.internals.load_account_mut(address)?;
-            let val = account.sload(key, false)?;
+            let val = account.sload(key, insufficient_gas_for_cold_load)?;
 
             value = val.present_value;
             is_cold = val.is_cold;
         };
 
-        // TODO(rakita) can be moved to the beginning of the function. Requires fork.
-        self.deduct_gas(self.gas_params.warm_storage_read_cost())?;
+        if !self.spec.is_t2() {
+            self.deduct_gas(self.gas_params.warm_storage_read_cost())?;
+        }
 
+        // dynamic gas
         if is_cold {
             self.deduct_gas(additional_cost)?;
         }

@@ -2969,7 +2969,6 @@ async fn run_send_transaction_test_case(test_case: &SendTestCase) -> eyre::Resul
 #[tokio::test(flavor = "multi_thread")]
 // Covers key type (secp256k1/p256/webauthn) x fee payer; P256/WebAuthn also cover access key and batch calls.
 async fn test_eth_send_transaction_matrix() -> eyre::Result<()> {
-    skip_pre_hardfork!();
     reth_tracing::init_test_tracing();
 
     let transfer_amount = U256::from(1u64) * U256::from(10).pow(U256::from(6));
@@ -3181,7 +3180,6 @@ where
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_eth_send_raw_transaction_matrix() -> eyre::Result<()> {
-    skip_pre_hardfork!();
     reth_tracing::init_test_tracing();
 
     let test_matrix = [

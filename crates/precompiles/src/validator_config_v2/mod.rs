@@ -72,7 +72,7 @@ pub struct ValidatorConfigV2 {
     address_to_index: Mapping<Address, u64>,
     pubkey_to_index: Mapping<B256, u64>,
     next_dkg_ceremony: u64,
-    migration_skipped_count: u64,
+    migration_skipped_count: u16,
     active_ingress_ips: Mapping<B256, bool>,
     active_indices: Vec<u64>,
 }
@@ -614,7 +614,8 @@ impl ValidatorConfigV2 {
 
         let v1 = v1();
         let v1_count = v1.validator_count()?;
-        let total_processed = self.validator_count()? + self.migration_skipped_count.read()?;
+        let skipped = self.migration_skipped_count.read()?;
+        let total_processed = self.validator_count()? + u64::from(skipped);
 
         if call.idx + total_processed + 1 != v1_count {
             Err(ValidatorConfigV2Error::invalid_migration_index())?
@@ -622,29 +623,31 @@ impl ValidatorConfigV2 {
 
         let v1_val = v1.validators(v1.validators_array(call.idx)?)?;
 
-        if PublicKey::decode(v1_val.publicKey.as_slice()).is_err()
-            || v1_val.validatorAddress.is_zero()
-        {
+        // Skip if public key decoding fails
+        if PublicKey::decode(v1_val.publicKey.as_slice()).is_err() {
             self.migration_skipped_count
-                .write(self.migration_skipped_count.read()? + 1)?;
+                .write(skipped.saturating_add(1))?;
             return Ok(());
         }
 
+        // Skip if egress decoding fails
         let egress = match v1_val.outboundAddress.parse::<std::net::SocketAddr>() {
             Ok(sa) => sa.ip().to_string(),
             Err(_) => {
                 self.migration_skipped_count
-                    .write(self.migration_skipped_count.read()? + 1)?;
+                    .write(skipped.saturating_add(1))?;
                 return Ok(());
             }
         };
 
+        // Skip if public key is a duplicate of an existing entry
         if self.pubkey_to_index[v1_val.publicKey].read()? != 0 {
             self.migration_skipped_count
-                .write(self.migration_skipped_count.read()? + 1)?;
+                .write(skipped.saturating_add(1))?;
             return Ok(());
         }
 
+        // Skip if address is a duplicate of an existing entry
         let addr_idx = self.address_to_index[v1_val.validatorAddress].read()?;
         if addr_idx != 0
             && self.validators[(addr_idx - 1) as usize]
@@ -658,9 +661,10 @@ impl ValidatorConfigV2 {
         let now_active = v1_val.active;
         let ingress_hash = Self::ingress_ip_key(&v1_val.inboundAddress)?;
 
+        // Skip if ingress ip hash is a duplicate of an existing entry
         if now_active && self.active_ingress_ips[ingress_hash].read()? {
             self.migration_skipped_count
-                .write(self.migration_skipped_count.read()? + 1)?;
+                .write(skipped.saturating_add(1))?;
             return Ok(());
         }
 
@@ -686,7 +690,7 @@ impl ValidatorConfigV2 {
 
         // NOTE: this count comparison is sufficient because `add_validator` and
         // `rotate_validator` are blocked until the contract is initialized.
-        if self.validator_count()? + self.migration_skipped_count.read()? < v1.validator_count()? {
+        if self.validator_count()? + u64::from(skipped) < v1.validator_count()? {
             Err(ValidatorConfigV2Error::migration_not_complete())?
         }
 

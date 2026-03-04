@@ -4904,4 +4904,159 @@ mod tests {
             "Gas limit one below intrinsic gas should fail, got: {result:?}"
         );
     }
+
+    /// Test `ensure_valid_conditionals` boundary for `valid_after`.
+    /// Since `ensure_valid_conditionals` uses `SystemTime::now()` for the `valid_after` check
+    /// (not tip_timestamp), we set `aa_valid_after_max_secs = 0` so the boundary is `now()`.
+    /// This kills mutants that flip `>` to `>=` on the `valid_after > max_allowed` check.
+    #[test]
+    fn test_valid_after_exact_boundary_unit() {
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let base_tx = TempoTransaction {
+            chain_id: 1,
+            max_priority_fee_per_gas: 1_000_000_000,
+            max_fee_per_gas: 20_000_000_000,
+            gas_limit: 1_000_000,
+            calls: vec![Call {
+                to: TxKind::Call(Address::random()),
+                value: U256::ZERO,
+                input: Default::default(),
+            }],
+            nonce_key: U256::ZERO,
+            nonce: 0,
+            valid_after: None,
+            valid_before: None,
+            fee_token: Some(address!("0000000000000000000000000000000000000002")),
+            ..Default::default()
+        };
+
+        // Build a validator with aa_valid_after_max_secs = 0 so max_allowed = now()
+        let dummy_tx = create_aa_transaction(None, None);
+        let provider = MockEthProvider::<TempoPrimitives>::new()
+            .with_chain_spec(Arc::unwrap_or_clone(MODERATO.clone()));
+        provider.add_account(dummy_tx.sender(), ExtendedAccount::new(0, U256::ZERO));
+        provider.add_block(B256::random(), Block::default());
+        let inner =
+            EthTransactionValidatorBuilder::new(provider.clone(), TempoEvmConfig::mainnet())
+                .disable_balance_check()
+                .build(InMemoryBlobStore::default());
+        let amm_cache =
+            AmmLiquidityCache::new(provider).expect("failed to setup AmmLiquidityCache");
+        let validator = TempoTransactionValidator::new(
+            inner,
+            0, // aa_valid_after_max_secs = 0
+            DEFAULT_MAX_TEMPO_AUTHORIZATIONS,
+            amm_cache,
+        );
+        let mock_block = create_mock_block(current_time);
+        validator.on_new_head_block(&mock_block);
+
+        // valid_after = 0 (in the past) — should pass since 0 <= now() + 0
+        let tx_past = TempoTransaction {
+            valid_after: Some(0),
+            ..base_tx.clone()
+        };
+        let result = validator.ensure_valid_conditionals(&tx_past);
+        assert!(
+            result.is_ok(),
+            "valid_after in the past should pass, got: {result:?}"
+        );
+
+        // valid_after far in the future — should fail since it exceeds now() + 0
+        let tx_future = TempoTransaction {
+            valid_after: Some(current_time + 3600),
+            ..base_tx.clone()
+        };
+        let result = validator.ensure_valid_conditionals(&tx_future);
+        assert!(
+            matches!(
+                result,
+                Err(TempoPoolTransactionError::InvalidValidAfter { .. })
+            ),
+            "valid_after far in the future should be rejected, got: {result:?}"
+        );
+    }
+
+    /// Test `MAX_TOKEN_LIMITS` boundary: exactly at limit is accepted, one above is rejected.
+    /// Tests `ensure_aa_field_limits` directly since keychain validation runs first in the
+    /// full pipeline and would reject the test signature.
+    #[test]
+    fn test_aa_token_limits_boundary() {
+        use tempo_primitives::transaction::{KeyAuthorization, SignatureType, TokenLimit};
+
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Exactly MAX_TOKEN_LIMITS should pass
+        let limits_at: Vec<TokenLimit> = (0..MAX_TOKEN_LIMITS)
+            .map(|_| TokenLimit {
+                token: Address::random(),
+                limit: U256::from(1000),
+            })
+            .collect();
+
+        let key_auth_at = KeyAuthorization {
+            chain_id: 1,
+            key_type: SignatureType::Secp256k1,
+            key_id: Address::random(),
+            expiry: None,
+            limits: Some(limits_at),
+        };
+        let signed_at =
+            key_auth_at.into_signed(PrimitiveSignature::Secp256k1(Signature::test_signature()));
+
+        let tx_at = TxBuilder::aa(Address::random())
+            .fee_token(address!("0000000000000000000000000000000000000002"))
+            .key_authorization(signed_at)
+            .build();
+
+        let dummy = create_aa_transaction(None, None);
+        let validator = setup_validator(&dummy, current_time);
+        let result = validator.ensure_aa_field_limits(&tx_at);
+        assert!(
+            result.is_ok(),
+            "Exactly MAX_TOKEN_LIMITS should pass, got: {result:?}"
+        );
+
+        // MAX_TOKEN_LIMITS + 1 should fail
+        let limits_over: Vec<TokenLimit> = (0..MAX_TOKEN_LIMITS + 1)
+            .map(|_| TokenLimit {
+                token: Address::random(),
+                limit: U256::from(1000),
+            })
+            .collect();
+
+        let key_auth_over = KeyAuthorization {
+            chain_id: 1,
+            key_type: SignatureType::Secp256k1,
+            key_id: Address::random(),
+            expiry: None,
+            limits: Some(limits_over),
+        };
+        let signed_over =
+            key_auth_over.into_signed(PrimitiveSignature::Secp256k1(Signature::test_signature()));
+
+        let tx_over = TxBuilder::aa(Address::random())
+            .fee_token(address!("0000000000000000000000000000000000000002"))
+            .key_authorization(signed_over)
+            .build();
+
+        let result = validator.ensure_aa_field_limits(&tx_over);
+        assert!(
+            matches!(
+                result,
+                Err(TempoPoolTransactionError::TooManyTokenLimits {
+                    count,
+                    max_allowed,
+                }) if count == MAX_TOKEN_LIMITS + 1 && max_allowed == MAX_TOKEN_LIMITS
+            ),
+            "MAX_TOKEN_LIMITS + 1 should be rejected, got: {result:?}"
+        );
+    }
 }

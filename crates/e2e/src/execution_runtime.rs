@@ -335,7 +335,7 @@ impl ExecutionRuntime {
             rt.block_on(async move {
                 while let Some(msg) = from_handle.recv().await {
                     // create a new task manager for the new node instance
-                    let task_runtime = TaskRuntime::with_existing_handle(tokio::runtime::Handle::current()).expect("failed to build task runtime");
+                    let task_runtime = TaskRuntime::test();
                     match msg {
                         Message::AddValidator(add_validator) => {
                             let AddValidator {

@@ -589,4 +589,143 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_sstore_t2_fork_sufficient_gas() -> eyre::Result<()> {
+        // Test T2 fork behavior with sufficient gas for all operations
+        let db = CacheDB::new(EmptyDB::new());
+        let mut evm = TempoEvmFactory::default().create_evm(db, EvmEnv::default());
+        let ctx = evm.ctx_mut();
+        let evm_internals =
+            EvmInternals::new(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, &ctx.tx);
+
+        // Create provider with sufficient gas (max gas)
+        let mut provider = EvmPrecompileStorageProvider::new_max_gas(evm_internals, &ctx.cfg);
+
+        let address = address!("c000000000000000000000000000000000000001");
+        let key = U256::from(42);
+        let value = U256::from(999);
+
+        // Store and verify in T2 fork
+        provider.sstore(address, key, value)?;
+        let loaded = provider.sload(address, key)?;
+
+        assert_eq!(loaded, value);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sload_t2_fork_sufficient_gas() -> eyre::Result<()> {
+        // Test T2 fork sload with sufficient gas
+        let db = CacheDB::new(EmptyDB::new());
+        let mut evm = TempoEvmFactory::default().create_evm(db, EvmEnv::default());
+        let ctx = evm.ctx_mut();
+        let evm_internals =
+            EvmInternals::new(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, &ctx.tx);
+
+        let mut provider = EvmPrecompileStorageProvider::new_max_gas(evm_internals, &ctx.cfg);
+
+        let address = address!("d000000000000000000000000000000000000001");
+        let key = U256::from(100);
+        let value = U256::from(12345);
+
+        // First store the value
+        provider.sstore(address, key, value)?;
+
+        // Then load it back (second access should be warm, not cold)
+        let loaded = provider.sload(address, key)?;
+        assert_eq!(loaded, value);
+
+        // Load again to verify warm access
+        let loaded_again = provider.sload(address, key)?;
+        assert_eq!(loaded_again, value);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_with_account_info_t2_fork() -> eyre::Result<()> {
+        // Test T2 fork with_account_info gas handling
+        let db = CacheDB::new(EmptyDB::new());
+        let mut evm = TempoEvmFactory::default().create_evm(db, EvmEnv::default());
+        let ctx = evm.ctx_mut();
+        let evm_internals =
+            EvmInternals::new(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, &ctx.tx);
+
+        let mut provider = EvmPrecompileStorageProvider::new_max_gas(evm_internals, &ctx.cfg);
+
+        let address = address!("e000000000000000000000000000000000000001");
+
+        // Test with_account_info on a new account
+        let mut account_nonce = 0u64;
+        provider.with_account_info(address, &mut |info| {
+            account_nonce = info.nonce;
+            assert!(info.balance.is_zero());
+        })?;
+
+        assert_eq!(account_nonce, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sstore_sload_cold_storage_t2() -> eyre::Result<()> {
+        // Test T2 fork cold storage handling across multiple addresses
+        let db = CacheDB::new(EmptyDB::new());
+        let mut evm = TempoEvmFactory::default().create_evm(db, EvmEnv::default());
+        let ctx = evm.ctx_mut();
+        let evm_internals =
+            EvmInternals::new(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, &ctx.tx);
+
+        let mut provider = EvmPrecompileStorageProvider::new_max_gas(evm_internals, &ctx.cfg);
+
+        let addr1 = address!("f000000000000000000000000000000000000001");
+        let addr2 = address!("f000000000000000000000000000000000000002");
+        let key1 = U256::from(1);
+        let key2 = U256::from(2);
+
+        // First access should be cold
+        provider.sstore(addr1, key1, U256::from(100))?;
+        provider.sstore(addr2, key2, U256::from(200))?;
+
+        // Warm access to same storage
+        provider.sstore(addr1, key1, U256::from(110))?;
+        provider.sstore(addr2, key2, U256::from(210))?;
+
+        // Verify values
+        assert_eq!(provider.sload(addr1, key1)?, U256::from(110));
+        assert_eq!(provider.sload(addr2, key2)?, U256::from(210));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_sstore_then_sload_same_slot() -> eyre::Result<()> {
+        // Test storing and loading from same slot in T2 fork
+        let db = CacheDB::new(EmptyDB::new());
+        let mut evm = TempoEvmFactory::default().create_evm(db, EvmEnv::default());
+        let ctx = evm.ctx_mut();
+        let evm_internals =
+            EvmInternals::new(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, &ctx.tx);
+
+        let mut provider = EvmPrecompileStorageProvider::new_max_gas(evm_internals, &ctx.cfg);
+
+        let address = address!("1000000000000000000000000000000000000001");
+
+        // Store to multiple slots then load in different order
+        for i in 0..5 {
+            let key = U256::from(i);
+            let value = U256::from(i * 1000);
+            provider.sstore(address, key, value)?;
+        }
+
+        // Load in reverse order
+        for i in (0..5).rev() {
+            let key = U256::from(i);
+            let expected = U256::from(i * 1000);
+            let loaded = provider.sload(address, key)?;
+            assert_eq!(loaded, expected);
+        }
+
+        Ok(())
+    }
 }

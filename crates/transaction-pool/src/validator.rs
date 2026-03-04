@@ -3868,6 +3868,82 @@ mod tests {
                 "Expired key authorization rejection should NOT be a bad transaction (timing-sensitive)"
             );
         }
+
+        /// Test keychain expiry caching boundary: `expiry < u64::MAX` should set key_expiry,
+        /// `expiry == u64::MAX` should NOT set key_expiry.
+        #[test]
+        fn test_keychain_expiry_caching_boundary() {
+            let access_key_signer = PrivateKeySigner::random();
+            let access_key_address: Address = access_key_signer.address();
+            let user_address = Address::random();
+            let current_time = 1000u64;
+
+            // expiry == u64::MAX - 1 — should cache expiry
+            let transaction = TxBuilder::aa(Address::random())
+                .fee_token(PATH_USD_ADDRESS)
+                .gas_limit(1_000_000)
+                .build_keychain(user_address, &access_key_signer);
+
+            let slot_value = AuthorizedKey {
+                signature_type: 0,
+                expiry: u64::MAX - 1,
+                enforce_limits: false,
+                is_revoked: false,
+            }
+            .encode_to_slot();
+
+            let validator = setup_validator_with_keychain_storage_and_timestamp(
+                &transaction,
+                user_address,
+                access_key_address,
+                Some(slot_value),
+                current_time,
+            );
+            let state_provider = validator.inner.client().latest().unwrap();
+            let result = validator.validate_against_keychain(&transaction, &state_provider);
+            assert!(
+                result.is_ok() && result.unwrap().is_ok(),
+                "expiry < u64::MAX should pass keychain validation"
+            );
+            assert_eq!(
+                transaction.key_expiry(),
+                Some(u64::MAX - 1),
+                "expiry < u64::MAX should be cached via set_key_expiry"
+            );
+
+            // expiry == u64::MAX — should NOT cache expiry
+            let transaction2 = TxBuilder::aa(Address::random())
+                .fee_token(PATH_USD_ADDRESS)
+                .gas_limit(1_000_000)
+                .build_keychain(user_address, &access_key_signer);
+
+            let slot_value_max = AuthorizedKey {
+                signature_type: 0,
+                expiry: u64::MAX,
+                enforce_limits: false,
+                is_revoked: false,
+            }
+            .encode_to_slot();
+
+            let validator2 = setup_validator_with_keychain_storage_and_timestamp(
+                &transaction2,
+                user_address,
+                access_key_address,
+                Some(slot_value_max),
+                current_time,
+            );
+            let state_provider2 = validator2.inner.client().latest().unwrap();
+            let result2 = validator2.validate_against_keychain(&transaction2, &state_provider2);
+            assert!(
+                result2.is_ok() && result2.unwrap().is_ok(),
+                "expiry == u64::MAX should pass keychain validation"
+            );
+            assert_eq!(
+                transaction2.key_expiry(),
+                None,
+                "expiry == u64::MAX should NOT be cached"
+            );
+        }
     }
 
     // ============================================
@@ -5356,7 +5432,7 @@ mod tests {
         let balance_slot = TIP20Token::from_address(PATH_USD_ADDRESS)
             .expect("PATH_USD_ADDRESS is a valid TIP20 token")
             .balances[transaction.sender()]
-            .slot();
+        .slot();
         let fee_payer_balance = balance.unwrap_or(U256::from(1_000_000_000_000u64));
         provider.add_account(
             PATH_USD_ADDRESS,
@@ -5430,12 +5506,8 @@ mod tests {
         );
 
         // balance == cost - 1 — should fail with InsufficientFunds
-        let v = setup_validator_with_nonce_storage(
-            &transaction,
-            0,
-            vec![],
-            Some(cost - U256::from(1)),
-        );
+        let v =
+            setup_validator_with_nonce_storage(&transaction, 0, vec![], Some(cost - U256::from(1)));
         let out = v
             .validate_transaction(TransactionOrigin::External, transaction)
             .await;
@@ -5623,7 +5695,10 @@ mod tests {
         assert!(
             !matches!(
                 &out,
-                TransactionValidationOutcome::Invalid(_, InvalidPoolTransactionError::OversizedData { .. })
+                TransactionValidationOutcome::Invalid(
+                    _,
+                    InvalidPoolTransactionError::OversizedData { .. }
+                )
             ),
             "tx at exactly max_size should not be rejected as OversizedData, got: {out:?}"
         );
@@ -5650,90 +5725,12 @@ mod tests {
         assert!(
             matches!(
                 &out,
-                TransactionValidationOutcome::Invalid(_, InvalidPoolTransactionError::OversizedData { .. })
+                TransactionValidationOutcome::Invalid(
+                    _,
+                    InvalidPoolTransactionError::OversizedData { .. }
+                )
             ),
             "tx over max_size should be rejected as OversizedData, got: {out:?}"
-        );
-    }
-
-    /// Test keychain expiry caching boundary: `expiry < u64::MAX` should set key_expiry,
-    /// `expiry == u64::MAX` should NOT set key_expiry.
-    #[test]
-    fn test_keychain_expiry_caching_boundary() {
-        use alloy_signer_local::PrivateKeySigner;
-        use tempo_precompiles::account_keychain::AuthorizedKey;
-
-        let access_key_signer = PrivateKeySigner::random();
-        let access_key_address: Address = access_key_signer.address();
-        let user_address = Address::random();
-        let current_time = 1000u64;
-
-        // expiry == u64::MAX - 1 — should cache expiry
-        let transaction =
-            TxBuilder::aa(Address::random())
-                .fee_token(PATH_USD_ADDRESS)
-                .gas_limit(1_000_000)
-                .build_keychain(user_address, &access_key_signer);
-
-        let slot_value = AuthorizedKey {
-            signature_type: 0,
-            expiry: u64::MAX - 1,
-            enforce_limits: false,
-            is_revoked: false,
-        }
-        .encode_to_slot();
-
-        let validator = setup_validator_with_keychain_storage_and_timestamp(
-            &transaction,
-            user_address,
-            access_key_address,
-            Some(slot_value),
-            current_time,
-        );
-        let state_provider = validator.inner.client().latest().unwrap();
-        let result = validator.validate_against_keychain(&transaction, &state_provider);
-        assert!(
-            result.is_ok() && result.unwrap().is_ok(),
-            "expiry < u64::MAX should pass keychain validation"
-        );
-        assert_eq!(
-            transaction.key_expiry(),
-            Some(u64::MAX - 1),
-            "expiry < u64::MAX should be cached via set_key_expiry"
-        );
-
-        // expiry == u64::MAX — should NOT cache expiry
-        let transaction2 =
-            TxBuilder::aa(Address::random())
-                .fee_token(PATH_USD_ADDRESS)
-                .gas_limit(1_000_000)
-                .build_keychain(user_address, &access_key_signer);
-
-        let slot_value_max = AuthorizedKey {
-            signature_type: 0,
-            expiry: u64::MAX,
-            enforce_limits: false,
-            is_revoked: false,
-        }
-        .encode_to_slot();
-
-        let validator2 = setup_validator_with_keychain_storage_and_timestamp(
-            &transaction2,
-            user_address,
-            access_key_address,
-            Some(slot_value_max),
-            current_time,
-        );
-        let state_provider2 = validator2.inner.client().latest().unwrap();
-        let result2 = validator2.validate_against_keychain(&transaction2, &state_provider2);
-        assert!(
-            result2.is_ok() && result2.unwrap().is_ok(),
-            "expiry == u64::MAX should pass keychain validation"
-        );
-        assert_eq!(
-            transaction2.key_expiry(),
-            None,
-            "expiry == u64::MAX should NOT be cached"
         );
     }
 
@@ -5768,9 +5765,7 @@ mod tests {
                     Signature::test_signature(),
                 )),
             );
-            TempoPooledTransaction::new(
-                TempoTxEnvelope::from(signed).try_into_recovered().unwrap(),
-            )
+            TempoPooledTransaction::new(TempoTxEnvelope::from(signed).try_into_recovered().unwrap())
         };
 
         // With account nonce == 0, extra 250k gas is charged.

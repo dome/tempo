@@ -1099,7 +1099,7 @@ mod tests {
         transaction::{
             TempoTransaction,
             envelope::TEMPO_SYSTEM_TX_SIGNATURE,
-            tempo_transaction::Call,
+            tempo_transaction::{Call, TEMPO_TX_TYPE_ID},
             tt_signature::{PrimitiveSignature, TempoSignature},
             tt_signed::AASigned,
         },
@@ -1193,10 +1193,11 @@ mod tests {
             ]),
         );
 
-        let inner =
-            EthTransactionValidatorBuilder::new(provider.clone(), TempoEvmConfig::mainnet())
-                .disable_balance_check()
-                .build(InMemoryBlobStore::default());
+        let evm_config = TempoEvmConfig::new(MODERATO.clone());
+        let inner = EthTransactionValidatorBuilder::new(provider.clone(), evm_config)
+            .disable_balance_check()
+            .with_custom_tx_type(TEMPO_TX_TYPE_ID)
+            .build(InMemoryBlobStore::default());
         let amm_cache =
             AmmLiquidityCache::new(provider).expect("failed to setup AmmLiquidityCache");
         let validator = TempoTransactionValidator::new(
@@ -5459,10 +5460,11 @@ mod tests {
             );
         }
 
-        let inner =
-            EthTransactionValidatorBuilder::new(provider.clone(), TempoEvmConfig::mainnet())
-                .disable_balance_check()
-                .build(InMemoryBlobStore::default());
+        let evm_config = TempoEvmConfig::new(MODERATO.clone());
+        let inner = EthTransactionValidatorBuilder::new(provider.clone(), evm_config)
+            .disable_balance_check()
+            .with_custom_tx_type(TEMPO_TX_TYPE_ID)
+            .build(InMemoryBlobStore::default());
         let amm_cache =
             AmmLiquidityCache::new(provider).expect("failed to setup AmmLiquidityCache");
         let validator = TempoTransactionValidator::new(
@@ -5527,7 +5529,10 @@ mod tests {
     /// `seen_expiry == current_time` is allowed (not in the future).
     #[tokio::test]
     async fn test_expiring_nonce_replay_boundary() {
-        let current_time = 1000u64;
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let sender = Address::random();
 
         // Build an expiring nonce transaction with valid_before in range
@@ -5595,6 +5600,10 @@ mod tests {
     /// `tx_nonce < state_nonce` fails with `NonceNotConsistent`.
     #[tokio::test]
     async fn test_2d_nonce_consistency_boundary() {
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let sender = Address::random();
         let nonce_key = U256::from(42);
 
@@ -5608,7 +5617,7 @@ mod tests {
         let nonce_slot = NonceManager::new().nonces[sender][nonce_key].slot();
         let v = setup_validator_with_nonce_storage(
             &transaction,
-            0,
+            current_time,
             vec![(nonce_slot, U256::from(5))],
             None,
         );
@@ -5635,7 +5644,7 @@ mod tests {
             .build();
         let v = setup_validator_with_nonce_storage(
             &transaction,
-            0,
+            current_time,
             vec![(nonce_slot, U256::from(5))],
             None,
         );
@@ -5659,35 +5668,40 @@ mod tests {
     #[tokio::test]
     async fn test_transaction_size_boundary() {
         let sender = Address::random();
+        let target = Address::random();
 
-        // Create a minimal transaction first to measure base overhead
-        let base_tx = TxBuilder::aa(sender)
+        // Get max_size from the validator
+        let probe = TxBuilder::aa(sender)
             .fee_token(PATH_USD_ADDRESS)
             .gas_limit(1_000_000)
             .build();
-        let base_size = base_tx.encoded_length();
-        let v = setup_validator(&base_tx, 0);
+        let v = setup_validator(&probe, 0);
         let max_size = v.inner.max_tx_input_bytes();
 
-        // Compute how much input data we need to bring encoded_length exactly to max_size.
-        // Each byte of call input adds 1 byte to the encoded length.
-        let padding_needed = max_size.saturating_sub(base_size);
+        // Iteratively find the exact padding that produces encoded_length == max_size.
+        // RLP length prefixes add overhead that varies with data size, so we adjust.
+        let mut padding = max_size;
+        let tx_at_limit = loop {
+            let tx = TxBuilder::aa(sender)
+                .fee_token(PATH_USD_ADDRESS)
+                .gas_limit(1_000_000)
+                .calls(vec![Call {
+                    to: TxKind::Call(target),
+                    value: U256::ZERO,
+                    input: vec![0u8; padding].into(),
+                }])
+                .build();
+            let actual = tx.encoded_length();
+            if actual == max_size {
+                break tx;
+            }
+            assert!(
+                actual > max_size,
+                "padding too small to reach max_size; shouldn't happen"
+            );
+            padding -= actual - max_size;
+        };
 
-        // Create tx at exactly max_size
-        let tx_at_limit = TxBuilder::aa(sender)
-            .fee_token(PATH_USD_ADDRESS)
-            .gas_limit(1_000_000)
-            .calls(vec![Call {
-                to: TxKind::Call(Address::random()),
-                value: U256::ZERO,
-                input: vec![0u8; padding_needed].into(),
-            }])
-            .build();
-        assert_eq!(
-            tx_at_limit.encoded_length(),
-            max_size,
-            "tx should be exactly at max size"
-        );
         let v = setup_validator(&tx_at_limit, 0);
         let out = v
             .validate_transaction(TransactionOrigin::External, tx_at_limit)
@@ -5703,14 +5717,14 @@ mod tests {
             "tx at exactly max_size should not be rejected as OversizedData, got: {out:?}"
         );
 
-        // Create tx at max_size + 1
+        // Create tx one byte over max_size
         let tx_over_limit = TxBuilder::aa(sender)
             .fee_token(PATH_USD_ADDRESS)
             .gas_limit(1_000_000)
             .calls(vec![Call {
-                to: TxKind::Call(Address::random()),
+                to: TxKind::Call(target),
                 value: U256::ZERO,
-                input: vec![0u8; padding_needed + 1].into(),
+                input: vec![0u8; padding + 1].into(),
             }])
             .build();
         assert_eq!(
@@ -5738,7 +5752,10 @@ mod tests {
     /// an extra 250k gas (`new_account_cost`) is charged. When nonce > 0, it is not.
     #[tokio::test]
     async fn test_create_2d_nonce_account_creation_gas_boundary() {
-        let current_time = 100u64;
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let nonce_key = U256::from(42);
 
         // Setup a CREATE call with 2D nonce (nonce_key != 0)
@@ -5768,13 +5785,13 @@ mod tests {
         };
 
         // With account nonce == 0, extra 250k gas is charged.
-        // Use a high gas limit that should pass (1M gas).
-        let tx_high = create_tx(1_000_000);
+        // Use a high gas limit that should pass (2M gas covers all intrinsic costs).
+        let tx_high = create_tx(2_000_000);
         let v = setup_validator(&tx_high, current_time);
         let out = v
             .validate_transaction(TransactionOrigin::External, tx_high)
             .await;
-        // Should not fail with intrinsic gas error for 1M gas
+        // Should not fail with intrinsic gas error for 2M gas
         assert!(
             !matches!(
                 &out,
@@ -5784,7 +5801,7 @@ mod tests {
                         Some(TempoPoolTransactionError::InsufficientGasForAAIntrinsicCost { .. })
                     )
             ),
-            "CREATE + 2D nonce with 1M gas should pass, got: {out:?}"
+            "CREATE + 2D nonce with 2M gas should pass, got: {out:?}"
         );
 
         // With a gas limit that covers base intrinsic gas but NOT the extra 250k for account

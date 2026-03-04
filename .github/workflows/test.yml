@@ -142,6 +142,27 @@ jobs:
             coverage/precompiles-bin/
           retention-days: 1
 
+  test-pre-hardfork:
+    name: test (pre-hardfork)
+    runs-on: depot-ubuntu-latest-32
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rui314/setup-mold@725a8794d15fc7563f59595bd9556495c0564878 # v1
+      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+      - uses: taiki-e/install-action@3f67faa728964808f52294a9cd15561b15550b28 # v2.67.19
+        with:
+          tool: nextest@0.9.124
+      - name: Run integration tests with latest hardforks deactivated
+        run: cargo nextest run --profile ci -p tempo-node -E 'binary(it)'
+        env:
+          TEMPO_PRE_HARDFORK_TEST: "1"
+
   cli:
     name: CLI smoke tests
     runs-on: depot-ubuntu-latest-4
@@ -188,6 +209,7 @@ jobs:
     needs:
       - check-precompiles
       - test
+      - test-pre-hardfork
       - cli
       - msrv
       - genesis

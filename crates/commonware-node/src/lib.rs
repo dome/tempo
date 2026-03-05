@@ -16,6 +16,7 @@ pub(crate) mod peer_manager;
 pub(crate) mod utils;
 pub(crate) mod validators;
 
+pub(crate) mod notarization_tracker;
 pub(crate) mod subblocks;
 
 use commonware_cryptography::ed25519::{PrivateKey, PublicKey};

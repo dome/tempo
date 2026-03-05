@@ -338,7 +338,13 @@ where
                 relay: self.config.application.clone(),
                 reporter: Reporters::from((
                     self.config.subblocks.clone(),
-                    Reporters::from((self.config.marshal.clone(), self.config.feed.clone())),
+                    Reporters::from((
+                        self.config.marshal.clone(),
+                        Reporters::from((
+                            self.config.feed.clone(),
+                            self.config.notarization_tracker.clone(),
+                        )),
+                    )),
                 )),
                 partition: format!(
                     "{partition_prefix}_consensus_epoch_{epoch}",

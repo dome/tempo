@@ -325,6 +325,13 @@ where
             self.feed_state,
         );
 
+        let (notarization_tracker, notarization_tracker_mailbox) =
+            crate::notarization_tracker::init(
+                context.with_label("notarization_tracker"),
+                marshal_mailbox.clone(),
+                execution_node.clone(),
+            );
+
         let (executor, executor_mailbox) = crate::executor::init(
             context.with_label("executor"),
             crate::executor::Config {
@@ -364,6 +371,7 @@ where
                 subblocks: subblocks.mailbox(),
                 marshal: marshal_mailbox.clone(),
                 feed: feed_mailbox.clone(),
+                notarization_tracker: notarization_tracker_mailbox.clone(),
                 scheme_provider: scheme_provider.clone(),
                 time_to_collect_notarizations: self.time_to_collect_notarizations,
                 time_to_retry_nullify_broadcast: self.time_to_retry_nullify_broadcast,
@@ -414,6 +422,7 @@ where
             peer_manager_mailbox,
 
             feed,
+            notarization_tracker,
 
             subblocks,
         })
@@ -469,6 +478,8 @@ where
     peer_manager_mailbox: peer_manager::Mailbox,
 
     feed: crate::feed::Actor<TContext>,
+
+    notarization_tracker: crate::notarization_tracker::Actor<TContext>,
 
     subblocks: subblocks::Actor<TContext>,
 }
@@ -599,6 +610,7 @@ where
                 .start(votes_channel, certificates_channel, resolver_channel);
 
         let feed = self.feed.start();
+        let notarization_tracker = self.notarization_tracker.start();
 
         let subblocks = self
             .context
@@ -612,6 +624,7 @@ where
             epoch_manager,
             executor,
             feed,
+            notarization_tracker,
             marshal,
             dkg_manager,
             peer_manager,

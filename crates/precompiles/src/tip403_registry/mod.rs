@@ -98,6 +98,15 @@ impl PolicyAuthorizer for TIP403Registry {
     }
 }
 
+// Optional override for the policy authorization backend used by TIP-20 tokens.
+//
+// By default this is **unset**. When no override is installed, `authorize()` and
+// `check_policy_exists()` fall back to `TIP403Registry::new()`, which reads policy
+// data directly from on-chain storage (the standard L1 behaviour).
+//
+// Zones (L2) can install a custom `PolicyAuthorizer` (e.g. one backed by a local
+// cache) by calling `with_policy_authorizer` before entering the precompile closure.
+// This follows the same scoped thread-local pattern used by `StorageCtx`.
 scoped_thread_local!(static POLICY_AUTHORIZER: &dyn PolicyAuthorizer);
 
 /// Enter a scoped policy authorizer context. While inside `f`, all TIP-20

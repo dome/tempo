@@ -80,7 +80,8 @@ contract ValidatorConfigV2InvariantTest is InvariantBaseTest {
         // Add V1 validators — migration and initialization driven by the fuzzer
         for (uint256 i = 0; i < V1_SETUP_COUNT; i++) {
             address addr = address(uint160(0xA000 + i));
-            bytes32 pubKey = keccak256(abi.encode("v1_setup_pubkey", i));
+            // Seed V1 with valid Ed25519 pubkeys so migration does not skip fixtures.
+            (bytes32 pubKey,) = vm.createEd25519Key(keccak256(abi.encode("v1_setup_pubkey", i)));
             string memory ingress =
                 string(abi.encodePacked("10.0.0.", _uint8ToString(uint8(100 + i)), ":8000"));
             string memory egress =

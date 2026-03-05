@@ -57,6 +57,9 @@ impl Precompile for ValidatorConfigV2 {
                 IValidatorConfigV2Calls::rotateValidator(call) => {
                     mutate_void(call, msg_sender, |s, c| self.rotate_validator(s, c))
                 }
+                IValidatorConfigV2Calls::setFeeRecipient(call) => {
+                    mutate_void(call, msg_sender, |s, c| self.set_fee_recipient(s, c))
+                }
                 IValidatorConfigV2Calls::setIpAddresses(call) => {
                     mutate_void(call, msg_sender, |s, c| self.set_ip_addresses(s, c))
                 }

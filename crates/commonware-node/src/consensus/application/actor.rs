@@ -782,17 +782,9 @@ async fn verify_block<TContext: Pacer>(
         return Ok(false);
     }
 
-    // FIXME: in cases where validate_block is called on the boundary block,
-    // the scheme might not be available.
-    //
-    // The fix is to track directly track notarizations and feed them to the
-    // EL that way, instead of doing this at the automaton/proposal level.
-    //
-    // https://github.com/tempoxyz/tempo/issues/1411
-    //
-    // let scheme = scheme_provider
-    //     .scoped(epoch)
-    //     .ok_or_eyre("cannot determine participants in the current epoch")?;
+    // On epoch boundaries the scheme may not be available yet. This is fine
+    // because the notarization tracker (see #1411) ensures the EL always
+    // receives the block via `new_payload` regardless.
     let validator_set = scheme_provider.scoped(epoch).map(|scheme| {
         scheme
             .participants()

@@ -18,6 +18,7 @@ members = [
   "crates/consensus",
   "crates/eyre",
   "crates/evm",
+  "crates/monitor",
   "crates/e2e",
   "crates/faucet",
   "crates/node",
@@ -101,6 +102,7 @@ tempo-chainspec = { path = "crates/chainspec", default-features = false }
 tempo-commonware-node = { path = "crates/commonware-node", default-features = false }
 tempo-commonware-node-config = { path = "crates/commonware-node-config", default-features = false }
 tempo-consensus = { path = "crates/consensus", default-features = false }
+tempo-monitor = { path = "crates/monitor" }
 tempo-dkg-onchain-artifacts = { path = "crates/dkg-onchain-artifacts", default-features = false }
 tempo-e2e = { path = "crates/e2e" }
 tempo-faucet = { path = "crates/faucet", default-features = false }

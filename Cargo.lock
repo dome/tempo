@@ -12134,6 +12134,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tempo-monitor"
+version = "1.4.0-rc1"
+dependencies = [
+ "alloy-consensus",
+ "alloy-primitives",
+ "tempo-primitives",
+]
+
+[[package]]
 name = "tempo-node"
 version = "1.4.0-rc1"
 dependencies = [

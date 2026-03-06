@@ -283,9 +283,7 @@ def run-dev-node [accounts: int, genesis: string, samply: bool, samply_args: lis
 
     let cmd = wrap-samply [$tempo_bin ...$args] $samply $samply_args
     print $"Running dev node: `($cmd | str join ' ')`..."
-    with-env { OTEL_BSP_MAX_QUEUE_SIZE: "32768" } {
-        run-external ($cmd | first) ...($cmd | skip 1)
-    }
+    run-external ($cmd | first) ...($cmd | skip 1)
 }
 
 # Build base node arguments shared between dev and consensus modes
@@ -439,12 +437,10 @@ def run-consensus-node [
     print $"  Node ($addr) -> http://localhost:($http_port)(if $background { '' } else { ' (foreground)' })"
 
     if $background {
-        job spawn { with-env { OTEL_BSP_MAX_QUEUE_SIZE: "32768" } { sh -c $"($cmd | str join ' ') 2>&1" | lines | each { |line| print $"[($addr)] ($line)" } } }
+        job spawn { sh -c $"($cmd | str join ' ') 2>&1" | lines | each { |line| print $"[($addr)] ($line)" } }
     } else {
         print $"  Running: ($cmd | str join ' ')"
-        with-env { OTEL_BSP_MAX_QUEUE_SIZE: "32768" } {
-            run-external ($cmd | first) ...($cmd | skip 1)
-        }
+        run-external ($cmd | first) ...($cmd | skip 1)
     }
 }
 

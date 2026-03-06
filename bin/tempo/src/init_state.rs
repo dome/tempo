@@ -13,7 +13,6 @@ use std::{
 use alloy_primitives::{B256, U256, map::HashSet};
 use clap::Parser;
 use eyre::{Context as _, ensure};
-use console::Term;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use reth_chainspec::EthereumHardforks;
 use reth_cli_commands::common::{AccessRights, CliNodeTypes, EnvironmentArgs};
@@ -95,7 +94,7 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
 
         let pb = ProgressBar::with_draw_target(
             Some(file_size),
-            ProgressDrawTarget::term(Term::stderr(), 20),
+            ProgressDrawTarget::stderr(),
         );
         pb.set_style(
             ProgressStyle::default_bar()

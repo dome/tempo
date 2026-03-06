@@ -60,7 +60,6 @@ reth-provider.workspace = true
 reth-rpc-server-types.workspace = true
 reth-storage-api.workspace = true
 clap.workspace = true
-console.workspace = true
 eyre.workspace = true
 indicatif.workspace = true
 jiff.workspace = true

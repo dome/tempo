@@ -8,7 +8,7 @@ mod metrics;
 use crate::metrics::TempoPayloadBuilderMetrics;
 use alloy_consensus::{BlockHeader as _, Signed, Transaction, TxLegacy};
 use alloy_primitives::{Address, U256};
-use alloy_rlp::{Decodable, Encodable};
+use alloy_rlp::Encodable;
 use either::Either;
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
@@ -25,7 +25,7 @@ use reth_evm::{
 };
 use reth_execution_types::ExecutionOutcome;
 use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
-use reth_payload_primitives::{BuiltPayload, BuiltPayloadExecutedBlock, PayloadBuilderAttributes};
+use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadBuilderAttributes};
 use reth_primitives_traits::{Recovered, transaction::error::InvalidTransactionError};
 use reth_revm::{
     State,
@@ -851,7 +851,8 @@ where
             trie_updates: Either::Left(Arc::new(trie_updates)),
         };
 
-        let payload = TempoBuiltPayload::new(eth_payload, Some(executed_block));
+        let payload =
+            TempoBuiltPayload::new(eth_payload, Some(executed_block), subblocks.len());
 
         drop(db);
         Ok(BuildOutcome::Better {
@@ -868,25 +869,15 @@ pub fn is_more_subblocks(
     let Some(best_payload) = best_payload else {
         return false;
     };
-    let Some(best_metadata) = best_payload
-        .block()
-        .body()
-        .transactions
-        .iter()
-        .rev()
-        .find_map(|tx| Vec::<SubBlockMetadata>::decode(&mut tx.input().as_ref()).ok())
-    else {
-        return false;
-    };
 
-    subblocks.len() > best_metadata.len()
+    subblocks.len() > best_payload.subblocks_count()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloy_consensus::BlockBody;
-    use alloy_primitives::{Address, B256, Bytes, Signature};
+    use alloy_primitives::{Address, B256, Bytes};
     use reth_payload_builder::PayloadId;
     use reth_primitives_traits::SealedBlock;
     use tempo_primitives::{
@@ -901,17 +892,6 @@ mod tests {
             Self: Sized,
         {
             Self::random()
-        }
-    }
-
-    impl TestExt for SubBlockMetadata {
-        fn random() -> Self {
-            Self {
-                version: SubBlockVersion::V1,
-                validator: B256::random(),
-                fee_recipient: Address::random(),
-                signature: Bytes::new(),
-            }
         }
     }
 
@@ -942,31 +922,17 @@ mod tests {
     }
 
     fn payload_with_metadata(count: usize) -> TempoBuiltPayload {
-        let metadata: Vec<_> = (0..count).map(|_| SubBlockMetadata::random()).collect();
-        let input: Bytes = alloy_rlp::encode(&metadata).into();
-        let tx = TempoTxEnvelope::Legacy(Signed::new_unhashed(
-            TxLegacy {
-                chain_id: None,
-                nonce: 0,
-                gas_price: 0,
-                gas_limit: 0,
-                to: Address::random().into(),
-                value: U256::ZERO,
-                input,
-            },
-            Signature::test_signature(),
-        ));
         let block = Block {
             header: TempoHeader::default(),
             body: BlockBody {
-                transactions: vec![tx],
+                transactions: vec![],
                 ommers: vec![],
                 withdrawals: None,
             },
         };
         let sealed = Arc::new(SealedBlock::seal_slow(block));
         let eth = EthBuiltPayload::new(PayloadId::default(), sealed, U256::ZERO, None);
-        TempoBuiltPayload::new(eth, None)
+        TempoBuiltPayload::new(eth, None, count)
     }
 
     #[test]

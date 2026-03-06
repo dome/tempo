@@ -216,6 +216,7 @@ futures = "0.3.31"
 governor = "0.10.4"
 indexmap = "2.13.0"
 indicatif = "0.18"
+console = "0.16"
 itertools = "0.14.0"
 jiff = { version = "0.2.18", default-features = false }
 jsonrpsee = { version = "0.26.0", features = ["server", "client", "macros"] }

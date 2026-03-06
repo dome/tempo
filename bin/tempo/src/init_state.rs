@@ -13,7 +13,8 @@ use std::{
 use alloy_primitives::{B256, U256, map::HashSet};
 use clap::Parser;
 use eyre::{Context as _, ensure};
-use indicatif::{ProgressBar, ProgressStyle};
+use console::Term;
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use reth_chainspec::EthereumHardforks;
 use reth_cli_commands::common::{AccessRights, CliNodeTypes, EnvironmentArgs};
 use reth_db_api::{
@@ -92,7 +93,10 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
         // Track addresses for account hashing (we need to create empty accounts)
         let mut addresses_seen: HashSet<alloy_primitives::Address> = HashSet::default();
 
-        let pb = ProgressBar::new(file_size);
+        let pb = ProgressBar::with_draw_target(
+            Some(file_size),
+            ProgressDrawTarget::term(Term::stderr(), 20),
+        );
         pb.set_style(
             ProgressStyle::default_bar()
                 .template("[{elapsed_precise}] {bar:40.cyan/blue} {bytes}/{total_bytes} ({bytes_per_sec}) ({eta})")

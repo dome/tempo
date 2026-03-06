@@ -1,7 +1,7 @@
 ---
 id: TIP-1023
 title: Tempo Address Format
-description: A human-readable address format for Tempo with a recognizable prefix and mixed-case checksumming.
+description: A human-readable address format for Tempo with a recognizable prefix, implicit versioning, and mixed-case checksumming.
 authors: Dankrad Feist @dankrad, Jake Moxey @jxom
 status: Draft
 related: EIP-55, EIP-1191
@@ -31,15 +31,15 @@ A Tempo address format should therefore solve both problems at once: make addres
 A Tempo address is a colon-separated string beginning with the human-readable prefix `tempo`. The default format encodes a 20-byte EVM address directly after the prefix:
 
 ```sh
-address = HRP ‖ ":" ‖ data
-# Example: tempo:742D35cC6634C0532925A3B844BC9E7595f2Bd28
+tempo:<address>
+# Ex: tempo:742D35cC6634C0532925A3B844BC9E7595f2Bd28
 ```
 
 Future address versions introduce a version byte as the second component:
 
 ```sh
-address = HRP ‖ ":" ‖ version ‖ ":" ‖ data
-# Example: tempo:01:<version-specific-data>
+tempo:<version>:<data>
+# Ex: tempo:01:<version-specific-data>
 ```
 
 The format is designed to be extensible. Decoders distinguish between the default format and versioned formats by the number of colon-separated components after the HRP.
@@ -57,7 +57,7 @@ If a future TIP introduces a new address version, it occupies the second colon-s
 | Format | Version | Status |
 |--------|---------|--------|
 | `tempo:<address>` | Default (implicit) | Defined in this TIP |
-| `tempo:<version>:<data>` | Explicit (`01`–`ff`) | Reserved for future use |
+| `tempo:<VV>:<data>` | Explicit (`01`–`ff`) | Reserved for future use |
 
 Decoders distinguish formats by counting the colon-separated components after stripping the `tempo:` prefix:
 - **1 component** (40 hex chars): default format — 20-byte EVM address
@@ -83,7 +83,7 @@ The nibble index is counted sequentially across all characters that are letters.
 
 The checksum covers:
 - **HRP**: included literally in the hash input (`"tempo"`), so swapping the prefix invalidates the checksum
-- **Data**: All subsequent data are included — changing any component invalidates the casing
+- **All data**: address (and version byte, if present) are included — changing any component invalidates the casing
 
 #### Verification
 
@@ -111,8 +111,8 @@ The default format encodes a standard 20-byte EVM address.
 ### Format
 
 ```sh
-address = HRP ‖ ":" ‖ address
-# Example: tempo:742D35cC6634C0532925A3B844BC9E7595f2Bd28
+tempo:<address>
+# Ex: tempo:742D35cC6634C0532925A3B844BC9E7595f2Bd28
 ```
 
 ### Data

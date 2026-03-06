@@ -108,7 +108,7 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                 Err(e) => return Err(e).wrap_err("failed to read block header"),
             }
-            bytes_read += 40;
+            bytes_read += header_buf.len() as u64;
 
             // Validate magic
             ensure!(
@@ -162,7 +162,7 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
                 reader
                     .read_exact(&mut entry_buf)
                     .wrap_err("failed to read storage entry")?;
-                bytes_read += 64;
+                bytes_read += entry_buf.len() as u64;
 
                 let slot = B256::from_slice(&entry_buf[..32]);
                 let value = U256::from_be_bytes::<32>(entry_buf[32..64].try_into().unwrap());

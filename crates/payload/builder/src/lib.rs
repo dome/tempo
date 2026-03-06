@@ -644,8 +644,7 @@ where
             trie_updates: Either::Left(Arc::new(trie_updates)),
         };
 
-        let payload =
-            TempoBuiltPayload::new(eth_payload, Some(executed_block), subblocks.len());
+        let payload = TempoBuiltPayload::new(eth_payload, Some(executed_block), subblocks.len());
 
         drop(db);
         Ok(BuildOutcome::Better {

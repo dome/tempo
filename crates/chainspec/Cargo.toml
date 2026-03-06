@@ -25,8 +25,9 @@ alloy-eips.workspace = true
 alloy-hardforks.workspace = true
 
 eyre = { workspace = true, optional = true }
+once_cell.workspace = true
 serde.workspace = true
-serde_json = { workspace = true, optional = true }
+serde_json.workspace = true
 
 [features]
 default = ["std", "serde", "cli"]
@@ -38,6 +39,7 @@ std = [
     "reth-chainspec/std",
     "reth-network-peers/std",
     "serde/std",
+    "once_cell/std",
     "serde_json/std",
     "tempo-primitives/std",
 ]

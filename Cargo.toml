@@ -228,6 +228,7 @@ proptest-arbitrary-interop = "0.1.0"
 rand = "0.9"
 rand_08 = { package = "rand", version = "0.8.5" }
 rand_core = "0.6.4"
+once_cell = { version = "1.19", default-features = false, features = ["critical-section"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = { version = "1.0.228", features = ["derive"], default-features = false }

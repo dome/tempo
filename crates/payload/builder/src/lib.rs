@@ -522,8 +522,8 @@ where
                 continue;
             }
 
-            // check if the job was interrupted, if so we can skip remaining transactions
-            if attributes.is_interrupted() {
+            // stop filling from the pool once the deadline expires
+            if attributes.should_stop_pool_fill() {
                 break;
             }
 
@@ -851,8 +851,7 @@ where
             trie_updates: Either::Left(Arc::new(trie_updates)),
         };
 
-        let payload =
-            TempoBuiltPayload::new(eth_payload, Some(executed_block), subblocks.len());
+        let payload = TempoBuiltPayload::new(eth_payload, Some(executed_block), subblocks.len());
 
         drop(db);
         Ok(BuildOutcome::Better {

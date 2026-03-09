@@ -30,6 +30,13 @@ pub const MIN_ORDER_AMOUNT: u128 = 100_000_000;
 /// Allowed tick spacing for order placement
 pub const TICK_SPACING: i16 = 10;
 
+/// On-chain CLOB (Central Limit Order Book) for stablecoin trading.
+///
+/// Supports limit orders, market swaps, and flip orders across USD-denominated TIP-20 token pairs.
+/// Orders use tick-based pricing with price-time priority.
+///
+/// The struct fields define the on-chain storage layout; the `#[contract]` macro generates the
+/// storage handlers which provide an ergonomic way to interact with the EVM state.
 #[contract(addr = STABLECOIN_DEX_ADDRESS)]
 pub struct StablecoinDEX {
     books: Mapping<B256, Orderbook>,
@@ -118,11 +125,15 @@ impl StablecoinDEX {
     }
 
     /// Subtract from user's balance.
-    ///
-    /// The *CALLER* is responsible for ensuring `amount <= token.balanceOf(user)`.
     fn sub_balance(&mut self, user: Address, token: Address, amount: u128) -> Result<()> {
         let current = self.balance_of(user, token)?;
-        self.set_balance(user, token, current.saturating_sub(amount))
+        self.set_balance(
+            user,
+            token,
+            current
+                .checked_sub(amount)
+                .ok_or(TempoPrecompileError::under_overflow())?,
+        )
     }
 
     /// Emit the appropriate OrderFilled event
@@ -523,6 +534,10 @@ impl StablecoinDEX {
         // Compute book_key from token pair
         let book_key = compute_book_key(token, quote_token);
 
+        // CHECKPOINT START: `place_flip` performs multiple state mutations that
+        // must succeed or fail as a unit. The guard auto-reverts on drop.
+        let batch = self.storage.checkpoint();
+
         // Check book existence
         let book = self.books[book_key].read()?;
         self.validate_or_create_pair(&book, token)?;
@@ -588,10 +603,16 @@ impl StablecoinDEX {
 
         // Create the flip order
         let order_id = self.next_order_id()?;
-        self.increment_next_order_id()?;
         let order = Order::new_flip(order_id, sender, book_key, amount, tick, is_bid, flip_tick)
             .map_err(|_| StablecoinDEXError::invalid_flip_tick())?;
 
+        // Commit the flip order
+        if self.storage.spec().is_t1c() {
+            // PERF: skip 1 redundant SLOAD
+            self.next_order_id.write(order_id + 1)?;
+        } else {
+            self.increment_next_order_id()?;
+        }
         self.commit_order_to_book(order)?;
 
         // Emit OrderPlaced event for flip order
@@ -607,6 +628,9 @@ impl StablecoinDEX {
                 flipTick: flip_tick,
             },
         ))?;
+
+        // CHECKPOINT END: commit the state-changing batch
+        batch.commit();
 
         Ok(order_id)
     }
@@ -1069,9 +1093,13 @@ impl StablecoinDEX {
         ))
     }
 
-    /// Cancel a stale order where the maker is forbidden by TIP-403 policy
+    /// Cancel a stale order where the maker is forbidden by [TIP-403] policy
     /// Allows anyone to clean up stale orders from blacklisted makers
-    /// TIP-1015: For T2+, checks sender authorization (maker must be able to send the escrowed token)
+    /// [TIP-1015]: For T2+, checks sender authorization
+    /// (maker must be able to send the escrowed token)
+    ///
+    /// [TIP-403]: <https://docs.tempo.xyz/protocol/tip403>
+    /// [TIP-1015]: <https://docs.tempo.xyz/protocol/tips/tip-1015>
     pub fn cancel_stale_order(&mut self, order_id: u128) -> Result<()> {
         let order = self.orders[order_id].read()?;
 
@@ -1393,7 +1421,7 @@ impl StablecoinDEX {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::IntoLogData;
+    use alloy::{primitives::IntoLogData, sol_types::SolEvent};
     use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_contracts::precompiles::TIP20Error;
 
@@ -4457,6 +4485,305 @@ mod tests {
                         "[{spec:?}] Swap should succeed when system error is pre-T1A"
                     );
                 }
+
+                Ok::<_, eyre::Report>(())
+            })?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_orderbook_invariants_after_all_orders_filled() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new(1);
+        StorageCtx::enter(&mut storage, || {
+            let mut exchange = StablecoinDEX::new();
+            exchange.initialize()?;
+
+            // Verify initial next_order_id is 1
+            assert_eq!(exchange.next_order_id()?, 1);
+
+            let alice = Address::random();
+            let bob = Address::random();
+            let admin = Address::random();
+            let amount = MIN_ORDER_AMOUNT;
+            let tick = 100i16;
+
+            let price = orderbook::tick_to_price(tick) as u128;
+            let quote_amount = (amount * price).div_ceil(orderbook::PRICE_SCALE as u128);
+
+            let base = TIP20Setup::create("BASE", "BASE", admin)
+                .with_issuer(admin)
+                .with_mint(alice, U256::from(amount * 4))
+                .with_mint(bob, U256::from(amount * 4))
+                .with_approval(alice, exchange.address, U256::MAX)
+                .with_approval(bob, exchange.address, U256::MAX)
+                .apply()?;
+            let base_token = base.address();
+            let quote_token = base.quote_token()?;
+
+            TIP20Setup::path_usd(admin)
+                .with_issuer(admin)
+                .with_mint(alice, U256::from(quote_amount * 4))
+                .with_mint(bob, U256::from(quote_amount * 4))
+                .with_approval(alice, exchange.address, U256::MAX)
+                .with_approval(bob, exchange.address, U256::MAX)
+                .apply()?;
+
+            let book_key = compute_book_key(base_token, quote_token);
+            exchange.create_pair(base_token)?;
+
+            // Place a bid and an ask
+            let bid_id = exchange.place(alice, base_token, amount, true, tick)?;
+            assert_eq!(bid_id, 1);
+            let ask_id = exchange.place(bob, base_token, amount, false, tick)?;
+            assert_eq!(ask_id, 2);
+
+            // Verify book has liquidity
+            let book = exchange.books[book_key].read()?;
+            assert_eq!(book.best_bid_tick, tick);
+            assert_eq!(book.best_ask_tick, tick);
+
+            // Fill the bid by selling base into it
+            exchange.swap_exact_amount_in(bob, base_token, quote_token, amount, 0)?;
+
+            // Fill the ask by buying base from it
+            exchange.swap_exact_amount_in(alice, quote_token, base_token, quote_amount, 0)?;
+
+            // Verify sentinel values are restored
+            let book = exchange.books[book_key].read()?;
+            assert_eq!(
+                book.best_bid_tick,
+                i16::MIN,
+                "best_bid_tick must be sentinel after all bids filled"
+            );
+            assert_eq!(
+                book.best_ask_tick,
+                i16::MAX,
+                "best_ask_tick must be sentinel after all asks filled"
+            );
+
+            // Verify tick levels are cleared
+            let bid_level = exchange.books[book_key]
+                .tick_level_handler(tick, true)
+                .read()?;
+            assert_eq!(bid_level.head, 0, "bid level head must be 0 after drain");
+            assert_eq!(bid_level.tail, 0, "bid level tail must be 0 after drain");
+            assert_eq!(
+                bid_level.total_liquidity, 0,
+                "bid level liquidity must be 0 after drain"
+            );
+
+            let ask_level = exchange.books[book_key]
+                .tick_level_handler(tick, false)
+                .read()?;
+            assert_eq!(ask_level.head, 0, "ask level head must be 0 after drain");
+            assert_eq!(ask_level.tail, 0, "ask level tail must be 0 after drain");
+            assert_eq!(
+                ask_level.total_liquidity, 0,
+                "ask level liquidity must be 0 after drain"
+            );
+
+            // Verify next_order_id is monotonic (never resets)
+            assert_eq!(
+                exchange.next_order_id()?,
+                3,
+                "next_order_id must remain monotonic after drain"
+            );
+
+            // Verify swaps against drained book return insufficient_liquidity
+            // Sell base into (empty) bids
+            let result = exchange.swap_exact_amount_in(bob, base_token, quote_token, amount, 0);
+            assert_eq!(
+                result,
+                Err(StablecoinDEXError::insufficient_liquidity().into()),
+                "swap against drained bid side must fail"
+            );
+            // Buy base from (empty) asks
+            let result =
+                exchange.swap_exact_amount_in(alice, quote_token, base_token, quote_amount, 0);
+            assert_eq!(
+                result,
+                Err(StablecoinDEXError::insufficient_liquidity().into()),
+                "swap against drained ask side must fail"
+            );
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_orderbook_invariants_after_all_orders_cancelled() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new(1);
+        StorageCtx::enter(&mut storage, || {
+            let mut exchange = StablecoinDEX::new();
+            exchange.initialize()?;
+
+            let alice = Address::random();
+            let admin = Address::random();
+            let amount = MIN_ORDER_AMOUNT;
+            let tick = 100i16;
+
+            let price = orderbook::tick_to_price(tick) as u128;
+            let quote_amount = (amount * price).div_ceil(orderbook::PRICE_SCALE as u128);
+
+            let base = TIP20Setup::create("BASE", "BASE", admin)
+                .with_issuer(admin)
+                .with_mint(alice, U256::from(amount * 2))
+                .with_approval(alice, exchange.address, U256::MAX)
+                .apply()?;
+            let base_token = base.address();
+            let quote_token = base.quote_token()?;
+
+            TIP20Setup::path_usd(admin)
+                .with_issuer(admin)
+                .with_mint(alice, U256::from(quote_amount * 2))
+                .with_approval(alice, exchange.address, U256::MAX)
+                .apply()?;
+
+            let book_key = compute_book_key(base_token, quote_token);
+            exchange.create_pair(base_token)?;
+
+            // Place a bid and an ask
+            let bid_id = exchange.place(alice, base_token, amount, true, tick)?;
+            let ask_id = exchange.place(alice, base_token, amount, false, tick)?;
+
+            // Cancel both
+            exchange.cancel(alice, bid_id)?;
+            exchange.cancel(alice, ask_id)?;
+
+            // Verify sentinel values are restored
+            let book = exchange.books[book_key].read()?;
+            assert_eq!(
+                book.best_bid_tick,
+                i16::MIN,
+                "best_bid_tick must be sentinel after all bids cancelled"
+            );
+            assert_eq!(
+                book.best_ask_tick,
+                i16::MAX,
+                "best_ask_tick must be sentinel after all asks cancelled"
+            );
+
+            // Verify tick levels are cleared
+            let bid_level = exchange.books[book_key]
+                .tick_level_handler(tick, true)
+                .read()?;
+            assert_eq!(bid_level.head, 0, "bid level head must be 0");
+            assert_eq!(bid_level.tail, 0, "bid level tail must be 0");
+            assert_eq!(bid_level.total_liquidity, 0, "bid liquidity must be 0");
+
+            let ask_level = exchange.books[book_key]
+                .tick_level_handler(tick, false)
+                .read()?;
+            assert_eq!(ask_level.head, 0, "ask level head must be 0");
+            assert_eq!(ask_level.tail, 0, "ask level tail must be 0");
+            assert_eq!(ask_level.total_liquidity, 0, "ask liquidity must be 0");
+
+            // Verify swap against drained book fails
+            let result = exchange.swap_exact_amount_in(alice, base_token, quote_token, amount, 0);
+            assert_eq!(
+                result,
+                Err(StablecoinDEXError::insufficient_liquidity().into()),
+                "swap against cancelled book must fail"
+            );
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_sub_balance_errors_on_underflow() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new(1);
+        StorageCtx::enter(&mut storage, || {
+            let mut exchange = StablecoinDEX::new();
+            exchange.initialize()?;
+
+            let user = Address::random();
+            let admin = Address::random();
+
+            let base = TIP20Setup::create("BASE", "BASE", admin)
+                .with_issuer(admin)
+                .apply()?;
+            let token = base.address();
+
+            // Set a balance of 100
+            exchange.set_balance(user, token, 100)?;
+            assert_eq!(exchange.balance_of(user, token)?, 100);
+
+            // Subtracting more than the balance should error, not silently clamp to 0
+            let result = exchange.sub_balance(user, token, 101);
+            assert_eq!(
+                result,
+                Err(TempoPrecompileError::under_overflow()),
+                "sub_balance should error on underflow instead of saturating"
+            );
+
+            // Balance should be unchanged
+            assert_eq!(exchange.balance_of(user, token)?, 100);
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_flip_checkpoint_reverts_partial_state_post_t1c() -> eyre::Result<()> {
+        // When commit_order_to_book fails inside place_flip:
+        // - T1C+: checkpoint reverts sub_balance + next_order_id
+        // - Pre-T1C: partial state leaks (balance debited, id bumped)
+        //
+        // All specs are T1A+ so system errors propagate and the swap itself fails.
+        for spec in [TempoHardfork::T1A, TempoHardfork::T1C] {
+            let mut storage = HashMapStorageProvider::new_with_spec(1, spec);
+            StorageCtx::enter(&mut storage, || {
+                let FlipOrderTestCtx {
+                    mut exchange,
+                    alice,
+                    bob,
+                    base_token,
+                    quote_token,
+                    book_key,
+                    amount,
+                    flip_tick,
+                    ..
+                } = setup_flip_order_test()?;
+
+                let next_id_before = exchange.next_order_id()?;
+
+                // Poison the flip target tick so commit_order_to_book
+                // overflows on checked_add — a system error.
+                let poisoned = TickLevel::with_values(0, 0, u128::MAX);
+                exchange.books[book_key]
+                    .tick_level_handler_mut(flip_tick, false)
+                    .write(poisoned)?;
+
+                // Fund bob to fill the order
+                exchange.set_balance(bob, base_token, amount)?;
+
+                let result = exchange.swap_exact_amount_in(bob, base_token, quote_token, amount, 0);
+                assert!(result.is_err(), "[{spec:?}] swap should fail");
+
+                // 1. `fill_order` credited alice `amount` base before `place_flip`
+                // 2. `sub_balance` debited it back
+                // 3. `commit_order_to_book` failed
+                let alice_base = exchange.balance_of(alice, base_token)?;
+                let next_id_after = exchange.next_order_id()?;
+
+                if spec.is_t1c() {
+                    // Checkpoint reverts both sub_balance and order_id
+                    assert_eq!(alice_base, amount);
+                    assert_eq!(next_id_after, next_id_before);
+                } else {
+                    // No checkpoint — partial state leaks
+                    assert_eq!(alice_base, 0);
+                    assert_eq!(next_id_after, next_id_before + 1);
+                }
+
+                // verify that `OrderPlaced` event was never emitted due to poisoned tick's revert
+                assert!(
+                    exchange.emitted_events().last().is_some_and(
+                        |e| e.topics()[0] != IStablecoinDEX::OrderPlaced::SIGNATURE_HASH
+                    )
+                );
 
                 Ok::<_, eyre::Report>(())
             })?;

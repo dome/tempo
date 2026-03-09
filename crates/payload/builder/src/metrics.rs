@@ -1,6 +1,20 @@
 use metrics::Gauge;
 use reth_metrics::{Metrics, metrics::Histogram};
 
+/// State-size statistics from a finalized payload, used to correlate with
+/// `payload_finalization_duration_seconds` when diagnosing slow state root computation.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FinalizationStateStats {
+    /// Number of accounts in the hashed post-state (created, modified, or destroyed).
+    pub accounts_modified: usize,
+    /// Total number of explicit storage slot changes across all accounts.
+    pub storage_slots_modified: usize,
+    /// Number of storage tries fully wiped (e.g. via SELFDESTRUCT).
+    pub storage_tries_wiped: usize,
+    /// Total intermediate trie nodes updated or removed (account + storage tries).
+    pub trie_nodes_updated: usize,
+}
+
 #[derive(Metrics, Clone)]
 #[metrics(scope = "tempo_payload_builder")]
 pub(crate) struct TempoPayloadBuilderMetrics {
@@ -42,6 +56,22 @@ pub(crate) struct TempoPayloadBuilderMetrics {
     pub(crate) system_transactions_execution_duration_seconds: Histogram,
     /// The time it took to finalize the payload in seconds. Includes merging transitions and calculating the state root.
     pub(crate) payload_finalization_duration_seconds: Histogram,
+    /// Number of accounts modified in the payload (from hashed post-state).
+    pub(crate) accounts_modified: Histogram,
+    /// Number of accounts modified in the latest payload.
+    pub(crate) accounts_modified_last: Gauge,
+    /// Number of storage slots modified in the payload (from hashed post-state).
+    pub(crate) storage_slots_modified: Histogram,
+    /// Number of storage slots modified in the latest payload.
+    pub(crate) storage_slots_modified_last: Gauge,
+    /// Number of storage tries fully wiped (e.g. via SELFDESTRUCT).
+    pub(crate) storage_tries_wiped: Histogram,
+    /// Number of storage tries wiped in the latest payload.
+    pub(crate) storage_tries_wiped_last: Gauge,
+    /// Number of intermediate trie nodes updated or removed during state root calculation.
+    pub(crate) trie_nodes_updated: Histogram,
+    /// Number of trie nodes updated in the latest payload.
+    pub(crate) trie_nodes_updated_last: Gauge,
     /// Total time it took to build the payload in seconds.
     pub(crate) payload_build_duration_seconds: Histogram,
     /// Gas per second calculated as gas_used / payload_build_duration.

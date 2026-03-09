@@ -5,7 +5,7 @@
 
 mod metrics;
 
-use crate::metrics::TempoPayloadBuilderMetrics;
+use crate::metrics::{BuildGuard, FinalizationStateStats, TempoPayloadBuilderMetrics};
 use alloy_consensus::{BlockHeader as _, Signed, Transaction, TxLegacy};
 use alloy_primitives::{Address, U256};
 use alloy_rlp::{Decodable, Encodable};
@@ -559,17 +559,82 @@ where
             .total_transaction_execution_duration_seconds
             .record(total_transaction_execution_elapsed);
 
-        let builder_finish_start = Instant::now();
-        let BlockBuilderOutcome {
+        let (
+            builder_finish_elapsed,
+            state_stats,
             execution_result,
             block,
             hashed_state,
             trie_updates,
-        } = builder.finish(&state_provider)?;
-        let builder_finish_elapsed = builder_finish_start.elapsed();
-        self.metrics
-            .payload_finalization_duration_seconds
-            .record(builder_finish_elapsed);
+        ) = {
+            let _span = debug_span!(target: "payload_builder", "finish_block").entered();
+            let builder_finish_start = Instant::now();
+            let res = builder.finish(&state_provider);
+            let builder_finish_elapsed = builder_finish_start.elapsed();
+            self.metrics
+                .payload_finalization_duration_seconds
+                .record(builder_finish_elapsed);
+            let BlockBuilderOutcome {
+                execution_result,
+                block,
+                hashed_state,
+                trie_updates,
+            } = res?;
+
+            // Compute state-size stats from hashed post-state and trie updates.
+            // These correlate with payload_finalization_duration_seconds to diagnose
+            // slow state root computation.
+            let state_stats = FinalizationStateStats {
+                accounts_modified: hashed_state.accounts.len(),
+                storage_slots_modified: hashed_state
+                    .storages
+                    .values()
+                    .map(|s| s.storage.len())
+                    .sum(),
+                storage_tries_wiped: hashed_state.storages.values().filter(|s| s.wiped).count(),
+                trie_nodes_updated: trie_updates.account_nodes.len()
+                    + trie_updates.removed_nodes.len()
+                    + trie_updates
+                        .storage_tries
+                        .values()
+                        .map(|s| s.storage_nodes.len() + s.removed_nodes.len())
+                        .sum::<usize>(),
+            };
+
+            self.metrics
+                .accounts_modified
+                .record(state_stats.accounts_modified as f64);
+            self.metrics
+                .accounts_modified_last
+                .set(state_stats.accounts_modified as f64);
+            self.metrics
+                .storage_slots_modified
+                .record(state_stats.storage_slots_modified as f64);
+            self.metrics
+                .storage_slots_modified_last
+                .set(state_stats.storage_slots_modified as f64);
+            self.metrics
+                .storage_tries_wiped
+                .record(state_stats.storage_tries_wiped as f64);
+            self.metrics
+                .storage_tries_wiped_last
+                .set(state_stats.storage_tries_wiped as f64);
+            self.metrics
+                .trie_nodes_updated
+                .record(state_stats.trie_nodes_updated as f64);
+            self.metrics
+                .trie_nodes_updated_last
+                .set(state_stats.trie_nodes_updated as f64);
+
+            (
+                builder_finish_elapsed,
+                state_stats,
+                execution_result,
+                block,
+                hashed_state,
+                trie_updates,
+            )
+        };
 
         let total_transactions = block.transaction_count();
         self.metrics
@@ -619,6 +684,10 @@ where
             payment_transactions,
             subblock_transactions,
             total_transactions,
+            accounts_modified = state_stats.accounts_modified,
+            storage_slots_modified = state_stats.storage_slots_modified,
+            storage_tries_wiped = state_stats.storage_tries_wiped,
+            trie_nodes_updated = state_stats.trie_nodes_updated,
             ?elapsed,
             ?total_normal_transaction_execution_elapsed,
             ?total_subblock_transaction_execution_elapsed,

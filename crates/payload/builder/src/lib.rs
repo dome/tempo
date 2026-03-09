@@ -583,8 +583,7 @@ where
                     continue;
                 }
 
-                let effective_gas_price =
-                    pool_tx.transaction.effective_gas_price(Some(base_fee));
+                let effective_gas_price = pool_tx.transaction.effective_gas_price(Some(base_fee));
 
                 let tx_debug_repr = tracing::enabled!(Level::TRACE)
                     .then(|| format!("{:?}", pool_tx.transaction))
@@ -689,9 +688,9 @@ where
             for subblock in &subblocks {
                 for tx in subblock.transactions_recovered() {
                     if let Err(err) = builder.execute_transaction(tx.cloned()) {
-                        if let BlockExecutionError::Validation(
-                            BlockValidationError::InvalidTx { .. },
-                        ) = &err
+                        if let BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+                            ..
+                        }) = &err
                         {
                             error!(
                                 ?err,
@@ -723,8 +722,7 @@ where
 
             // Apply system transactions
             let system_txs_execution_elapsed = {
-                let _span =
-                    debug_span!(target: "payload_builder", "execute_system_txs").entered();
+                let _span = debug_span!(target: "payload_builder", "execute_system_txs").entered();
                 let system_txs_execution_start = Instant::now();
                 for system_tx in system_txs {
                     if let Err(err) = builder.execute_transaction(system_tx) {
@@ -859,10 +857,7 @@ where
                 cached_reads,
             }),
             Err(BuildExit::Cancelled) => Ok(BuildOutcome::Cancelled),
-            Err(BuildExit::Aborted { fees }) => Ok(BuildOutcome::Aborted {
-                fees,
-                cached_reads,
-            }),
+            Err(BuildExit::Aborted { fees }) => Ok(BuildOutcome::Aborted { fees, cached_reads }),
             Err(BuildExit::Fatal(err)) => Err(err),
         }
     }

@@ -75,7 +75,7 @@ fn init_txpool_defaults() {
         .expect("failed to initialize txpool defaults");
 }
 
-pub(crate) fn init_defaults() {
+pub fn init_defaults() {
     init_download_urls();
     init_payload_builder_defaults();
     init_txpool_defaults();

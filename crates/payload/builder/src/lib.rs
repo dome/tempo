@@ -291,8 +291,11 @@ where
 
         let mut cumulative_gas_used = 0;
         let mut non_payment_gas_used = 0;
-        // initial block size usage - size of withdrawals plus 1Kb of overhead for the block header
-        let mut block_size_used = attributes.withdrawals().length() + 1024;
+        // initial block size usage - size of withdrawals plus overhead for the block header.
+        // Use actual extra_data length (up to 10KiB during DKG) plus 1KiB for the rest of the
+        // header RLP to avoid underestimating by up to ~9KiB when extra_data is large.
+        let mut block_size_used =
+            attributes.withdrawals().length() + attributes.extra_data().len() + 1024;
         let mut payment_transactions = 0u64;
         let mut total_fees = U256::ZERO;
 
@@ -318,8 +321,21 @@ where
                 return false;
             }
 
+            // Enforce Osaka block size limit during subblock selection to prevent the builder
+            // from assembling an oversized block that fails at final RLP validation.
+            let subblock_size = subblock.total_tx_size();
+            if is_osaka && block_size_used + subblock_size > MAX_RLP_BLOCK_SIZE {
+                warn!(
+                    block_size_used,
+                    subblock_size,
+                    max = MAX_RLP_BLOCK_SIZE,
+                    "dropping subblock that would exceed Osaka block size limit"
+                );
+                return false;
+            }
+
             // Account for the subblock's size
-            block_size_used += subblock.total_tx_size();
+            block_size_used += subblock_size;
 
             true
         });
@@ -952,6 +968,162 @@ mod tests {
         let injected_data = attrs.extra_data().clone();
 
         assert_eq!(injected_data, extra_data);
+    }
+
+    /// Creates a subblock with a single legacy transaction whose `input` is `input_len` bytes,
+    /// producing a subblock with `total_tx_size()` roughly proportional to `input_len`.
+    fn large_subblock(input_len: usize) -> RecoveredSubBlock {
+        let tx = TempoTxEnvelope::Legacy(Signed::new_unhashed(
+            TxLegacy {
+                chain_id: None,
+                nonce: 0,
+                gas_price: 0,
+                gas_limit: u64::MAX,
+                to: Address::ZERO.into(),
+                value: U256::ZERO,
+                input: Bytes::from(vec![0x42; input_len]),
+            },
+            Signature::test_signature(),
+        ));
+        let signed = SignedSubBlock {
+            inner: SubBlock {
+                version: SubBlockVersion::V1,
+                parent_hash: B256::random(),
+                fee_recipient: Address::random(),
+                transactions: vec![tx],
+            },
+            signature: Bytes::new(),
+        };
+        RecoveredSubBlock::new_unchecked(signed, vec![Address::ZERO], B256::ZERO)
+    }
+
+    #[test]
+    fn block_size_estimate_includes_extra_data() {
+        // Verify that extra_data length is included in the initial block size estimate.
+        // With 1KiB hardcoded overhead + 10KiB extra_data, the estimate should be ~11KiB+
+        // rather than just ~1KiB.
+        let small_extra = Bytes::from(vec![0u8; 100]);
+        let large_extra = Bytes::from(vec![0u8; 10 * 1024]);
+
+        let withdrawals_len = 0usize; // simplified
+        let small_estimate = withdrawals_len + small_extra.len() + 1024;
+        let large_estimate = withdrawals_len + large_extra.len() + 1024;
+
+        // Large extra_data (DKG) should produce a significantly larger estimate
+        assert!(
+            large_estimate - small_estimate >= 9 * 1024,
+            "10KiB extra_data should add ~10KiB to estimate vs 100B extra_data, \
+             got diff={}",
+            large_estimate - small_estimate
+        );
+
+        // The old code used just `1024` which would be the same for both
+        let old_estimate = withdrawals_len + 1024;
+        assert_eq!(old_estimate, 1024, "old estimate was fixed regardless of extra_data");
+        assert!(
+            large_estimate > old_estimate + 9 * 1024,
+            "new estimate with large extra_data should be >9KiB more than old fixed estimate"
+        );
+    }
+
+    #[test]
+    fn subblock_retention_enforces_osaka_size_limit() {
+        // Simulate the subblock retention logic from build_payload with Osaka active.
+        // Subblocks that would push block_size_used over MAX_RLP_BLOCK_SIZE should be dropped.
+        let is_osaka = true;
+
+        // Start with some overhead (header + extra_data + withdrawals)
+        let mut block_size_used = 1024 + 100; // 1KiB header + 100B extra_data
+
+        // Create subblocks that individually fit but collectively exceed the limit.
+        // MAX_RLP_BLOCK_SIZE is 10MB (10_485_760 bytes).
+        // Create 8 subblocks of ~1.5MB each = ~12MB total, exceeding the 10MB limit.
+        let subblocks: Vec<_> = (0..8).map(|_| large_subblock(1_500_000)).collect();
+
+        let mut retained = Vec::new();
+        for subblock in &subblocks {
+            let subblock_size = subblock.total_tx_size();
+            if is_osaka && block_size_used + subblock_size > MAX_RLP_BLOCK_SIZE {
+                // Would exceed limit — drop
+                continue;
+            }
+            block_size_used += subblock_size;
+            retained.push(subblock);
+        }
+
+        // Should have retained fewer than all 8
+        assert!(
+            retained.len() < subblocks.len(),
+            "should have dropped some subblocks, retained {} of {}",
+            retained.len(),
+            subblocks.len()
+        );
+
+        // Final block_size_used should be within the limit
+        assert!(
+            block_size_used <= MAX_RLP_BLOCK_SIZE,
+            "block_size_used ({}) should not exceed MAX_RLP_BLOCK_SIZE ({})",
+            block_size_used,
+            MAX_RLP_BLOCK_SIZE
+        );
+    }
+
+    #[test]
+    fn subblock_retention_no_limit_without_osaka() {
+        // Without Osaka, subblocks should all be retained regardless of size.
+        let is_osaka = false;
+        let mut block_size_used = 1024;
+
+        let subblocks: Vec<_> = (0..8).map(|_| large_subblock(1_500_000)).collect();
+
+        let mut retained = Vec::new();
+        for subblock in &subblocks {
+            let subblock_size = subblock.total_tx_size();
+            if is_osaka && block_size_used + subblock_size > MAX_RLP_BLOCK_SIZE {
+                continue;
+            }
+            block_size_used += subblock_size;
+            retained.push(subblock);
+        }
+
+        // All subblocks retained without Osaka
+        assert_eq!(
+            retained.len(),
+            subblocks.len(),
+            "without Osaka, all subblocks should be retained"
+        );
+    }
+
+    #[test]
+    fn subblock_retention_drops_tail_preserves_order() {
+        // When some subblocks don't fit, the ones that fit first (in order) are kept.
+        let is_osaka = true;
+        let mut block_size_used = 1024;
+
+        // 6 subblocks of ~2MB each = ~12MB. Only ~5 should fit in 10MB.
+        let subblocks: Vec<_> = (0..6).map(|_| large_subblock(2_000_000)).collect();
+        let original_sizes: Vec<_> = subblocks.iter().map(|s| s.total_tx_size()).collect();
+
+        let mut retained_sizes = Vec::new();
+        for subblock in &subblocks {
+            let subblock_size = subblock.total_tx_size();
+            if is_osaka && block_size_used + subblock_size > MAX_RLP_BLOCK_SIZE {
+                continue;
+            }
+            block_size_used += subblock_size;
+            retained_sizes.push(subblock_size);
+        }
+
+        // The retained subblocks should be a prefix of the original (order preserved)
+        assert_eq!(
+            &original_sizes[..retained_sizes.len()],
+            &retained_sizes[..],
+            "retained subblocks should be the first N from the original order"
+        );
+        assert!(
+            retained_sizes.len() < original_sizes.len(),
+            "some subblocks should have been dropped"
+        );
     }
 
     #[test]

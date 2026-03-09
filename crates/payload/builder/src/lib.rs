@@ -78,25 +78,29 @@ impl PoolSkipReason {
             Self::ExceedsNonPaymentGasLimit => InvalidPoolTransactionError::Other(Box::new(
                 TempoPoolTransactionError::ExceedsNonPaymentLimit,
             )),
-            Self::OversizedBlock { projected_size } => {
-                InvalidPoolTransactionError::OversizedData {
-                    size: *projected_size,
-                    limit: MAX_RLP_BLOCK_SIZE,
-                }
-            }
+            Self::OversizedBlock { projected_size } => InvalidPoolTransactionError::OversizedData {
+                size: *projected_size,
+                limit: MAX_RLP_BLOCK_SIZE,
+            },
         }
     }
 
     fn record_metric(&self, metrics: &TempoPayloadBuilderMetrics) {
         match self {
             Self::ExceedsNonSharedGasLimit { .. } => {
-                metrics.pool_transactions_skipped_exceeds_non_shared_gas_limit.increment(1);
+                metrics
+                    .pool_transactions_skipped_exceeds_non_shared_gas_limit
+                    .increment(1);
             }
             Self::ExceedsNonPaymentGasLimit => {
-                metrics.pool_transactions_skipped_exceeds_non_payment_gas_limit.increment(1);
+                metrics
+                    .pool_transactions_skipped_exceeds_non_payment_gas_limit
+                    .increment(1);
             }
             Self::OversizedBlock { .. } => {
-                metrics.pool_transactions_skipped_oversized_block.increment(1);
+                metrics
+                    .pool_transactions_skipped_oversized_block
+                    .increment(1);
             }
         }
     }
@@ -141,7 +145,9 @@ fn check_pool_tx_admission(
     if is_osaka {
         let projected = block_size_used + pool_tx.transaction.inner().length();
         if projected > MAX_RLP_BLOCK_SIZE {
-            return Some(PoolSkipReason::OversizedBlock { projected_size: projected });
+            return Some(PoolSkipReason::OversizedBlock {
+                projected_size: projected,
+            });
         }
     }
 
@@ -577,13 +583,16 @@ where
             let tx_execution_start = Instant::now();
             let gas_used = match builder.execute_transaction(tx_with_env) {
                 Ok(gas_used) => gas_used,
-                Err(BlockExecutionError::Validation(
-                    BlockValidationError::InvalidTx { error, .. },
-                )) => {
+                Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+                    error,
+                    ..
+                })) => {
                     if error.is_nonce_too_low() {
                         // if the nonce is too low, we can skip this transaction
                         trace!(%error, tx = %tx_debug_repr, "skipping nonce too low transaction");
-                        self.metrics.pool_transactions_skipped_nonce_too_low.increment(1);
+                        self.metrics
+                            .pool_transactions_skipped_nonce_too_low
+                            .increment(1);
                     } else {
                         // if the transaction is invalid, we can skip it and all of its
                         // descendants
@@ -594,7 +603,9 @@ where
                                 InvalidTransactionError::TxTypeNotSupported,
                             ),
                         );
-                        self.metrics.pool_transactions_skipped_invalid_tx.increment(1);
+                        self.metrics
+                            .pool_transactions_skipped_invalid_tx
+                            .increment(1);
                     }
                     pool_transactions_skipped += 1;
                     continue;
@@ -612,7 +623,9 @@ where
             };
             pool_transactions_executed += 1;
             let elapsed = tx_execution_start.elapsed();
-            self.metrics.transaction_execution_duration_seconds.record(elapsed);
+            self.metrics
+                .transaction_execution_duration_seconds
+                .record(elapsed);
             trace!(?elapsed, "Transaction executed");
 
             // update and add to total fees
@@ -1077,22 +1090,27 @@ mod tests {
         let tx = mock_pool_tx(100_000);
         // only 50k remaining
         let result = check_pool_tx_admission(&tx, 950_000, 1_000_000, 0, 500_000, 0, false);
-        assert!(matches!(result, Some(PoolSkipReason::ExceedsNonSharedGasLimit { .. })));
+        assert!(matches!(
+            result,
+            Some(PoolSkipReason::ExceedsNonSharedGasLimit { .. })
+        ));
     }
 
     #[test]
     fn admission_rejects_non_payment_exceeding_general_gas() {
         let tx = mock_pool_tx(100_000);
         let result = check_pool_tx_admission(&tx, 0, 1_000_000, 450_000, 500_000, 0, false);
-        assert!(matches!(result, Some(PoolSkipReason::ExceedsNonPaymentGasLimit)));
+        assert!(matches!(
+            result,
+            Some(PoolSkipReason::ExceedsNonPaymentGasLimit)
+        ));
     }
 
     #[test]
     fn admission_allows_payment_tx_past_general_gas_limit() {
         // Payment tx: to address with TIP-20 prefix 0x20C0...
         let mut payment_addr = [0u8; 20];
-        payment_addr[..12]
-            .copy_from_slice(&tempo_primitives::transaction::TIP20_PAYMENT_PREFIX);
+        payment_addr[..12].copy_from_slice(&tempo_primitives::transaction::TIP20_PAYMENT_PREFIX);
         let tx = mock_pool_tx_to(100_000, Address::from(payment_addr));
         // non_payment_gas already at limit — but payment txs bypass this check
         let result = check_pool_tx_admission(&tx, 0, 1_000_000, 500_000, 500_000, 0, false);
@@ -1104,7 +1122,10 @@ mod tests {
         let tx = mock_pool_tx(21_000);
         let result =
             check_pool_tx_admission(&tx, 0, 30_000_000, 0, 15_000_000, MAX_RLP_BLOCK_SIZE, true);
-        assert!(matches!(result, Some(PoolSkipReason::OversizedBlock { .. })));
+        assert!(matches!(
+            result,
+            Some(PoolSkipReason::OversizedBlock { .. })
+        ));
     }
 
     #[test]

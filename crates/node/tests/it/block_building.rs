@@ -172,11 +172,11 @@ where
 fn count_transaction_types(transactions: &[TempoTxEnvelope]) -> (usize, usize) {
     let payment_count = transactions
         .iter()
-        .filter(|tx| tx.is_payment(PaymentRules::T2))
+        .filter(|tx| tx.is_payment(PaymentRules::LATEST))
         .count();
     let non_payment_count = transactions
         .iter()
-        .filter(|tx| !tx.is_payment(PaymentRules::T2))
+        .filter(|tx| !tx.is_payment(PaymentRules::LATEST))
         .count();
     (payment_count, non_payment_count)
 }
@@ -326,7 +326,7 @@ async fn test_block_building_only_payment_txs() -> eyre::Result<()> {
 
     for tx in &user_txs {
         assert!(
-            tx.is_payment(PaymentRules::T2),
+            tx.is_payment(PaymentRules::LATEST),
             "All transactions should be payment transactions"
         );
     }

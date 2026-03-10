@@ -1,6 +1,6 @@
 use reth_metrics::{
     Metrics,
-    metrics::{Counter, Gauge, Histogram},
+    metrics::{Gauge, Histogram},
 };
 use std::time::{Duration, Instant};
 

@@ -275,8 +275,9 @@ where
 
         let mut cumulative_gas_used = 0;
         let mut non_payment_gas_used = 0;
-        // initial block size usage - size of withdrawals plus 1Kb of overhead for the block header
-        let mut block_size_used = attributes.withdrawals().length() + 1024;
+        // Account for extra_data (up to ~10KiB during DKG) and remaining header fields.
+        let mut block_size_used =
+            attributes.withdrawals().length() + attributes.extra_data().len() + 512;
         let mut payment_transactions = 0u64;
         let mut total_fees = U256::ZERO;
 
@@ -302,8 +303,14 @@ where
                 return false;
             }
 
-            // Account for the subblock's size
-            block_size_used += subblock.total_tx_size();
+            // Skip subblocks that would push the block over the Osaka RLP limit.
+            let subblock_size = subblock.total_tx_size();
+            if is_osaka && block_size_used + subblock_size > MAX_RLP_BLOCK_SIZE {
+                warn!(block_size_used, subblock_size, "dropping oversized subblock");
+                return false;
+            }
+
+            block_size_used += subblock_size;
 
             true
         });
@@ -358,6 +365,18 @@ where
         self.metrics
             .prepare_system_transactions_duration_seconds
             .record(prepare_system_txs_elapsed);
+
+        // Bail early and mark height invalid so retries skip subblocks.
+        if is_osaka && block_size_used > MAX_RLP_BLOCK_SIZE {
+            let block_number = builder.evm().block().number.to();
+            warn!(block_size_used, block_number, "block oversized before pool tx iteration");
+            self.highest_invalid_subblock
+                .store(block_number, Ordering::Relaxed);
+            return Err(PayloadBuilderError::other(ConsensusError::BlockTooLarge {
+                rlp_length: block_size_used,
+                max_rlp_length: MAX_RLP_BLOCK_SIZE,
+            }));
+        }
 
         let base_fee = builder.evm_mut().block().basefee;
         let mut best_txs = best_txs(BestTransactionsAttributes::new(
@@ -591,6 +610,9 @@ where
         let rlp_length = sealed_block.rlp_length();
 
         if is_osaka && rlp_length > MAX_RLP_BLOCK_SIZE {
+            // Mark height invalid so retries skip subblocks.
+            self.highest_invalid_subblock
+                .store(sealed_block.number(), Ordering::Relaxed);
             return Err(PayloadBuilderError::other(ConsensusError::BlockTooLarge {
                 rlp_length,
                 max_rlp_length: MAX_RLP_BLOCK_SIZE,

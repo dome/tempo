@@ -175,6 +175,11 @@ where
         )
     }
 
+    /// Validates keychain authorization using fee context resolved by `validate_one`.
+    ///
+    /// The pool must use the same fee payer and fee token that execution will use, otherwise
+    /// keychain spending-limit checks can diverge for sponsored transactions or inferred tokens.
+    /// This function takes those resolved values explicitly to keep pool/execution parity.
     fn validate_against_keychain_with_fee_context(
         &self,
         transaction: &TempoPooledTransaction,
@@ -248,12 +253,12 @@ where
         };
 
         // Ensure that if key auth is present, it is for the same key as the keychain signature.
-        if let Some(auth) = auth {
-            if auth.key_id != key_id {
-                return Ok(Err(TempoPoolTransactionError::Keychain(
-                    "KeyAuthorization key_id does not match Keychain signature key_id",
-                )));
-            }
+        if let Some(auth) = auth
+            && auth.key_id != key_id
+        {
+            return Ok(Err(TempoPoolTransactionError::Keychain(
+                "KeyAuthorization key_id does not match Keychain signature key_id",
+            )));
         }
 
         // Compute storage slot using helper function

@@ -23,7 +23,7 @@ use reth_evm::{
     block::{BlockExecutionError, BlockValidationError},
     execute::{BlockBuilder, BlockBuilderOutcome},
 };
-use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
+use reth_execution_types::BlockExecutionOutput;
 use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
 use reth_payload_primitives::{BuiltPayload, BuiltPayloadExecutedBlock, PayloadBuilderAttributes};
 use reth_primitives_traits::{Recovered, transaction::error::InvalidTransactionError};

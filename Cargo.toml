@@ -7,30 +7,30 @@ publish = false
 
 [workspace]
 members = [
-  "bin/tempo",
-  "bin/tempo-bench",
-  "bin/tempo-sidecar",
-  "crates/alloy",
-  "crates/chainspec",
-  "crates/commonware-node",
-  "crates/commonware-node-config",
-  "crates/dkg-onchain-artifacts",
-  "crates/consensus",
-  "crates/eyre",
-  "crates/evm",
-  "crates/e2e",
-  "crates/faucet",
-  "crates/node",
-  "crates/payload/builder",
-  "crates/payload/types",
-  "crates/precompiles",
-  "crates/precompiles-macros",
-  "crates/primitives",
-  "crates/contracts",
-  "crates/telemetry-util",
-  "crates/transaction-pool",
-  "crates/revm",
-  "xtask",
+    "bin/tempo",
+    "bin/tempo-bench",
+    "bin/tempo-sidecar",
+    "crates/alloy",
+    "crates/chainspec",
+    "crates/commonware-node",
+    "crates/commonware-node-config",
+    "crates/dkg-onchain-artifacts",
+    "crates/consensus",
+    "crates/eyre",
+    "crates/evm",
+    "crates/e2e",
+    "crates/faucet",
+    "crates/node",
+    "crates/payload/builder",
+    "crates/payload/types",
+    "crates/precompiles",
+    "crates/precompiles-macros",
+    "crates/primitives",
+    "crates/contracts",
+    "crates/telemetry-util",
+    "crates/transaction-pool",
+    "crates/revm",
+    "xtask",
 ]
 
 # Resolver 3 is available with edition 2024
@@ -162,16 +162,16 @@ reth-tracing = { git = "https://github.com/paradigmxyz/reth", branch = "tempo/v2
 reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", branch = "tempo/v2.0" }
 
 reth-revm = { git = "https://github.com/paradigmxyz/reth", branch = "tempo/v2.0", features = [
-  "std",
-  "optional-checks",
+    "std",
+    "optional-checks",
 ] }
-revm = { version = "34.0.0", features = ["optional_fee_charge"], default-features = false }
+revm = { version = "36.0.0", features = ["optional_fee_charge"], default-features = false }
 
 alloy = { version = "1.6.1", default-features = false }
 alloy-consensus = { version = "1.6.1", default-features = false }
 alloy-contract = { version = "1.6.1", default-features = false }
 alloy-eips = { version = "1.6.1", default-features = false }
-alloy-evm = "0.27.3"
+alloy-evm = "0.29"
 revm-inspectors = "0.34.2"
 alloy-genesis = "1.6.1"
 alloy-hardforks = "0.4.7"

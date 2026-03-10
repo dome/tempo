@@ -78,7 +78,7 @@ fn subblocks_are_included() {
                 ConsensusEngineEvent::CanonicalBlockAdded(block, _) => block,
             };
 
-            let receipts = &block.execution_outcome().receipts()[0];
+            let receipts = &block.execution_outcome().receipts;
 
             // Assert that block only contains our subblock transactions and the system transactions
             assert_eq!(
@@ -184,7 +184,7 @@ fn subblocks_are_included_with_failing_txs() {
                 ConsensusEngineEvent::InvalidBlock(_) => unreachable!("unexpected invalid block"),
                 ConsensusEngineEvent::CanonicalBlockAdded(block, _) => block,
             };
-            let receipts = &block.execution_outcome().receipts()[0];
+            let receipts = &block.execution_outcome().receipts;
 
             // Assert that block only contains our subblock transactions and system transactions
             assert_eq!(

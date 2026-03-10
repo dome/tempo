@@ -30,7 +30,7 @@ use alloy::{
     primitives::{U256, uint},
 };
 use reth_ethereum::tasks::{
-    TaskSpawner,
+    Runtime,
     pool::{BlockingTaskGuard, BlockingTaskPool},
 };
 use reth_evm::{
@@ -185,7 +185,7 @@ impl<N: FullNodeTypes<Types = TempoNode>> EthApiSpec for TempoEthApi<N> {
 
 impl<N: FullNodeTypes<Types = TempoNode>> SpawnBlocking for TempoEthApi<N> {
     #[inline]
-    fn io_task_spawner(&self) -> impl TaskSpawner {
+    fn io_task_spawner(&self) -> &Runtime {
         self.inner.task_spawner()
     }
 
@@ -431,8 +431,15 @@ impl TempoReceiptConverter {
     pub fn new(chain_spec: Arc<TempoChainSpec>) -> Self {
         Self {
             inner: EthReceiptConverter::new(chain_spec).with_builder(
-                |receipt: TempoReceipt, next_log_index, meta| {
-                    receipt.into_rpc(next_log_index, meta).into_with_bloom()
+                |receipt: TempoReceipt, next_log_index: usize, meta: TransactionMeta| {
+                    let rpc_logs = Log::collect_for_receipt(next_log_index, meta, receipt.logs);
+                    let rpc_receipt = TempoReceipt {
+                        tx_type: receipt.tx_type,
+                        success: receipt.success,
+                        cumulative_gas_used: receipt.cumulative_gas_used,
+                        logs: rpc_logs,
+                    };
+                    rpc_receipt.into_with_bloom()
                 },
             ),
         }

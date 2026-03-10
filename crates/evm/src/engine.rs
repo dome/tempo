@@ -98,7 +98,6 @@ mod tests {
     use alloy_consensus::{BlockHeader, Signed, TxLegacy};
     use alloy_primitives::{B256, Bytes, Signature, TxKind, U256};
     use alloy_rlp::{Encodable, bytes::BytesMut};
-    use rayon::iter::{IntoParallelIterator, ParallelIterator};
     use reth_chainspec::EthChainSpec;
     use reth_evm::{ConfigureEngineEvm, ConvertTx, ExecutableTxTuple};
     use tempo_chainspec::{TempoChainSpec, spec::ANDANTINO};
@@ -184,7 +183,7 @@ mod tests {
 
         let tuple = result.unwrap();
         let (iter, convert) = tuple.into_parts();
-        let items: Vec<_> = iter.into_par_iter().collect();
+        let items: Vec<_> = iter.into_iter().collect();
 
         // Should have 3 transactions
         assert_eq!(items.len(), 3);

@@ -8,6 +8,7 @@ use std::{
 
 use alloy_primitives::{Address, TxKind, U256};
 use reth_evm::{EvmError, EvmInternals};
+use revm::context::result::ResultGas;
 use revm::{
     Database,
     context::{
@@ -605,6 +606,7 @@ where
         &mut self,
         evm: &mut Self::Evm,
         result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+        result_gas: ResultGas,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
         evm.logs.clear();
         // reset initial gas to 0 to avoid gas limit check errors
@@ -614,7 +616,7 @@ where
         }
 
         MainnetHandler::default()
-            .execution_result(evm, result)
+            .execution_result(evm, result, result_gas)
             .map(|result| result.map_haltreason(Into::into))
     }
 
@@ -640,6 +642,7 @@ where
         // since the default implementation only checks for TransactionType::Eip7702
         let refunded_gas = if has_aa_auth_list {
             let chain_id = ctx.cfg().chain_id();
+            let auth_refund = ctx.cfg().gas_params.tx_eip7702_auth_refund();
 
             let (tx, journal) = evm.ctx().tx_journal_mut();
 
@@ -647,6 +650,7 @@ where
 
             apply_auth_list::<_, Self::Error>(
                 chain_id,
+                auth_refund,
                 tempo_tx_env
                     .tempo_authorization_list
                     .iter()
@@ -1437,7 +1441,8 @@ where
 
             Ok(ExecutionResult::Halt {
                 reason: TempoHaltReason::SubblockTxFeePayment,
-                gas_used: 0,
+                gas: ResultGas::default(),
+                logs: Vec::new(),
             })
         } else {
             MainnetHandler::default()

@@ -4,7 +4,7 @@ use alloy_evm::{
     Database, Evm, RecoveredTx,
     block::{
         BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockValidationError,
-        ExecutableTx, OnStateHook, TxResult,
+        ExecutableTx, OnStateHook, StateDB, TxResult,
     },
     eth::{
         EthBlockExecutor, EthTxResult,
@@ -19,10 +19,12 @@ use commonware_cryptography::{
     ed25519::{PublicKey, Signature},
 };
 use reth_revm::{
-    DatabaseCommit, Inspector, State,
+    Inspector,
     context::result::ResultAndState,
     context_interface::JournalTr,
-    state::{Account, Bytecode, EvmState},
+    context_interface::journaled_state::account::JournaledAccountTr,
+    primitives::KECCAK_EMPTY,
+    state::Bytecode,
 };
 use std::collections::{HashMap, HashSet};
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardforks};
@@ -111,7 +113,7 @@ impl<H> TxResult for TempoTxResult<H> {
 pub(crate) struct TempoBlockExecutor<'a, DB: Database, I> {
     pub(crate) inner: EthBlockExecutor<
         'a,
-        TempoEvm<&'a mut State<DB>, I>,
+        TempoEvm<DB, I>,
         &'a TempoChainSpec,
         TempoReceiptBuilder,
     >,
@@ -129,11 +131,11 @@ pub(crate) struct TempoBlockExecutor<'a, DB: Database, I> {
 
 impl<'a, DB, I> TempoBlockExecutor<'a, DB, I>
 where
-    DB: Database,
-    I: Inspector<TempoContext<&'a mut State<DB>>>,
+    DB: StateDB,
+    I: Inspector<TempoContext<DB>>,
 {
     pub(crate) fn new(
-        evm: TempoEvm<&'a mut State<DB>, I>,
+        evm: TempoEvm<DB, I>,
         ctx: TempoBlockExecutionCtx<'a>,
         chain_spec: &'a TempoChainSpec,
     ) -> Self {
@@ -361,12 +363,12 @@ where
 
 impl<'a, DB, I> BlockExecutor for TempoBlockExecutor<'a, DB, I>
 where
-    DB: Database,
-    I: Inspector<TempoContext<&'a mut State<DB>>>,
+    DB: StateDB,
+    I: Inspector<TempoContext<DB>>,
 {
     type Transaction = TempoTxEnvelope;
     type Receipt = TempoReceipt;
-    type Evm = TempoEvm<&'a mut State<DB>, I>;
+    type Evm = TempoEvm<DB, I>;
     type Result = TempoTxResult<TempoHaltReason>;
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), alloy_evm::block::BlockExecutionError> {
@@ -375,21 +377,17 @@ where
         // Deploy 0xEF marker bytecode to ValidatorConfigV2 when T2 activates.
         let timestamp = self.evm().block().timestamp.to::<u64>();
         if self.inner.spec.is_t2_active_at_timestamp(timestamp) {
-            let db = self.evm_mut().ctx_mut().journaled_state.db_mut();
-            let acc = db
-                .load_cache_account(VALIDATOR_CONFIG_V2_ADDRESS)
+            let mut acc = self
+                .evm_mut()
+                .ctx_mut()
+                .journaled_state
+                .load_account_with_code_mut(VALIDATOR_CONFIG_V2_ADDRESS)
                 .map_err(BlockExecutionError::other)?;
-            let mut info = acc.account_info().unwrap_or_default();
-            if info.is_empty_code_hash() {
-                let code = Bytecode::new_legacy([0xef].into());
-                info.code_hash = code.hash_slow();
-                info.code = Some(code);
-                let mut account: Account = info.into();
-                account.mark_touch();
-                db.commit(EvmState::from_iter([(
-                    VALIDATOR_CONFIG_V2_ADDRESS,
-                    account,
-                )]));
+            if acc.data.code_hash() == &KECCAK_EMPTY
+                || acc.data.code().map_or(true, |c| c.is_empty())
+            {
+                acc.data
+                    .set_code_and_hash_slow(Bytecode::new_legacy([0xef].into()));
             }
         }
 
@@ -528,8 +526,8 @@ where
 #[cfg(test)]
 impl<'a, DB, I> TempoBlockExecutor<'a, DB, I>
 where
-    DB: Database,
-    I: Inspector<TempoContext<&'a mut State<DB>>>,
+    DB: StateDB,
+    I: Inspector<TempoContext<DB>>,
 {
     /// Set the block section for testing section transition logic.
     pub(crate) fn set_section_for_test(&mut self, section: BlockSection) {
@@ -567,6 +565,7 @@ mod tests {
     use commonware_cryptography::{Signer, ed25519::PrivateKey};
     use reth_chainspec::EthChainSpec;
     use reth_revm::State;
+    use revm::context::result::ResultGas;
     use revm::{context::result::ExecutionResult, database::EmptyDB};
     use tempo_primitives::{
         SubBlockMetadata, TempoSignature, TempoTransaction, TempoTxType,
@@ -601,8 +600,7 @@ mod tests {
         )];
         let result: ExecutionResult<TempoHaltReason> = ExecutionResult::Success {
             reason: revm::context::result::SuccessReason::Return,
-            gas_used: 21000,
-            gas_refunded: 0,
+            gas: ResultGas::default().with_spent(21000),
             logs,
             output: revm::context::result::Output::Call(Bytes::new()),
         };
@@ -1111,8 +1109,7 @@ mod tests {
                 result: ResultAndState {
                     result: revm::context::result::ExecutionResult::Success {
                         reason: revm::context::result::SuccessReason::Return,
-                        gas_used: 21000,
-                        gas_refunded: 0,
+                        gas: ResultGas::default().with_spent(21000),
                         logs: vec![],
                         output: revm::context::result::Output::Call(Bytes::new()),
                     },
@@ -1163,6 +1160,11 @@ mod tests {
 
     #[test]
     fn test_apply_pre_execution_deploys_validator_v2_code() {
+        use reth_revm::{
+            context_interface::JournalTr,
+            context_interface::journaled_state::account::JournaledAccountTr,
+            primitives::KECCAK_EMPTY,
+        };
         use std::sync::Arc;
         use tempo_chainspec::spec::DEV;
 
@@ -1175,8 +1177,13 @@ mod tests {
 
         executor.apply_pre_execution_changes().unwrap();
 
-        let acc = db.load_cache_account(VALIDATOR_CONFIG_V2_ADDRESS).unwrap();
-        let info = acc.account_info().unwrap();
-        assert!(!info.is_empty_code_hash());
+        // Verify via the journaled state (changes live in the journal, not yet committed to DB)
+        let acc = executor
+            .evm_mut()
+            .ctx_mut()
+            .journaled_state
+            .load_account_with_code_mut(VALIDATOR_CONFIG_V2_ADDRESS)
+            .unwrap();
+        assert_ne!(*acc.data.code_hash(), KECCAK_EMPTY);
     }
 }

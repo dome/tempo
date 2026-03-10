@@ -924,7 +924,12 @@ where
         }
 
         // Validate transactions that involve keychain keys.
-        match self.validate_against_keychain(&transaction, &mut state_provider) {
+        match self.validate_against_keychain_with_fee_context(
+            &transaction,
+            &mut state_provider,
+            fee_payer,
+            fee_token,
+        ) {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
                 return TransactionValidationOutcome::Invalid(

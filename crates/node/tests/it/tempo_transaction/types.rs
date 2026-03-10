@@ -26,6 +26,12 @@ pub(crate) trait TestEnv: Sized {
     /// Currently active hardfork
     fn hardfork(&self) -> TempoHardfork;
 
+    /// Whether this environment still runs legacy mempool behavior for keychain
+    /// spending-limit checks that surface as builder exclusion instead of RPC rejection.
+    fn uses_legacy_keyauth_pool_validation(&self) -> bool {
+        false
+    }
+
     /// Fund `addr` with fee tokens so it can transact.
     /// Returns the funded amount.
     async fn fund_account(&mut self, addr: Address) -> eyre::Result<U256>;

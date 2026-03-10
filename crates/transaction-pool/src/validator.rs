@@ -2218,6 +2218,7 @@ mod tests {
         use reth_chainspec::ForkCondition;
         use reth_transaction_pool::error::PoolTransactionError;
         use tempo_chainspec::hardfork::TempoHardfork;
+        use tempo_precompiles::DEFAULT_FEE_TOKEN;
         use tempo_primitives::transaction::{
             KeyAuthorization, SignatureType, SignedKeyAuthorization, TempoTransaction,
             tempo_transaction::Call,
@@ -3669,6 +3670,127 @@ mod tests {
                     Err(TempoPoolTransactionError::SpendingLimitExceeded { .. })
                 ),
                 "Wrong token spending limit should be rejected (fee token has 0 limit)"
+            );
+        }
+
+        /// Creates a sponsored AA transaction with a keychain signature (fee_payer != sender).
+        fn create_sponsored_aa_with_keychain_signature(
+            user_address: Address,
+            access_key_signer: &PrivateKeySigner,
+        ) -> TempoPooledTransaction {
+            let fee_payer_signer = PrivateKeySigner::random();
+
+            let mut tx_aa = TempoTransaction {
+                chain_id: 42431,
+                max_priority_fee_per_gas: 1_000_000_000,
+                max_fee_per_gas: 20_000_000_000,
+                gas_limit: 1_000_000,
+                calls: vec![Call {
+                    to: TxKind::Call(address!("0000000000000000000000000000000000000001")),
+                    value: U256::ZERO,
+                    input: alloy_primitives::Bytes::new(),
+                }],
+                nonce_key: U256::ZERO,
+                nonce: 0,
+                fee_token: Some(address!("0000000000000000000000000000000000000002")),
+                fee_payer_signature: None,
+                valid_after: None,
+                valid_before: None,
+                access_list: Default::default(),
+                tempo_authorization_list: vec![],
+                key_authorization: None,
+            };
+
+            // Fee payer signs over the tx
+            let fee_payer_hash = tx_aa.fee_payer_signature_hash(user_address);
+            let fee_payer_sig = fee_payer_signer
+                .sign_hash_sync(&fee_payer_hash)
+                .expect("signing failed");
+            tx_aa.fee_payer_signature = Some(fee_payer_sig);
+
+            let unsigned = AASigned::new_unhashed(
+                tx_aa.clone(),
+                TempoSignature::Primitive(PrimitiveSignature::Secp256k1(
+                    Signature::test_signature(),
+                )),
+            );
+            let sig_hash = unsigned.signature_hash();
+            let signing_hash = KeychainSignature::signing_hash(sig_hash, user_address);
+            let signature = access_key_signer
+                .sign_hash_sync(&signing_hash)
+                .expect("signing failed");
+            let keychain_sig = TempoSignature::Keychain(KeychainSignature::new(
+                user_address,
+                PrimitiveSignature::Secp256k1(signature),
+            ));
+
+            let signed_tx = AASigned::new_unhashed(tx_aa, keychain_sig);
+            let envelope: TempoTxEnvelope = signed_tx.into();
+            let recovered = envelope.try_into_recovered().unwrap();
+            TempoPooledTransaction::new(recovered)
+        }
+
+        #[test]
+        fn test_spending_limit_skip_for_sponsored_tx() -> Result<(), ProviderError> {
+            let (access_key_signer, access_key_address) = generate_keypair();
+            let user_address = Address::random();
+
+            let transaction = create_sponsored_aa_with_keychain_signature(
+                user_address,
+                &access_key_signer,
+            );
+
+            let fee_token = transaction
+                .inner()
+                .fee_token()
+                .unwrap_or(DEFAULT_FEE_TOKEN);
+
+            let validator = setup_validator_with_spending_limit(
+                &transaction,
+                user_address,
+                access_key_address,
+                true,                          // enforce_limits
+                Some((fee_token, U256::ZERO)), // zero spending limit
+            );
+            let state_provider = validator.inner.client().latest().unwrap();
+
+            let result = validator.validate_against_keychain(&transaction, &state_provider)?;
+            assert!(
+                result.is_ok(),
+                "Sponsored tx should skip fee spending limit check, got {result:?}"
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn test_spending_limit_validated_for_non_sponsored_tx() {
+            let (access_key_signer, access_key_address) = generate_keypair();
+            let user_address = Address::random();
+
+            let transaction =
+                create_aa_with_keychain_signature(user_address, &access_key_signer, None);
+
+            let fee_token = transaction
+                .inner()
+                .fee_token()
+                .unwrap_or(DEFAULT_FEE_TOKEN);
+
+            let validator = setup_validator_with_spending_limit(
+                &transaction,
+                user_address,
+                access_key_address,
+                true,                          // enforce_limits
+                Some((fee_token, U256::ZERO)), // zero spending limit
+            );
+            let state_provider = validator.inner.client().latest().unwrap();
+
+            let result = validator.validate_against_keychain(&transaction, &state_provider);
+            assert!(
+                matches!(
+                    result.expect("should not be a provider error"),
+                    Err(TempoPoolTransactionError::SpendingLimitExceeded { .. })
+                ),
+                "Non-sponsored tx should check spending limit"
             );
         }
 

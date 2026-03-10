@@ -240,6 +240,12 @@ where
             // from state for affected (account, key_id, fee_token) combos and evict if
             // the pending tx's fee cost now exceeds the remaining limit.
             if !updates.spending_limit_spends.is_empty()
+                // NOTE: sponsored txs don't consume the sender's key limits.
+                && tx
+                    .transaction
+                    .inner()
+                    .as_aa()
+                    .is_none_or(|aa| aa.tx().fee_payer_signature.is_none())
                 && let Some(ref mut provider) = state_provider
                 && let Some(ref subject) = keychain_subject
                 && subject.matches_spending_limit_update(&updates.spending_limit_spends)
@@ -1044,21 +1050,20 @@ pub(crate) fn exceeds_spending_limit(
     let spec = TempoHardfork::default();
     let limit_key = AccountKeychain::spending_limit_key(subject.account, subject.key_id);
 
-    match provider.with_read_only_storage_ctx(spec, || -> TempoPrecompileResult<bool> {
-        let keychain = AccountKeychain::new();
-        if !keychain.keys[subject.account][subject.key_id]
-            .read()?
-            .enforce_limits
-        {
-            return Ok(false);
-        }
+    provider
+        .with_read_only_storage_ctx(spec, || -> TempoPrecompileResult<bool> {
+            let keychain = AccountKeychain::new();
+            if !keychain.keys[subject.account][subject.key_id]
+                .read()?
+                .enforce_limits
+            {
+                return Ok(false);
+            }
 
-        let remaining = keychain.spending_limits[limit_key][subject.fee_token].read()?;
-        Ok(fee_token_cost > remaining)
-    }) {
-        Ok(exceeds) => exceeds,
-        Err(_) => false,
-    }
+            let remaining = keychain.spending_limits[limit_key][subject.fee_token].read()?;
+            Ok(fee_token_cost > remaining)
+        })
+        .unwrap_or_default()
 }
 
 /// Reads the transfer policy ID for a TIP-20 token, using a cache to avoid redundant lookups.

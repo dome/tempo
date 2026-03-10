@@ -66,6 +66,10 @@ pub(crate) struct TempoPayloadBuilderMetrics {
     pub(crate) rlp_block_size_bytes: Histogram,
     /// RLP-encoded block size in bytes for the last payload.
     pub(crate) rlp_block_size_bytes_last: Gauge,
+    /// Time to compute the hashed post-state from the bundle state.
+    pub(crate) hashed_post_state_duration_seconds: Histogram,
+    /// Time to compute the state root and trie updates.
+    pub(crate) state_root_duration_seconds: Histogram,
 }
 
 /// Increments the unified pool transaction skip counter with the given reason label.

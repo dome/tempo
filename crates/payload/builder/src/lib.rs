@@ -32,7 +32,10 @@ use reth_revm::{
     context::{Block, BlockEnv},
     database::StateProviderDatabase,
 };
-use reth_storage_api::{StateProvider, StateProviderFactory};
+use reth_storage_api::{
+    AccountReader, BlockHashReader, BytecodeReader, HashedPostStateProvider, StateProofProvider,
+    StateProvider, StateProviderFactory, StateRootProvider, StorageRootProvider,
+};
 use reth_transaction_pool::{
     BestTransactions, BestTransactionsAttributes, TransactionPool, ValidPoolTransaction,
     error::InvalidPoolTransactionError,
@@ -61,6 +64,173 @@ use tempo_transaction_pool::{
     transaction::{TempoPoolTransactionError, TempoPooledTransaction},
 };
 use tracing::{Level, debug, debug_span, error, info, instrument, trace, warn};
+
+/// Wraps a [`StateProvider`] reference to instrument `hashed_post_state` and
+/// `state_root_with_updates` with tracing spans and histogram metrics during `builder.finish()`.
+struct InstrumentedFinishProvider<'a> {
+    inner: &'a dyn StateProvider,
+    metrics: TempoPayloadBuilderMetrics,
+}
+
+impl AccountReader for InstrumentedFinishProvider<'_> {
+    fn basic_account(
+        &self,
+        address: &Address,
+    ) -> reth_errors::ProviderResult<Option<reth_primitives_traits::Account>> {
+        self.inner.basic_account(address)
+    }
+}
+
+impl BlockHashReader for InstrumentedFinishProvider<'_> {
+    fn block_hash(
+        &self,
+        number: alloy_primitives::BlockNumber,
+    ) -> reth_errors::ProviderResult<Option<alloy_primitives::B256>> {
+        self.inner.block_hash(number)
+    }
+
+    fn canonical_hashes_range(
+        &self,
+        start: alloy_primitives::BlockNumber,
+        end: alloy_primitives::BlockNumber,
+    ) -> reth_errors::ProviderResult<Vec<alloy_primitives::B256>> {
+        self.inner.canonical_hashes_range(start, end)
+    }
+}
+
+impl BytecodeReader for InstrumentedFinishProvider<'_> {
+    fn bytecode_by_hash(
+        &self,
+        code_hash: &alloy_primitives::B256,
+    ) -> reth_errors::ProviderResult<Option<reth_primitives_traits::Bytecode>> {
+        self.inner.bytecode_by_hash(code_hash)
+    }
+}
+
+impl StateProvider for InstrumentedFinishProvider<'_> {
+    fn storage(
+        &self,
+        account: Address,
+        storage_key: alloy_primitives::StorageKey,
+    ) -> reth_errors::ProviderResult<Option<alloy_primitives::StorageValue>> {
+        self.inner.storage(account, storage_key)
+    }
+}
+
+impl StorageRootProvider for InstrumentedFinishProvider<'_> {
+    fn storage_root(
+        &self,
+        address: Address,
+        hashed_storage: reth_trie_common::HashedStorage,
+    ) -> reth_errors::ProviderResult<alloy_primitives::B256> {
+        self.inner.storage_root(address, hashed_storage)
+    }
+
+    fn storage_proof(
+        &self,
+        address: Address,
+        slot: alloy_primitives::B256,
+        hashed_storage: reth_trie_common::HashedStorage,
+    ) -> reth_errors::ProviderResult<reth_trie_common::StorageProof> {
+        self.inner.storage_proof(address, slot, hashed_storage)
+    }
+
+    fn storage_multiproof(
+        &self,
+        address: Address,
+        slots: &[alloy_primitives::B256],
+        hashed_storage: reth_trie_common::HashedStorage,
+    ) -> reth_errors::ProviderResult<reth_trie_common::StorageMultiProof> {
+        self.inner
+            .storage_multiproof(address, slots, hashed_storage)
+    }
+}
+
+impl StateProofProvider for InstrumentedFinishProvider<'_> {
+    fn proof(
+        &self,
+        input: reth_trie_common::TrieInput,
+        address: Address,
+        slots: &[alloy_primitives::B256],
+    ) -> reth_errors::ProviderResult<reth_trie_common::AccountProof> {
+        self.inner.proof(input, address, slots)
+    }
+
+    fn multiproof(
+        &self,
+        input: reth_trie_common::TrieInput,
+        targets: reth_trie_common::MultiProofTargets,
+    ) -> reth_errors::ProviderResult<reth_trie_common::MultiProof> {
+        self.inner.multiproof(input, targets)
+    }
+
+    fn witness(
+        &self,
+        input: reth_trie_common::TrieInput,
+        target: reth_trie_common::HashedPostState,
+    ) -> reth_errors::ProviderResult<Vec<alloy_primitives::Bytes>> {
+        self.inner.witness(input, target)
+    }
+}
+
+impl HashedPostStateProvider for InstrumentedFinishProvider<'_> {
+    fn hashed_post_state(
+        &self,
+        bundle_state: &reth_revm::db::BundleState,
+    ) -> reth_trie_common::HashedPostState {
+        let start = Instant::now();
+        let _span = debug_span!(target: "payload_builder", "hashed_post_state").entered();
+        let result = self.inner.hashed_post_state(bundle_state);
+        drop(_span);
+        self.metrics
+            .hashed_post_state_duration_seconds
+            .record(start.elapsed());
+        result
+    }
+}
+
+impl StateRootProvider for InstrumentedFinishProvider<'_> {
+    fn state_root(
+        &self,
+        hashed_state: reth_trie_common::HashedPostState,
+    ) -> reth_errors::ProviderResult<alloy_primitives::B256> {
+        self.inner.state_root(hashed_state)
+    }
+
+    fn state_root_from_nodes(
+        &self,
+        input: reth_trie_common::TrieInput,
+    ) -> reth_errors::ProviderResult<alloy_primitives::B256> {
+        self.inner.state_root_from_nodes(input)
+    }
+
+    fn state_root_with_updates(
+        &self,
+        hashed_state: reth_trie_common::HashedPostState,
+    ) -> reth_errors::ProviderResult<(
+        alloy_primitives::B256,
+        reth_trie_common::updates::TrieUpdates,
+    )> {
+        let start = Instant::now();
+        let _span = debug_span!(target: "payload_builder", "state_root_with_updates").entered();
+        let result = self.inner.state_root_with_updates(hashed_state);
+        drop(_span);
+        self.metrics
+            .state_root_duration_seconds
+            .record(start.elapsed());
+        result
+    }
+
+    fn state_root_from_nodes_with_updates(
+        &self,
+        input: reth_trie_common::TrieInput,
+    ) -> reth_errors::ProviderResult<(
+        alloy_primitives::B256,
+        reth_trie_common::updates::TrieUpdates,
+    )> {
+        self.inner.state_root_from_nodes_with_updates(input)
+    }
+}
 
 /// Returns true if a subblock has any expired transactions for the given timestamp.
 fn has_expired_transactions(subblock: &RecoveredSubBlock, timestamp: u64) -> bool {
@@ -615,12 +785,16 @@ where
 
         let builder_finish_start = Instant::now();
         let _finish_span = debug_span!(target: "payload_builder", "finish_block").entered();
+        let instrumented_provider = InstrumentedFinishProvider {
+            inner: &*state_provider,
+            metrics: self.metrics.clone(),
+        };
         let BlockBuilderOutcome {
             execution_result,
             block,
             hashed_state,
             trie_updates,
-        } = builder.finish(&state_provider)?;
+        } = builder.finish(instrumented_provider)?;
         drop(_finish_span);
         let builder_finish_elapsed = builder_finish_start.elapsed();
         self.metrics

@@ -119,7 +119,7 @@ pub(super) async fn run_raw_send_matrix<E: TestEnv>(env: &mut E) -> eyre::Result
                 expiry: KeyExpiry::None,
             })
             .test_action(TestAction::Transfer(transfer_small))
-            .expected(ExpectedOutcome::ExcludedByBuilder),
+            .expected(ExpectedOutcome::Rejection),
         // --- expiry ---
         RawSendTestCase::new(KeyType::P256).key_setup(KeySetup::AccessKey {
             limits: SpendingLimits::Default,

@@ -320,7 +320,7 @@ impl RawSendTestCase {
         // 1. key_setup
         match &self.key_setup {
             KeySetup::ZeroPubKey => outcome = ExpectedOutcome::Revert,
-            KeySetup::DuplicateAuth => outcome = ExpectedOutcome::ExcludedByBuilder,
+            KeySetup::DuplicateAuth => outcome = ExpectedOutcome::Rejection,
             KeySetup::AccessKey {
                 expiry: KeyExpiry::Past,
                 ..
@@ -413,7 +413,7 @@ impl RawSendTestCase {
         }
         match self.expected {
             ExpectedOutcome::Success => {}
-            ExpectedOutcome::Rejection => flags.push("reject"),
+            ExpectedOutcome::Rejection => flags.push("rejected"),
             ExpectedOutcome::Revert => flags.push("revert"),
             ExpectedOutcome::ExcludedByBuilder => flags.push("excluded"),
         }

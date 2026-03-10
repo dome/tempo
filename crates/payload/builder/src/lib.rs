@@ -235,12 +235,10 @@ where
 
         let start = Instant::now();
 
-        let _block_metrics_span = debug_span!(target: "payload_builder", "block_metrics").entered();
         let block_time_millis =
             (attributes.timestamp_millis() - parent_header.timestamp_millis()) as f64;
         self.metrics.block_time_millis.record(block_time_millis);
         self.metrics.block_time_millis_last.set(block_time_millis);
-        drop(_block_metrics_span);
 
         let state_setup_start = Instant::now();
         let _state_setup_span = debug_span!(target: "payload_builder", "state_setup").entered();
@@ -264,7 +262,6 @@ where
             .state_setup_duration_seconds
             .record(state_setup_start.elapsed());
 
-        let _collect_span = debug_span!(target: "payload_builder", "collect_subblocks").entered();
         let chain_spec = self.provider.chain_spec();
         let is_osaka = self
             .provider
@@ -327,10 +324,6 @@ where
             })
             .collect();
 
-        drop(_collect_span);
-
-        let create_evm_start = Instant::now();
-        let _create_evm_span = debug_span!(target: "payload_builder", "create_evm").entered();
         let mut builder = self
             .evm_config
             .builder_for_next_block(
@@ -353,26 +346,15 @@ where
                 },
             )
             .map_err(PayloadBuilderError::other)?;
-        drop(_create_evm_span);
-        self.metrics
-            .create_evm_duration_seconds
-            .record(create_evm_start.elapsed());
 
-        let pre_execution_start = Instant::now();
-        let _pre_execution_span = debug_span!(target: "payload_builder", "pre_execution").entered();
         builder.apply_pre_execution_changes().map_err(|err| {
             warn!(%err, "failed to apply pre-execution changes");
             PayloadBuilderError::Internal(err.into())
         })?;
-        drop(_pre_execution_span);
-        self.metrics
-            .pre_execution_duration_seconds
-            .record(pre_execution_start.elapsed());
 
         debug!("building new payload");
 
         // Prepare system transactions before actual block building and account for their size.
-        let _prepare_txs_span = debug_span!(target: "payload_builder", "prepare_txs").entered();
         let prepare_system_txs_start = Instant::now();
         let system_txs = self.build_seal_block_txs(builder.evm().block(), &subblocks);
         for tx in &system_txs {
@@ -392,7 +374,6 @@ where
                 .blob_gasprice()
                 .map(|gasprice| gasprice as u64),
         ));
-        drop(_prepare_txs_span);
 
         let execution_start = Instant::now();
         let _block_fill_span = debug_span!(target: "payload_builder", "block_fill").entered();
@@ -645,7 +626,6 @@ where
             .payload_finalization_duration_seconds
             .record(builder_finish_elapsed);
 
-        let _seal_span = debug_span!(target: "payload_builder", "seal_payload").entered();
         let total_transactions = block.transaction_count();
         self.metrics
             .total_transactions
@@ -720,7 +700,6 @@ where
         };
 
         let payload = TempoBuiltPayload::new(eth_payload, Some(executed_block));
-        drop(_seal_span);
 
         drop(db);
         Ok(BuildOutcome::Better {

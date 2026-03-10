@@ -540,7 +540,8 @@ where
         }
 
         let subblocks_start = Instant::now();
-        let _subblock_txs_span = debug_span!(target: "payload_builder", "execute_subblock_txs").entered();
+        let _subblock_txs_span =
+            debug_span!(target: "payload_builder", "execute_subblock_txs").entered();
         let subblocks_count = subblocks.len() as f64;
         let mut subblock_transactions = 0f64;
         // Apply subblock transactions
@@ -594,7 +595,8 @@ where
 
         // Apply system transactions
         let system_txs_execution_start = Instant::now();
-        let _system_txs_span = debug_span!(target: "payload_builder", "execute_system_txs").entered();
+        let _system_txs_span =
+            debug_span!(target: "payload_builder", "execute_system_txs").entered();
         for system_tx in system_txs {
             builder
                 .execute_transaction(system_tx)

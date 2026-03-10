@@ -2728,9 +2728,9 @@ mod tests {
                 access_key_address,
                 Some(existing_key_slot),
             );
-            let state_provider = validator.inner.client().latest().unwrap();
+            let mut state_provider = validator.inner.client().latest().unwrap();
 
-            let result = validator.validate_against_keychain(&transaction, &state_provider);
+            let result = validator.validate_against_keychain(&transaction, &mut state_provider);
             assert!(
                 matches!(
                     result.expect("should not be a provider error"),
@@ -2778,9 +2778,9 @@ mod tests {
                 access_key_address,
                 None,
             );
-            let state_provider = validator.inner.client().latest().unwrap();
+            let mut state_provider = validator.inner.client().latest().unwrap();
 
-            let result = validator.validate_against_keychain(&transaction, &state_provider);
+            let result = validator.validate_against_keychain(&transaction, &mut state_provider);
             assert!(
                 matches!(
                     result.expect("should not be a provider error"),
@@ -2842,9 +2842,9 @@ mod tests {
                 access_key_address,
                 None,
             );
-            let state_provider = validator.inner.client().latest().unwrap();
+            let mut state_provider = validator.inner.client().latest().unwrap();
 
-            let result = validator.validate_against_keychain(&transaction, &state_provider)?;
+            let result = validator.validate_against_keychain(&transaction, &mut state_provider)?;
             assert!(
                 result.is_ok(),
                 "Inline key authorization should use the last duplicate token limit"
@@ -2889,11 +2889,11 @@ mod tests {
                 access_key_address,
                 None,
             );
-            let state_provider = validator.inner.client().latest().unwrap();
+            let mut state_provider = validator.inner.client().latest().unwrap();
 
             let result = validator.validate_against_keychain_with_fee_context(
                 &transaction,
-                &state_provider,
+                &mut state_provider,
                 user_address,
                 resolved_fee_token,
             )?;
@@ -2941,14 +2941,14 @@ mod tests {
                 access_key_address,
                 None,
             );
-            let state_provider = validator.inner.client().latest().unwrap();
+            let mut state_provider = validator.inner.client().latest().unwrap();
 
             let sponsored_fee_payer = Address::random();
             assert_ne!(sponsored_fee_payer, user_address);
 
             let result = validator.validate_against_keychain_with_fee_context(
                 &transaction,
-                &state_provider,
+                &mut state_provider,
                 sponsored_fee_payer,
                 fee_token,
             )?;

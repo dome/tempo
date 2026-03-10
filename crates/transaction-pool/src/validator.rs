@@ -4,7 +4,7 @@ use crate::{
 };
 use alloy_consensus::Transaction;
 
-use alloy_primitives::U256;
+use alloy_primitives::{Address, U256};
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_primitives_traits::{
     GotExpected, SealedBlock, transaction::error::InvalidTransactionError,
@@ -259,35 +259,71 @@ where
             transaction.set_key_expiry(Some(authorized_key.expiry));
         }
 
-        // Check spending limit for fee token if enforce_limits is enabled.
-        // This prevents transactions that would exceed the spending limit from entering the pool.
-        if authorized_key.enforce_limits {
-            let fee_token = transaction
-                .inner()
-                .fee_token()
-                .unwrap_or(tempo_precompiles::DEFAULT_FEE_TOKEN);
-            let fee_cost = transaction.fee_token_cost();
+        Ok(Ok(()))
+    }
 
-            // Compute the storage slot for the spending limit
-            let limit_key = AccountKeychain::spending_limit_key(transaction.sender(), key_id);
-            let spending_limit_slot =
-                AccountKeychain::new().spending_limits[limit_key][fee_token].slot();
+    /// Checks the access key spending limit for the given fee token and payer.
+    fn check_keychain_spending_limit(
+        &self,
+        transaction: &TempoPooledTransaction,
+        state_provider: &impl StateProvider,
+        fee_payer: Address,
+        fee_token: Address,
+    ) -> Result<(), TempoPoolTransactionError> {
+        let Some(tx) = transaction.inner().as_aa() else {
+            return Ok(());
+        };
 
-            // Read the spending limit from state
-            let remaining_limit = state_provider
-                .storage(ACCOUNT_KEYCHAIN_ADDRESS, spending_limit_slot.into())?
-                .unwrap_or(U256::ZERO);
+        let Some(sig) = tx.signature().as_keychain() else {
+            return Ok(());
+        };
 
-            if fee_cost > remaining_limit {
-                return Ok(Err(TempoPoolTransactionError::SpendingLimitExceeded {
-                    fee_token,
-                    cost: fee_cost,
-                    remaining: remaining_limit,
-                }));
-            }
+        // Skip if a distinct fee payer sponsors the transaction since the sender's
+        // key isn't spending on fees in that case.
+        if fee_payer != transaction.sender() {
+            return Ok(());
         }
 
-        Ok(Ok(()))
+        let Ok(key_id) = sig.key_id(&tx.signature_hash()) else {
+            return Ok(());
+        };
+
+        // Skip if same-tx key authorization (key will be authorized during execution)
+        if tx.tx().key_authorization.is_some() {
+            return Ok(());
+        }
+
+        let storage_slot = AccountKeychain::new().keys[transaction.sender()][key_id].base_slot();
+        let slot_value = state_provider
+            .storage(ACCOUNT_KEYCHAIN_ADDRESS, storage_slot.into())
+            .ok()
+            .flatten()
+            .unwrap_or(U256::ZERO);
+        let authorized_key = AuthorizedKey::decode_from_slot(slot_value);
+
+        if !authorized_key.enforce_limits {
+            return Ok(());
+        }
+
+        let fee_cost = transaction.fee_token_cost();
+        let limit_key = AccountKeychain::spending_limit_key(transaction.sender(), key_id);
+        let spending_limit_slot =
+            AccountKeychain::new().spending_limits[limit_key][fee_token].slot();
+        let remaining_limit = state_provider
+            .storage(ACCOUNT_KEYCHAIN_ADDRESS, spending_limit_slot.into())
+            .ok()
+            .flatten()
+            .unwrap_or(U256::ZERO);
+
+        if fee_cost > remaining_limit {
+            return Err(TempoPoolTransactionError::SpendingLimitExceeded {
+                fee_token,
+                cost: fee_cost,
+                remaining: remaining_limit,
+            });
+        }
+
+        Ok(())
     }
 
     /// Validates that an AA transaction does not exceed the maximum authorization list size.
@@ -792,6 +828,15 @@ where
             Err(err) => {
                 return TransactionValidationOutcome::Error(*transaction.hash(), Box::new(err));
             }
+        }
+
+        if let Err(err) =
+            self.check_keychain_spending_limit(&transaction, &state_provider, fee_payer, fee_token)
+        {
+            return TransactionValidationOutcome::Invalid(
+                transaction,
+                InvalidPoolTransactionError::other(err),
+            );
         }
 
         let balance = match state_provider.get_token_balance(fee_token, fee_payer, spec) {
@@ -2209,6 +2254,7 @@ mod tests {
         use reth_chainspec::ForkCondition;
         use reth_transaction_pool::error::PoolTransactionError;
         use tempo_chainspec::hardfork::TempoHardfork;
+        use tempo_precompiles::DEFAULT_FEE_TOKEN;
         use tempo_primitives::transaction::{
             KeyAuthorization, SignatureType, SignedKeyAuthorization, TempoTransaction,
             tempo_transaction::Call,
@@ -3469,66 +3515,7 @@ mod tests {
         }
 
         #[test]
-        fn test_spending_limit_not_enforced_passes() -> Result<(), ProviderError> {
-            let (access_key_signer, access_key_address) = generate_keypair();
-            let user_address = Address::random();
-
-            let transaction =
-                create_aa_with_keychain_signature(user_address, &access_key_signer, None);
-
-            // enforce_limits = false, no spending limit set
-            let validator = setup_validator_with_spending_limit(
-                &transaction,
-                user_address,
-                access_key_address,
-                false, // enforce_limits = false
-                None,  // no spending limit
-            );
-            let state_provider = validator.inner.client().latest().unwrap();
-
-            let result = validator.validate_against_keychain(&transaction, &state_provider)?;
-            assert!(
-                result.is_ok(),
-                "Key with enforce_limits=false should pass, got: {result:?}"
-            );
-            Ok(())
-        }
-
-        #[test]
-        fn test_spending_limit_sufficient_passes() -> Result<(), ProviderError> {
-            let (access_key_signer, access_key_address) = generate_keypair();
-            let user_address = Address::random();
-
-            let transaction =
-                create_aa_with_keychain_signature(user_address, &access_key_signer, None);
-
-            // Get the fee token from the transaction
-            let fee_token = transaction
-                .inner()
-                .fee_token()
-                .unwrap_or(tempo_precompiles::DEFAULT_FEE_TOKEN);
-            let fee_cost = transaction.fee_token_cost();
-
-            // Set spending limit higher than fee cost
-            let validator = setup_validator_with_spending_limit(
-                &transaction,
-                user_address,
-                access_key_address,
-                true,                                          // enforce_limits = true
-                Some((fee_token, fee_cost + U256::from(100))), // limit > cost
-            );
-            let state_provider = validator.inner.client().latest().unwrap();
-
-            let result = validator.validate_against_keychain(&transaction, &state_provider)?;
-            assert!(
-                result.is_ok(),
-                "Sufficient spending limit should pass, got: {result:?}"
-            );
-            Ok(())
-        }
-
-        #[test]
-        fn test_spending_limit_exact_passes() -> Result<(), ProviderError> {
+        fn test_spending_limit_not_enforced_passes() {
             let (access_key_signer, access_key_address) = generate_keypair();
             let user_address = Address::random();
 
@@ -3538,25 +3525,88 @@ mod tests {
             let fee_token = transaction
                 .inner()
                 .fee_token()
-                .unwrap_or(tempo_precompiles::DEFAULT_FEE_TOKEN);
-            let fee_cost = transaction.fee_token_cost();
+                .unwrap_or(DEFAULT_FEE_TOKEN);
 
-            // Set spending limit exactly equal to fee cost
             let validator = setup_validator_with_spending_limit(
                 &transaction,
                 user_address,
                 access_key_address,
-                true,                        // enforce_limits = true
-                Some((fee_token, fee_cost)), // limit == cost
+                false,
+                None,
             );
             let state_provider = validator.inner.client().latest().unwrap();
 
-            let result = validator.validate_against_keychain(&transaction, &state_provider)?;
-            assert!(
-                result.is_ok(),
-                "Exact spending limit should pass, got: {result:?}"
+            let result = validator.check_keychain_spending_limit(
+                &transaction,
+                &state_provider,
+                user_address,
+                fee_token,
             );
-            Ok(())
+            assert!(result.is_ok(), "Key with enforce_limits=false should pass, got {result:?}");
+        }
+
+        #[test]
+        fn test_spending_limit_sufficient_passes() {
+            let (access_key_signer, access_key_address) = generate_keypair();
+            let user_address = Address::random();
+
+            let transaction =
+                create_aa_with_keychain_signature(user_address, &access_key_signer, None);
+
+            let fee_token = transaction
+                .inner()
+                .fee_token()
+                .unwrap_or(DEFAULT_FEE_TOKEN);
+            let fee_cost = transaction.fee_token_cost();
+
+            let validator = setup_validator_with_spending_limit(
+                &transaction,
+                user_address,
+                access_key_address,
+                true,
+                Some((fee_token, fee_cost + U256::from(100))),
+            );
+            let state_provider = validator.inner.client().latest().unwrap();
+
+            let result = validator.check_keychain_spending_limit(
+                &transaction,
+                &state_provider,
+                user_address,
+                fee_token,
+            );
+            assert!(result.is_ok(), "Sufficient spending limit should pass, got {result:?}");
+        }
+
+        #[test]
+        fn test_spending_limit_exact_passes() {
+            let (access_key_signer, access_key_address) = generate_keypair();
+            let user_address = Address::random();
+
+            let transaction =
+                create_aa_with_keychain_signature(user_address, &access_key_signer, None);
+
+            let fee_token = transaction
+                .inner()
+                .fee_token()
+                .unwrap_or(DEFAULT_FEE_TOKEN);
+            let fee_cost = transaction.fee_token_cost();
+
+            let validator = setup_validator_with_spending_limit(
+                &transaction,
+                user_address,
+                access_key_address,
+                true,
+                Some((fee_token, fee_cost)),
+            );
+            let state_provider = validator.inner.client().latest().unwrap();
+
+            let result = validator.check_keychain_spending_limit(
+                &transaction,
+                &state_provider,
+                user_address,
+                fee_token,
+            );
+            assert!(result.is_ok(), "Exact spending limit should pass, got {result:?}");
         }
 
         #[test]
@@ -3570,26 +3620,27 @@ mod tests {
             let fee_token = transaction
                 .inner()
                 .fee_token()
-                .unwrap_or(tempo_precompiles::DEFAULT_FEE_TOKEN);
+                .unwrap_or(DEFAULT_FEE_TOKEN);
             let fee_cost = transaction.fee_token_cost();
 
-            // Set spending limit lower than fee cost
             let insufficient_limit = fee_cost - U256::from(1);
             let validator = setup_validator_with_spending_limit(
                 &transaction,
                 user_address,
                 access_key_address,
-                true,                                  // enforce_limits = true
-                Some((fee_token, insufficient_limit)), // limit < cost
+                true,
+                Some((fee_token, insufficient_limit)),
             );
             let state_provider = validator.inner.client().latest().unwrap();
 
-            let result = validator.validate_against_keychain(&transaction, &state_provider);
+            let result = validator.check_keychain_spending_limit(
+                &transaction,
+                &state_provider,
+                user_address,
+                fee_token,
+            );
             assert!(
-                matches!(
-                    result.expect("should not be a provider error"),
-                    Err(TempoPoolTransactionError::SpendingLimitExceeded { .. })
-                ),
+                matches!(result, Err(TempoPoolTransactionError::SpendingLimitExceeded { .. })),
                 "Insufficient spending limit should be rejected"
             );
         }
@@ -3605,24 +3656,25 @@ mod tests {
             let fee_token = transaction
                 .inner()
                 .fee_token()
-                .unwrap_or(tempo_precompiles::DEFAULT_FEE_TOKEN);
+                .unwrap_or(DEFAULT_FEE_TOKEN);
 
-            // Set spending limit to zero (no spending limit set means zero)
             let validator = setup_validator_with_spending_limit(
                 &transaction,
                 user_address,
                 access_key_address,
-                true,                          // enforce_limits = true
-                Some((fee_token, U256::ZERO)), // limit = 0
+                true,
+                Some((fee_token, U256::ZERO)),
             );
             let state_provider = validator.inner.client().latest().unwrap();
 
-            let result = validator.validate_against_keychain(&transaction, &state_provider);
+            let result = validator.check_keychain_spending_limit(
+                &transaction,
+                &state_provider,
+                user_address,
+                fee_token,
+            );
             assert!(
-                matches!(
-                    result.expect("should not be a provider error"),
-                    Err(TempoPoolTransactionError::SpendingLimitExceeded { .. })
-                ),
+                matches!(result, Err(TempoPoolTransactionError::SpendingLimitExceeded { .. })),
                 "Zero spending limit should be rejected"
             );
         }
@@ -3638,27 +3690,28 @@ mod tests {
             let fee_token = transaction
                 .inner()
                 .fee_token()
-                .unwrap_or(tempo_precompiles::DEFAULT_FEE_TOKEN);
+                .unwrap_or(DEFAULT_FEE_TOKEN);
 
-            // Set spending limit for a different token
             let different_token = Address::random();
-            assert_ne!(fee_token, different_token); // Ensure they're different
+            assert_ne!(fee_token, different_token);
 
             let validator = setup_validator_with_spending_limit(
                 &transaction,
                 user_address,
                 access_key_address,
-                true,                               // enforce_limits = true
-                Some((different_token, U256::MAX)), // High limit but for wrong token
+                true,
+                Some((different_token, U256::MAX)),
             );
             let state_provider = validator.inner.client().latest().unwrap();
 
-            let result = validator.validate_against_keychain(&transaction, &state_provider);
+            let result = validator.check_keychain_spending_limit(
+                &transaction,
+                &state_provider,
+                user_address,
+                fee_token,
+            );
             assert!(
-                matches!(
-                    result.expect("should not be a provider error"),
-                    Err(TempoPoolTransactionError::SpendingLimitExceeded { .. })
-                ),
+                matches!(result, Err(TempoPoolTransactionError::SpendingLimitExceeded { .. })),
                 "Wrong token spending limit should be rejected (fee token has 0 limit)"
             );
         }

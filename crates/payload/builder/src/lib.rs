@@ -72,106 +72,38 @@ struct InstrumentedFinishProvider<'a> {
     metrics: TempoPayloadBuilderMetrics,
 }
 
-impl AccountReader for InstrumentedFinishProvider<'_> {
-    fn basic_account(
-        &self,
-        address: &Address,
-    ) -> reth_errors::ProviderResult<Option<reth_primitives_traits::Account>> {
-        self.inner.basic_account(address)
-    }
-}
-
-impl BlockHashReader for InstrumentedFinishProvider<'_> {
-    fn block_hash(
-        &self,
-        number: alloy_primitives::BlockNumber,
-    ) -> reth_errors::ProviderResult<Option<alloy_primitives::B256>> {
-        self.inner.block_hash(number)
-    }
-
-    fn canonical_hashes_range(
-        &self,
-        start: alloy_primitives::BlockNumber,
-        end: alloy_primitives::BlockNumber,
-    ) -> reth_errors::ProviderResult<Vec<alloy_primitives::B256>> {
-        self.inner.canonical_hashes_range(start, end)
-    }
-}
-
-impl BytecodeReader for InstrumentedFinishProvider<'_> {
-    fn bytecode_by_hash(
-        &self,
-        code_hash: &alloy_primitives::B256,
-    ) -> reth_errors::ProviderResult<Option<reth_primitives_traits::Bytecode>> {
-        self.inner.bytecode_by_hash(code_hash)
-    }
-}
-
-impl StateProvider for InstrumentedFinishProvider<'_> {
-    fn storage(
-        &self,
-        account: Address,
-        storage_key: alloy_primitives::StorageKey,
-    ) -> reth_errors::ProviderResult<Option<alloy_primitives::StorageValue>> {
-        self.inner.storage(account, storage_key)
-    }
-}
-
-impl StorageRootProvider for InstrumentedFinishProvider<'_> {
-    fn storage_root(
-        &self,
-        address: Address,
-        hashed_storage: reth_trie_common::HashedStorage,
-    ) -> reth_errors::ProviderResult<alloy_primitives::B256> {
-        self.inner.storage_root(address, hashed_storage)
-    }
-
-    fn storage_proof(
-        &self,
-        address: Address,
-        slot: alloy_primitives::B256,
-        hashed_storage: reth_trie_common::HashedStorage,
-    ) -> reth_errors::ProviderResult<reth_trie_common::StorageProof> {
-        self.inner.storage_proof(address, slot, hashed_storage)
-    }
-
-    fn storage_multiproof(
-        &self,
-        address: Address,
-        slots: &[alloy_primitives::B256],
-        hashed_storage: reth_trie_common::HashedStorage,
-    ) -> reth_errors::ProviderResult<reth_trie_common::StorageMultiProof> {
+impl<'a> AsRef<dyn StateProvider + 'a> for InstrumentedFinishProvider<'a> {
+    fn as_ref(&self) -> &(dyn StateProvider + 'a) {
         self.inner
-            .storage_multiproof(address, slots, hashed_storage)
     }
 }
 
-impl StateProofProvider for InstrumentedFinishProvider<'_> {
-    fn proof(
-        &self,
-        input: reth_trie_common::TrieInput,
-        address: Address,
-        slots: &[alloy_primitives::B256],
-    ) -> reth_errors::ProviderResult<reth_trie_common::AccountProof> {
-        self.inner.proof(input, address, slots)
+reth_storage_api::delegate_impls_to_as_ref!(
+    for InstrumentedFinishProvider<'_> =>
+    AccountReader {
+        fn basic_account(&self, address: &alloy_primitives::Address) -> reth_errors::ProviderResult<Option<reth_primitives_traits::Account>>;
     }
-
-    fn multiproof(
-        &self,
-        input: reth_trie_common::TrieInput,
-        targets: reth_trie_common::MultiProofTargets,
-    ) -> reth_errors::ProviderResult<reth_trie_common::MultiProof> {
-        self.inner.multiproof(input, targets)
+    BlockHashReader {
+        fn block_hash(&self, number: u64) -> reth_errors::ProviderResult<Option<alloy_primitives::B256>>;
+        fn canonical_hashes_range(&self, start: alloy_primitives::BlockNumber, end: alloy_primitives::BlockNumber) -> reth_errors::ProviderResult<Vec<alloy_primitives::B256>>;
     }
-
-    fn witness(
-        &self,
-        input: reth_trie_common::TrieInput,
-        target: reth_trie_common::HashedPostState,
-    ) -> reth_errors::ProviderResult<Vec<alloy_primitives::Bytes>> {
-        self.inner.witness(input, target)
+    StateProvider {
+        fn storage(&self, account: alloy_primitives::Address, storage_key: alloy_primitives::StorageKey) -> reth_errors::ProviderResult<Option<alloy_primitives::StorageValue>>;
     }
-}
+    BytecodeReader {
+        fn bytecode_by_hash(&self, code_hash: &alloy_primitives::B256) -> reth_errors::ProviderResult<Option<reth_primitives_traits::Bytecode>>;
+    }
+    StorageRootProvider {
+        fn storage_root(&self, address: alloy_primitives::Address, storage: reth_trie_common::HashedStorage) -> reth_errors::ProviderResult<alloy_primitives::B256>;
+        fn storage_proof(&self, address: alloy_primitives::Address, slot: alloy_primitives::B256, storage: reth_trie_common::HashedStorage) -> reth_errors::ProviderResult<reth_trie_common::StorageProof>;
+        fn storage_multiproof(&self, address: alloy_primitives::Address, slots: &[alloy_primitives::B256], storage: reth_trie_common::HashedStorage) -> reth_errors::ProviderResult<reth_trie_common::StorageMultiProof>;
+    }
+    StateProofProvider {
+        fn proof(&self, input: reth_trie_common::TrieInput, address: alloy_primitives::Address, slots: &[alloy_primitives::B256]) -> reth_errors::ProviderResult<reth_trie_common::AccountProof>;
+        fn multiproof(&self, input: reth_trie_common::TrieInput, targets: reth_trie_common::MultiProofTargets) -> reth_errors::ProviderResult<reth_trie_common::MultiProof>;
+        fn witness(&self, input: reth_trie_common::TrieInput, target: reth_trie_common::HashedPostState) -> reth_errors::ProviderResult<Vec<alloy_primitives::Bytes>>;
+    }
+);
 
 impl HashedPostStateProvider for InstrumentedFinishProvider<'_> {
     fn hashed_post_state(

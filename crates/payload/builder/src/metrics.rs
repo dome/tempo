@@ -38,8 +38,10 @@ pub(crate) struct TempoPayloadBuilderMetrics {
     pub(crate) prepare_system_transactions_duration_seconds: Histogram,
     /// The time it took to execute one transaction in seconds.
     pub(crate) transaction_execution_duration_seconds: Histogram,
-    /// The time it took to select the next candidate transaction from the pool.
-    pub(crate) best_txs_next_duration_seconds: Histogram,
+    /// Total time spent in `best_txs.next()` across all calls during the block fill loop.
+    pub(crate) best_txs_next_total_duration_seconds: Histogram,
+    /// Number of `best_txs.next()` calls that returned a transaction.
+    pub(crate) best_txs_next_calls_total: Histogram,
     /// Wall-clock duration of the pool tx selection + execution loop.
     pub(crate) block_fill_duration_seconds: Histogram,
     /// The time it took to execute normal transactions in seconds.
@@ -68,8 +70,8 @@ pub(crate) struct TempoPayloadBuilderMetrics {
     pub(crate) rlp_block_size_bytes_last: Gauge,
     /// Time to compute the hashed post-state from the bundle state.
     pub(crate) hashed_post_state_duration_seconds: Histogram,
-    /// Time to compute the state root and trie updates.
-    pub(crate) state_root_duration_seconds: Histogram,
+    /// Time to compute the state root and trie updates via `state_root_with_updates`.
+    pub(crate) state_root_with_updates_duration_seconds: Histogram,
 }
 
 /// Increments the unified pool transaction skip counter with the given reason label.

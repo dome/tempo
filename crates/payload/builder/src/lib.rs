@@ -51,7 +51,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardforks};
 use tempo_consensus::TEMPO_SHARED_GAS_DIVISOR;
@@ -142,7 +142,7 @@ impl StateRootProvider for InstrumentedFinishProvider<'_> {
         let result = self.inner.state_root_with_updates(hashed_state);
         drop(_span);
         self.metrics
-            .state_root_duration_seconds
+            .state_root_with_updates_duration_seconds
             .record(start.elapsed());
         result
     }
@@ -489,13 +489,14 @@ where
 
         let execution_start = Instant::now();
         let _block_fill_span = debug_span!(target: "payload_builder", "block_fill").entered();
+        let mut best_txs_next_total = Duration::ZERO;
+        let mut best_txs_next_calls = 0u64;
         while let Some(pool_tx) = {
             let next_start = Instant::now();
             let next = best_txs.next();
             if next.is_some() {
-                self.metrics
-                    .best_txs_next_duration_seconds
-                    .record(next_start.elapsed());
+                best_txs_next_total += next_start.elapsed();
+                best_txs_next_calls += 1;
             }
             next
         } {
@@ -615,6 +616,12 @@ where
         self.metrics
             .block_fill_duration_seconds
             .record(total_normal_transaction_execution_elapsed);
+        self.metrics
+            .best_txs_next_total_duration_seconds
+            .record(best_txs_next_total);
+        self.metrics
+            .best_txs_next_calls_total
+            .record(best_txs_next_calls as f64);
         self.metrics
             .total_normal_transaction_execution_duration_seconds
             .record(total_normal_transaction_execution_elapsed);

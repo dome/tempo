@@ -48,6 +48,9 @@ interface IValidatorConfigV2 {
     );
     event NetworkIdentityRotationEpochSet(uint64 indexed previousEpoch, uint64 indexed nextEpoch);
     event Initialized(uint64 height);
+    event SkippedValidatorMigration(
+        uint64 indexed index, address indexed validatorAddress, bytes32 publicKey
+    );
 
     // =========================================================================
     // Errors

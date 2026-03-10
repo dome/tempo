@@ -933,8 +933,14 @@ impl ValidatorConfigV2 {
         let v1_val = v1.validators(v1.validators_array(call.idx)?)?;
 
         // Closure to skipping a validator when one of the checks fails
-        // NOTE: No real saturation concerns as the validator set << u16::MAX
         let skip = |s: &mut Self| {
+            s.emit_event(ValidatorConfigV2Event::SkippedValidatorMigration(
+                IValidatorConfigV2::SkippedValidatorMigration {
+                    index: call.idx,
+                    validatorAddress: v1_val.validatorAddress,
+                    publicKey: v1_val.publicKey,
+                },
+            ))?;
             s.config
                 .migration_skipped_count
                 .write(skipped.saturating_add(1))

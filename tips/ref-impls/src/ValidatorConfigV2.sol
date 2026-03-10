@@ -409,6 +409,7 @@ contract ValidatorConfigV2 is IValidatorConfigV2 {
 
         if (v1Val.publicKey == bytes32(0) || v1Val.validatorAddress == address(0)) {
             migrationSkippedCount++;
+            emit SkippedValidatorMigration(idx, v1Val.validatorAddress, v1Val.publicKey);
             return;
         }
 
@@ -416,6 +417,7 @@ contract ValidatorConfigV2 is IValidatorConfigV2 {
 
         if (pubkeyToIndex[v1Val.publicKey] != 0) {
             migrationSkippedCount++;
+            emit SkippedValidatorMigration(idx, v1Val.validatorAddress, v1Val.publicKey);
             return;
         }
 
@@ -429,6 +431,7 @@ contract ValidatorConfigV2 is IValidatorConfigV2 {
 
         if (nowActive && activeIngressHashes[ingressHash]) {
             migrationSkippedCount++;
+            emit SkippedValidatorMigration(idx, v1Val.validatorAddress, v1Val.publicKey);
             return;
         }
 

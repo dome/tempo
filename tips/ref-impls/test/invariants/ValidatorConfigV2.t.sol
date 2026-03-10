@@ -58,7 +58,7 @@ contract ValidatorConfigV2InvariantTest is InvariantBaseTest {
     /// @dev Ghost mapping from V2 array index to V1 index (for migration identity checks)
     mapping(uint64 => uint64) private _ghostV2ToV1Index;
 
-    /// @dev Ghost tracking for active ingress IP hashes (to match contract's IP uniqueness enforcement)
+    /// @dev Ghost tracking for active ingress hashes (full ip:port uniqueness)
     mapping(bytes32 => bool) private _ghostActiveIngressIpHashes;
 
     /// @dev Number of V1 setup validators
@@ -402,7 +402,7 @@ contract ValidatorConfigV2InvariantTest is InvariantBaseTest {
             ingress = _generateIngress(validatorSeed);
             egress = _generateEgress(validatorSeed);
         }
-        bytes32 ingressIpHash = _extractIngressIpHash(ingress);
+        bytes32 ingressIpHash = keccak256(bytes(ingress));
 
         bytes memory sig = _signAdd(privKey, validatorAddr, ingress, egress, validatorAddr);
 
@@ -523,7 +523,7 @@ contract ValidatorConfigV2InvariantTest is InvariantBaseTest {
             // Contract allows reusing addresses of deactivated validators
             delete _ghostAddressInUse[validatorAddr];
 
-            bytes32 ingressIpHash = _extractIngressIpHash(_ghostIngress[currentIdx]);
+            bytes32 ingressIpHash = keccak256(bytes(_ghostIngress[currentIdx]));
             delete _ghostActiveIngressIpHashes[ingressIpHash];
 
             // TEMPO-VALV2-3: deactivateValidator should -1 active, +0 total
@@ -632,8 +632,8 @@ contract ValidatorConfigV2InvariantTest is InvariantBaseTest {
             vm.stopPrank();
             assertTrue(isAuthorized, "TEMPO-VALV2-1: Third party should not update IPs");
 
-            bytes32 oldIngressIpHash = _extractIngressIpHash(_ghostIngress[ghostIdx]);
-            bytes32 newIngressIpHash = _extractIngressIpHash(newIngress);
+            bytes32 oldIngressIpHash = keccak256(bytes(_ghostIngress[ghostIdx]));
+            bytes32 newIngressIpHash = keccak256(bytes(newIngress));
             delete _ghostActiveIngressIpHashes[oldIngressIpHash];
             _ghostActiveIngressIpHashes[newIngressIpHash] = true;
 
@@ -730,8 +730,8 @@ contract ValidatorConfigV2InvariantTest is InvariantBaseTest {
 
         bool pubKeyZero = (newPubKey == bytes32(0));
         bool pubKeyUsed = !pubKeyZero && _ghostPubKeyUsed[newPubKey];
-        bytes32 oldIngressIpHash = _extractIngressIpHash(_ghostIngress[oldGhostIdx]);
-        bytes32 newIngressIpHash = _extractIngressIpHash(ingress);
+        bytes32 oldIngressIpHash = keccak256(bytes(_ghostIngress[oldGhostIdx]));
+        bytes32 newIngressIpHash = keccak256(bytes(ingress));
         // new IP == old IP is not a conflict: the old validator's IP is freed during rotation
         bool ipUsed =
             newIngressIpHash != oldIngressIpHash && _ghostActiveIngressIpHashes[newIngressIpHash];
@@ -900,7 +900,7 @@ contract ValidatorConfigV2InvariantTest is InvariantBaseTest {
             _ghostPubKeyUsed[v1Vals[idx].publicKey] = true;
             _ghostV2ToV1Index[v2Idx] = idx;
             if (v1Vals[idx].active) {
-                _ghostActiveIngressIpHashes[_extractIngressIpHash(v2.ingress)] = true;
+                _ghostActiveIngressIpHashes[keccak256(bytes(v2.ingress))] = true;
             }
 
             _ghostTotalCount++;
@@ -1125,8 +1125,8 @@ contract ValidatorConfigV2InvariantTest is InvariantBaseTest {
         }
     }
 
-    /// @notice TEMPO-VALV2-13: Ingress IP uniqueness among active validators
-    /// @dev No two active validators share the same ingress IP (port is ignored)
+    /// @notice TEMPO-VALV2-13: Ingress uniqueness among active validators
+    /// @dev No two active validators share the same ingress (full ip:port compared)
     function _invariantIpUniqueness() internal view {
         IValidatorConfigV2.Validator[] memory vals = _allValidators();
 
@@ -1137,12 +1137,10 @@ contract ValidatorConfigV2InvariantTest is InvariantBaseTest {
             for (uint256 j = i + 1; j < vals.length; j++) {
                 if (vals[j].deactivatedAtHeight != 0) continue; // Skip deactivated
 
-                // Check ingress IP uniqueness (extract IP without port)
-                bytes32 ipI = _extractIngressIpHash(vals[i].ingress);
-                bytes32 ipJ = _extractIngressIpHash(vals[j].ingress);
-                assertTrue(
-                    ipI != ipJ, "TEMPO-VALV2-13: Active validators must have unique ingress IPs"
-                );
+                // Check full ingress uniqueness (ip:port)
+                bytes32 ipI = keccak256(bytes(vals[i].ingress));
+                bytes32 ipJ = keccak256(bytes(vals[j].ingress));
+                assertTrue(ipI != ipJ, "TEMPO-VALV2-13: Active validators must have unique ingress");
 
                 // Note: egress uniqueness is NOT enforced
             }
@@ -1333,40 +1331,6 @@ contract ValidatorConfigV2InvariantTest is InvariantBaseTest {
 
         // Verify all global invariants hold
         invariant_globalInvariants();
-    }
-
-    /// @dev Helper to extract and hash IP from ingress (ip:port -> keccak256(ip))
-    function _extractIngressIpHash(string memory ingress) internal pure returns (bytes32) {
-        bytes memory b = bytes(ingress);
-        if (b.length == 0) return keccak256(b);
-
-        // IPv6 format: [ip]:port -> extract ip
-        if (b[0] == "[") {
-            for (uint256 i = 1; i < b.length; i++) {
-                if (b[i] == "]") {
-                    bytes memory ip = new bytes(i - 1);
-                    for (uint256 j = 1; j < i; j++) {
-                        ip[j - 1] = b[j];
-                    }
-                    return keccak256(ip);
-                }
-            }
-            return keccak256(b); // Malformed
-        }
-
-        // IPv4 format: ip:port -> extract ip
-        for (uint256 i = 0; i < b.length; i++) {
-            if (b[i] == ":") {
-                bytes memory ip = new bytes(i);
-                for (uint256 j = 0; j < i; j++) {
-                    ip[j] = b[j];
-                }
-                return keccak256(ip);
-            }
-        }
-
-        // No port found
-        return keccak256(b);
     }
 
 }

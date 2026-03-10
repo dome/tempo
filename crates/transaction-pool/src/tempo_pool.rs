@@ -246,14 +246,39 @@ where
                     .inner()
                     .as_aa()
                     .is_none_or(|aa| aa.tx().fee_payer_signature.is_none())
-                && let Some(ref mut provider) = state_provider
                 && let Some(ref subject) = keychain_subject
                 && subject.matches_spending_limit_update(&updates.spending_limit_spends)
-                && exceeds_spending_limit(provider, subject, tx.transaction.fee_token_cost())
             {
-                to_remove.push(*tx.hash());
-                spending_limit_spend_count += 1;
-                continue;
+                let fee_cost = tx.transaction.fee_token_cost();
+                let should_evict = if let Some(auth) = tx
+                    .transaction
+                    .inner()
+                    .as_aa()
+                    .and_then(|aa| aa.tx().key_authorization.as_ref())
+                {
+                    // Inline KeyAuth: check limits from the tx itself.
+                    // limits == None means unlimited spending → never evict.
+                    auth.limits.as_ref().is_some_and(|limits| {
+                        let remaining = limits
+                            .iter()
+                            .rev()
+                            .find(|l| l.token == subject.fee_token)
+                            .map(|l| l.limit)
+                            .unwrap_or(alloy_primitives::U256::ZERO);
+                        fee_cost > remaining
+                    })
+                } else if let Some(ref mut provider) = state_provider {
+                    // On-chain key: read enforce_limits + remaining from state.
+                    exceeds_spending_limit(provider, subject, fee_cost)
+                } else {
+                    false
+                };
+
+                if should_evict {
+                    to_remove.push(*tx.hash());
+                    spending_limit_spend_count += 1;
+                    continue;
+                }
             }
 
             // Check 3: Validator token changes (re-check liquidity for all transactions)

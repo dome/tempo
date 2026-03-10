@@ -260,6 +260,7 @@ where
                 let fee_cost = transaction.fee_token_cost();
                 let remaining_limit = limits
                     .iter()
+                    .rev()
                     .find(|limit| limit.token == fee_token)
                     .map(|limit| limit.limit)
                     .unwrap_or(U256::ZERO);
@@ -2749,6 +2750,64 @@ mod tests {
                 ),
                 "KeyAuthorization with insufficient fee-token limit should be rejected"
             );
+        }
+
+        #[test]
+        fn test_key_authorization_duplicate_token_limits_uses_last_value()
+        -> Result<(), ProviderError> {
+            let (access_key_signer, access_key_address) = generate_keypair();
+            let (user_signer, user_address) = generate_keypair();
+            let fee_token = address!("0000000000000000000000000000000000000002");
+
+            let probe_tx =
+                create_aa_with_keychain_signature(user_address, &access_key_signer, None);
+            let fee_cost = probe_tx.fee_token_cost();
+
+            // Duplicate limits for the same token: execution keeps the last write.
+            let key_auth = KeyAuthorization {
+                chain_id: 42431,
+                key_type: SignatureType::Secp256k1,
+                key_id: access_key_address,
+                expiry: None,
+                limits: Some(vec![
+                    TokenLimit {
+                        token: fee_token,
+                        limit: U256::ZERO,
+                    },
+                    TokenLimit {
+                        token: fee_token,
+                        limit: fee_cost + U256::from(100),
+                    },
+                ]),
+            };
+
+            let auth_sig_hash = key_auth.signature_hash();
+            let auth_signature = user_signer
+                .sign_hash_sync(&auth_sig_hash)
+                .expect("signing failed");
+            let signed_key_auth =
+                key_auth.into_signed(PrimitiveSignature::Secp256k1(auth_signature));
+
+            let transaction = create_aa_with_keychain_signature(
+                user_address,
+                &access_key_signer,
+                Some(signed_key_auth),
+            );
+
+            let validator = setup_validator_with_keychain_storage(
+                &transaction,
+                user_address,
+                access_key_address,
+                None,
+            );
+            let state_provider = validator.inner.client().latest().unwrap();
+
+            let result = validator.validate_against_keychain(&transaction, &state_provider)?;
+            assert!(
+                result.is_ok(),
+                "Inline key authorization should use the last duplicate token limit"
+            );
+            Ok(())
         }
 
         /// Setup a validator using the DEV chain spec (T1C active at genesis).

@@ -735,44 +735,6 @@ where
             );
         }
 
-        let fee_payer = match transaction.inner().fee_payer(transaction.sender()) {
-            Ok(fee_payer) => fee_payer,
-            Err(_err) => {
-                return TransactionValidationOutcome::Invalid(
-                    transaction,
-                    InvalidPoolTransactionError::other(
-                        TempoPoolTransactionError::InvalidFeePayerSignature,
-                    ),
-                );
-            }
-        };
-
-        let fee_token = match state_provider.get_fee_token(transaction.inner(), fee_payer, spec) {
-            Ok(fee_token) => fee_token,
-            Err(err) => {
-                return TransactionValidationOutcome::Error(*transaction.hash(), Box::new(err));
-            }
-        };
-
-        // Validate transactions that involve keychain keys
-        match self.validate_against_keychain_with_fee_context(
-            &transaction,
-            &mut state_provider,
-            fee_payer,
-            fee_token,
-        ) {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                return TransactionValidationOutcome::Invalid(
-                    transaction,
-                    InvalidPoolTransactionError::other(err),
-                );
-            }
-            Err(err) => {
-                return TransactionValidationOutcome::Error(*transaction.hash(), Box::new(err));
-            }
-        }
-
         // Balance transfer is not allowed as there is no balances in accounts yet.
         // Check added in https://github.com/tempoxyz/tempo/pull/759
         // AATx will aggregate all call values, so we dont need additional check for AA transactions.
@@ -827,6 +789,25 @@ where
                 InvalidPoolTransactionError::other(err),
             );
         }
+
+        let fee_payer = match transaction.inner().fee_payer(transaction.sender()) {
+            Ok(fee_payer) => fee_payer,
+            Err(_err) => {
+                return TransactionValidationOutcome::Invalid(
+                    transaction,
+                    InvalidPoolTransactionError::other(
+                        TempoPoolTransactionError::InvalidFeePayerSignature,
+                    ),
+                );
+            }
+        };
+
+        let fee_token = match state_provider.get_fee_token(transaction.inner(), fee_payer, spec) {
+            Ok(fee_token) => fee_token,
+            Err(err) => {
+                return TransactionValidationOutcome::Error(*transaction.hash(), Box::new(err));
+            }
+        };
 
         // Ensure that fee token is valid.
         match state_provider.is_valid_fee_token(spec, fee_token) {

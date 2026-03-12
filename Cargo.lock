@@ -11945,6 +11945,7 @@ dependencies = [
  "reth-provider",
  "reth-rpc-server-types",
  "reth-storage-api",
+ "reth-tracing",
  "rustls",
  "serde",
  "serde_json",

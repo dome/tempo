@@ -16,6 +16,7 @@ use commonware_math::algebra::Random as _;
 use commonware_utils::NZU64;
 use eyre::{OptionExt as _, Report, WrapErr as _, eyre};
 use reth_cli_runner::CliRunner;
+use reth_tracing::Tracer;
 use reth_ethereum_cli::ExtendedCommand;
 use serde::Serialize;
 use tempo_alloy::TempoNetwork;
@@ -81,6 +82,7 @@ impl ExtendedCommand for TempoSubcommand {
         match self {
             Self::Consensus(cmd) => cmd.run(),
             Self::InitFromBinaryDump(cmd) => {
+                reth_tracing::RethTracer::new().init()?;
                 runner.run_blocking_until_ctrl_c(cmd.execute::<tempo_node::node::TempoNode>())?;
                 Ok(())
             }

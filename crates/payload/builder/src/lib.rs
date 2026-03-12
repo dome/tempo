@@ -62,11 +62,14 @@ use tempo_transaction_pool::{
 };
 use tracing::{Level, debug, debug_span, error, info, instrument, trace, warn};
 
-/// Threshold above which a single transaction execution emits a warning.
+/// Threshold above which a single transaction execution is counted as slow.
 const SLOW_TX_THRESHOLD: Duration = Duration::from_millis(50);
 
 /// Threshold above which the entire payload build emits a detailed warning.
 const SLOW_BUILD_THRESHOLD: Duration = Duration::from_millis(500);
+
+/// Maximum number of individual slow transactions to log per payload build.
+const MAX_SLOW_TX_LOGS: usize = 3;
 
 /// Returns true if a subblock has any expired transactions for the given timestamp.
 fn has_expired_transactions(subblock: &RecoveredSubBlock, timestamp: u64) -> bool {
@@ -383,6 +386,8 @@ where
         ));
 
         let execution_start = Instant::now();
+        let mut slow_tx_count: usize = 0;
+        let mut slowest_tx_elapsed = Duration::ZERO;
         let _block_fill_span = debug_span!(target: "payload_builder", "block_fill").entered();
         while let Some(pool_tx) = best_txs.next() {
             // Ensure we still have capacity for this transaction within the non-shared gas limit.
@@ -489,12 +494,18 @@ where
                 .transaction_execution_duration_seconds
                 .record(elapsed);
             if elapsed > SLOW_TX_THRESHOLD {
-                warn!(
-                    tx_hash = %pool_tx.hash(),
-                    gas_used,
-                    ?elapsed,
-                    "slow transaction execution"
-                );
+                slow_tx_count += 1;
+                if elapsed > slowest_tx_elapsed {
+                    slowest_tx_elapsed = elapsed;
+                }
+                if slow_tx_count <= MAX_SLOW_TX_LOGS {
+                    warn!(
+                        tx_hash = %pool_tx.hash(),
+                        gas_used,
+                        ?elapsed,
+                        "slow transaction execution"
+                    );
+                }
             }
             trace!(?elapsed, "Transaction executed");
 
@@ -507,6 +518,14 @@ where
             block_size_used += tx_rlp_length;
         }
         drop(_block_fill_span);
+        if slow_tx_count > MAX_SLOW_TX_LOGS {
+            warn!(
+                slow_tx_count,
+                suppressed = slow_tx_count - MAX_SLOW_TX_LOGS,
+                ?slowest_tx_elapsed,
+                "additional slow transactions suppressed"
+            );
+        }
         let total_normal_transaction_execution_elapsed = execution_start.elapsed();
         self.metrics
             .total_normal_transaction_execution_duration_seconds

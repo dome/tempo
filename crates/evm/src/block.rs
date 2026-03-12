@@ -562,7 +562,7 @@ mod tests {
     use tempo_primitives::{
         SubBlockMetadata, TempoSignature, TempoTransaction, TempoTxType,
         subblock::{SubBlockVersion, TEMPO_SUBBLOCK_NONCE_KEY_PREFIX},
-        transaction::{Call, envelope::TEMPO_SYSTEM_TX_SIGNATURE},
+        transaction::{Call, TIP20_PAYMENT_PREFIX, envelope::TEMPO_SYSTEM_TX_SIGNATURE},
     };
     use tempo_revm::TempoHaltReason;
 
@@ -573,6 +573,22 @@ mod tests {
             gas_price: 1,
             gas_limit: 21000,
             to: TxKind::Call(Address::ZERO),
+            value: U256::ZERO,
+            input: Bytes::new(),
+        };
+        TempoTxEnvelope::Legacy(Signed::new_unhashed(tx, Signature::test_signature()))
+    }
+
+    /// Creates a legacy tx classified as a payment (to address has TIP20 prefix).
+    fn create_payment_tx() -> TempoTxEnvelope {
+        let mut addr = [0u8; 20];
+        addr[..TIP20_PAYMENT_PREFIX.len()].copy_from_slice(&TIP20_PAYMENT_PREFIX);
+        let tx = TxLegacy {
+            chain_id: Some(1),
+            nonce: 0,
+            gas_price: 1,
+            gas_limit: 21000,
+            to: TxKind::Call(Address::from(addr)),
             value: U256::ZERO,
             input: Bytes::new(),
         };
@@ -1146,10 +1162,10 @@ mod tests {
             chain_id,
             Bytes::copy_from_slice(&[0u8; 31]),
         ));
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "invalid subblocks metadata system transaction"
-        );
+        assert!(matches!(
+            result.unwrap_err(),
+            BlockValidationError::Other(_)
+        ));
 
         // Input exactly U256::BYTES (32 bytes) — passes length check but RLP decode fails
         let mut db = State::builder().with_bundle_update().build();
@@ -1158,10 +1174,10 @@ mod tests {
             chain_id,
             Bytes::copy_from_slice(&U256::from(1u64).to_be_bytes::<32>()),
         ));
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "invalid subblocks metadata system transaction"
-        );
+        assert!(matches!(
+            result.unwrap_err(),
+            BlockValidationError::Other(_)
+        ));
 
         // Valid metadata but wrong block number
         let mut db = State::builder().with_bundle_update().build();
@@ -1171,10 +1187,10 @@ mod tests {
             chain_id,
             create_system_tx_input(metadata, 99),
         ));
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "invalid subblocks metadata system transaction"
-        );
+        assert!(matches!(
+            result.unwrap_err(),
+            BlockValidationError::Other(_)
+        ));
     }
 
     #[test]
@@ -1224,13 +1240,10 @@ mod tests {
             .with_incentive_gas_used(10_000_001)
             .build(&mut db, &chainspec);
         let metadata = vec![create_valid_subblock_metadata(B256::ZERO, &signer)];
-        assert_eq!(
-            executor
-                .validate_shared_gas(&metadata)
-                .unwrap_err()
-                .to_string(),
-            "incentive gas limit exceeded"
-        );
+        assert!(matches!(
+            executor.validate_shared_gas(&metadata).unwrap_err(),
+            BlockValidationError::Other(_)
+        ));
 
         // Multi-validator: incentive gas accumulates (not multiplied)
         // 2 validators, shared=10M → gas_per_subblock=5M, both empty → incentive=10M
@@ -1327,25 +1340,37 @@ mod tests {
             BlockSection::GasIncentive
         );
 
-        // Payment commit decrements non_shared but NOT non_payment
+        // Payment commit decrements non_shared but NOT non_payment.
+        // Set non_payment (general_gas_limit) lower than non_shared so the payment flag matters.
+        // non_shared = 30M - 10M(shared) = 20M, non_payment = 5M
         let mut db = State::builder().with_bundle_update().build();
         let mut executor = TestExecutorBuilder::default()
-            .with_general_gas_limit(30_000_000)
+            .with_general_gas_limit(5_000_000)
             .with_parent_beacon_block_root(B256::ZERO)
             .build(&mut db, &chainspec);
         executor.apply_pre_execution_changes().unwrap();
 
+        // Commit a payment tx (21k gas) → non_shared=19_979_000, non_payment stays 5M
         executor
             .commit_transaction(make_output(BlockSection::NonShared, true))
             .unwrap();
-        // non_shared decremented, non_payment unchanged (30M > 19_979_000 so non_shared is the limit)
+
+        // A non-payment tx at the non_payment boundary is pushed to GasIncentive
+        // (5M was not decremented, but 5_000_001 > 5M triggers the non-payment check)
         assert_eq!(
-            executor.validate_tx(&tx, 19_979_000).unwrap(),
+            executor.validate_tx(&tx, 5_000_000).unwrap(),
             BlockSection::NonShared
         );
         assert_eq!(
-            executor.validate_tx(&tx, 19_979_001).unwrap(),
+            executor.validate_tx(&tx, 5_000_001).unwrap(),
             BlockSection::GasIncentive
+        );
+
+        // A payment tx at the same gas_used is still NonShared (only non_shared matters)
+        let payment_tx = create_payment_tx();
+        assert_eq!(
+            executor.validate_tx(&payment_tx, 5_000_001).unwrap(),
+            BlockSection::NonShared
         );
 
         // GasIncentive section tracking

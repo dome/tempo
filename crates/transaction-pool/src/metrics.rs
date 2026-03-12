@@ -74,6 +74,16 @@ impl AA2dPoolMetrics {
     }
 }
 
+/// Metrics for the AA 2D pool lock contention.
+#[derive(Metrics, Clone)]
+#[metrics(scope = "transaction_pool.aa_2d")]
+pub struct AA2dPoolLockMetrics {
+    /// Time spent waiting to acquire a read lock on the AA 2D pool.
+    pub read_lock_wait_duration_seconds: Histogram,
+    /// Time spent waiting to acquire a write lock on the AA 2D pool.
+    pub write_lock_wait_duration_seconds: Histogram,
+}
+
 /// Metrics for the Tempo pool maintenance task.
 #[derive(Metrics, Clone)]
 #[metrics(scope = "transaction_pool.maintenance")]

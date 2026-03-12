@@ -3,8 +3,9 @@
 // Routes user nonces (nonce_key>0) to minimal 2D nonce pool
 
 use crate::{
-    amm::AmmLiquidityCache, best::MergeBestTransactions, transaction::TempoPooledTransaction,
-    tt_2d_pool::AA2dPool, validator::TempoTransactionValidator,
+    amm::AmmLiquidityCache, best::MergeBestTransactions, metrics::AA2dPoolLockMetrics,
+    transaction::TempoPooledTransaction, tt_2d_pool::AA2dPool,
+    validator::TempoTransactionValidator,
 };
 use alloy_consensus::Transaction;
 use alloy_primitives::{
@@ -39,6 +40,7 @@ use tempo_precompiles::{
 };
 use tempo_primitives::Block;
 use tempo_revm::TempoStateAccess;
+use tracing::warn;
 
 /// Tempo transaction pool that routes based on nonce_key
 pub struct TempoTransactionPool<Client> {
@@ -50,7 +52,12 @@ pub struct TempoTransactionPool<Client> {
     >,
     /// Minimal pool for 2D nonces (nonce_key > 0)
     aa_2d_pool: Arc<RwLock<AA2dPool>>,
+    /// Lock contention metrics for the AA 2D pool.
+    lock_metrics: AA2dPoolLockMetrics,
 }
+
+/// Threshold above which lock acquisitions emit a warning log.
+const SLOW_LOCK_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(5);
 
 impl<Client> TempoTransactionPool<Client> {
     pub fn new(
@@ -64,7 +71,42 @@ impl<Client> TempoTransactionPool<Client> {
         Self {
             protocol_pool,
             aa_2d_pool: Arc::new(RwLock::new(aa_2d_pool)),
+            lock_metrics: AA2dPoolLockMetrics::default(),
         }
+    }
+
+    /// Acquires a read lock on the AA 2D pool with contention tracking.
+    fn aa_2d_pool_read(&self) -> parking_lot::RwLockReadGuard<'_, AA2dPool> {
+        let start = Instant::now();
+        let guard = self.aa_2d_pool.read();
+        let elapsed = start.elapsed();
+        self.lock_metrics
+            .read_lock_wait_duration_seconds
+            .record(elapsed);
+        if elapsed > SLOW_LOCK_THRESHOLD {
+            warn!(
+                blocked_for = ?elapsed,
+                "Blocked waiting for AA 2D pool read lock"
+            );
+        }
+        guard
+    }
+
+    /// Acquires a write lock on the AA 2D pool with contention tracking.
+    fn aa_2d_pool_write(&self) -> parking_lot::RwLockWriteGuard<'_, AA2dPool> {
+        let start = Instant::now();
+        let guard = self.aa_2d_pool.write();
+        let elapsed = start.elapsed();
+        self.lock_metrics
+            .write_lock_wait_duration_seconds
+            .record(elapsed);
+        if elapsed > SLOW_LOCK_THRESHOLD {
+            warn!(
+                blocked_for = ?elapsed,
+                "Blocked waiting for AA 2D pool write lock"
+            );
+        }
+        guard
     }
 }
 impl<Client> TempoTransactionPool<Client>
@@ -86,7 +128,7 @@ where
 
     /// Updates the 2d nonce pool with the given state changes.
     pub(crate) fn notify_aa_pool_on_state_updates(&self, state: &HashMap<Address, BundleAccount>) {
-        let (promoted, _mined) = self.aa_2d_pool.write().on_state_updates(state);
+        let (promoted, _mined) = self.aa_2d_pool_write().on_state_updates(state);
         // Note: mined transactions are notified via the vanilla pool updates
         self.protocol_pool
             .inner()
@@ -123,7 +165,7 @@ where
             .map_err(reth_provider::ProviderError::other)?;
 
         // Apply the nonce changes to the 2D pool
-        let (promoted, _mined) = self.aa_2d_pool.write().on_nonce_changes(nonce_changes);
+        let (promoted, _mined) = self.aa_2d_pool_write().on_nonce_changes(nonce_changes);
         if !promoted.is_empty() {
             self.protocol_pool
                 .inner()
@@ -141,8 +183,7 @@ where
         &self,
         tx_hashes: impl Iterator<Item = &'a TxHash>,
     ) {
-        self.aa_2d_pool
-            .write()
+        self.aa_2d_pool_write()
             .remove_included_expiring_nonce_txs(tx_hashes);
     }
 
@@ -441,7 +482,7 @@ where
                         .tip_timestamp();
                     let hardfork = self.client().chain_spec().tempo_hardfork_at(tip_timestamp);
 
-                    let added = self.aa_2d_pool.write().add_transaction(
+                    let added = self.aa_2d_pool_write().add_transaction(
                         Arc::new(tx),
                         state_nonce,
                         hardfork,
@@ -500,6 +541,7 @@ impl<Client> Clone for TempoTransactionPool<Client> {
         Self {
             protocol_pool: self.protocol_pool.clone(),
             aa_2d_pool: Arc::clone(&self.aa_2d_pool),
+            lock_metrics: self.lock_metrics.clone(),
         }
     }
 }
@@ -529,7 +571,7 @@ where
 
     fn pool_size(&self) -> PoolSize {
         let mut size = self.protocol_pool.pool_size();
-        let (pending, queued) = self.aa_2d_pool.read().pending_and_queued_txn_count();
+        let (pending, queued) = self.aa_2d_pool_read().pending_and_queued_txn_count();
         size.pending += pending;
         size.queued += queued;
         size
@@ -615,7 +657,7 @@ where
 
     fn pooled_transaction_hashes(&self) -> Vec<B256> {
         let mut hashes = self.protocol_pool.pooled_transaction_hashes();
-        hashes.extend(self.aa_2d_pool.read().pooled_transactions_hashes_iter());
+        hashes.extend(self.aa_2d_pool_read().pooled_transactions_hashes_iter());
         hashes
     }
 
@@ -627,8 +669,7 @@ where
         let remaining = max - protocol_hashes.len();
         let mut hashes = protocol_hashes;
         hashes.extend(
-            self.aa_2d_pool
-                .read()
+            self.aa_2d_pool_read()
                 .pooled_transactions_hashes_iter()
                 .take(remaining),
         );
@@ -637,7 +678,7 @@ where
 
     fn pooled_transactions(&self) -> Vec<Arc<ValidPoolTransaction<Self::Transaction>>> {
         let mut txs = self.protocol_pool.pooled_transactions();
-        txs.extend(self.aa_2d_pool.read().pooled_transactions_iter());
+        txs.extend(self.aa_2d_pool_read().pooled_transactions_iter());
         txs
     }
 
@@ -652,8 +693,7 @@ where
 
         let remaining = max - txs.len();
         txs.extend(
-            self.aa_2d_pool
-                .read()
+            self.aa_2d_pool_read()
                 .pooled_transactions_iter()
                 .take(remaining),
         );
@@ -677,7 +717,7 @@ where
         out: &mut Vec<<Self::Transaction as PoolTransaction>::Pooled>,
     ) {
         let mut accumulated_size = 0;
-        self.aa_2d_pool.read().append_pooled_transaction_elements(
+        self.aa_2d_pool_read().append_pooled_transaction_elements(
             tx_hashes,
             limit,
             &mut accumulated_size,
@@ -722,7 +762,7 @@ where
         &self,
     ) -> Box<dyn BestTransactions<Item = Arc<ValidPoolTransaction<Self::Transaction>>>> {
         let left = self.protocol_pool.inner().best_transactions();
-        let right = self.aa_2d_pool.read().best_transactions();
+        let right = self.aa_2d_pool_read().best_transactions();
         Box::new(MergeBestTransactions::new(left, right))
     }
 
@@ -735,7 +775,7 @@ where
 
     fn pending_transactions(&self) -> Vec<Arc<ValidPoolTransaction<Self::Transaction>>> {
         let mut pending = self.protocol_pool.pending_transactions();
-        pending.extend(self.aa_2d_pool.read().pending_transactions());
+        pending.extend(self.aa_2d_pool_read().pending_transactions());
         pending
     }
 
@@ -760,20 +800,20 @@ where
 
     fn queued_transactions(&self) -> Vec<Arc<ValidPoolTransaction<Self::Transaction>>> {
         let mut queued = self.protocol_pool.queued_transactions();
-        queued.extend(self.aa_2d_pool.read().queued_transactions());
+        queued.extend(self.aa_2d_pool_read().queued_transactions());
         queued
     }
 
     fn pending_and_queued_txn_count(&self) -> (usize, usize) {
         let (protocol_pending, protocol_queued) = self.protocol_pool.pending_and_queued_txn_count();
-        let (aa_pending, aa_queued) = self.aa_2d_pool.read().pending_and_queued_txn_count();
+        let (aa_pending, aa_queued) = self.aa_2d_pool_read().pending_and_queued_txn_count();
         (protocol_pending + aa_pending, protocol_queued + aa_queued)
     }
 
     fn all_transactions(&self) -> AllPoolTransactions<Self::Transaction> {
         let mut transactions = self.protocol_pool.all_transactions();
         {
-            let aa_2d_pool = self.aa_2d_pool.read();
+            let aa_2d_pool = self.aa_2d_pool_read();
             transactions
                 .pending
                 .extend(aa_2d_pool.pending_transactions());
@@ -784,7 +824,7 @@ where
 
     fn all_transaction_hashes(&self) -> Vec<B256> {
         let mut hashes = self.protocol_pool.all_transaction_hashes();
-        hashes.extend(self.aa_2d_pool.read().all_transaction_hashes_iter());
+        hashes.extend(self.aa_2d_pool_read().all_transaction_hashes_iter());
         hashes
     }
 
@@ -792,7 +832,7 @@ where
         &self,
         hashes: Vec<B256>,
     ) -> Vec<Arc<ValidPoolTransaction<Self::Transaction>>> {
-        let mut txs = self.aa_2d_pool.write().remove_transactions(hashes.iter());
+        let mut txs = self.aa_2d_pool_write().remove_transactions(hashes.iter());
         txs.extend(self.protocol_pool.remove_transactions(hashes));
         txs
     }
@@ -829,22 +869,22 @@ where
         if announcement.is_empty() {
             return;
         }
-        let aa_pool = self.aa_2d_pool.read();
+        let aa_pool = self.aa_2d_pool_read();
         announcement.retain_by_hash(|tx| !aa_pool.contains(tx))
     }
 
     fn contains(&self, tx_hash: &B256) -> bool {
-        self.protocol_pool.contains(tx_hash) || self.aa_2d_pool.read().contains(tx_hash)
+        self.protocol_pool.contains(tx_hash) || self.aa_2d_pool_read().contains(tx_hash)
     }
 
     fn get(&self, tx_hash: &B256) -> Option<Arc<ValidPoolTransaction<Self::Transaction>>> {
         self.protocol_pool
             .get(tx_hash)
-            .or_else(|| self.aa_2d_pool.read().get(tx_hash))
+            .or_else(|| self.aa_2d_pool_read().get(tx_hash))
     }
 
     fn get_all(&self, txs: Vec<B256>) -> Vec<Arc<ValidPoolTransaction<Self::Transaction>>> {
-        let mut result = self.aa_2d_pool.read().get_all(txs.iter());
+        let mut result = self.aa_2d_pool_read().get_all(txs.iter());
         result.extend(self.protocol_pool.get_all(txs));
         result
     }
@@ -965,7 +1005,7 @@ where
 
     fn unique_senders(&self) -> std::collections::HashSet<Address> {
         let mut senders = self.protocol_pool.unique_senders();
-        senders.extend(self.aa_2d_pool.read().senders_iter().copied());
+        senders.extend(self.aa_2d_pool_read().senders_iter().copied());
         senders
     }
 

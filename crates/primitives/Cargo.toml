@@ -60,6 +60,7 @@ alloy-signer.workspace = true
 alloy-sol-types.workspace = true
 alloy-signer-local.workspace = true
 rand.workspace = true
+tempo-contracts = { workspace = true, features = ["test-utils"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [features]

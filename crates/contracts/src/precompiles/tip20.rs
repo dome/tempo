@@ -321,46 +321,65 @@ impl TIP20Error {
     }
 }
 
-#[cfg(test)]
-mod test {
+/// Test utilities for TIP-20 calldata generation.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils {
     use super::*;
-    use alloc::vec::Vec;
-    use alloy_primitives::{Address, B256, U256};
+    use alloy_primitives::{Address, B256, Bytes, U256};
 
     #[rustfmt::skip]
     /// Returns valid ABI-encoded calldata for every recognized TIP-20 payment selector.
-    fn payment_calldatas() -> [Vec<u8>; 9] {
+    pub fn payment_calldatas() -> [Bytes; 9] {
         let (to, from, amount, memo) = (Address::random(), Address::random(), U256::random(), B256::random());
 
         [
-            ITIP20::transferCall { to, amount }.abi_encode(),
-            ITIP20::transferWithMemoCall { to, amount, memo }.abi_encode(),
-            ITIP20::transferFromCall { from, to, amount }.abi_encode(),
-            ITIP20::transferFromWithMemoCall { from, to, amount, memo }.abi_encode(),
-            ITIP20::approveCall { spender: to, amount }.abi_encode(),
-            ITIP20::mintCall { to, amount }.abi_encode(),
-            ITIP20::mintWithMemoCall { to, amount, memo }.abi_encode(),
-            ITIP20::burnCall { amount }.abi_encode(),
-            ITIP20::burnWithMemoCall { amount, memo }.abi_encode(),
+            ITIP20::transferCall { to, amount }.abi_encode().into(),
+            ITIP20::transferWithMemoCall { to, amount, memo }.abi_encode().into(),
+            ITIP20::transferFromCall { from, to, amount }.abi_encode().into(),
+            ITIP20::transferFromWithMemoCall { from, to, amount, memo }.abi_encode().into(),
+            ITIP20::approveCall { spender: to, amount }.abi_encode().into(),
+            ITIP20::mintCall { to, amount }.abi_encode().into(),
+            ITIP20::mintWithMemoCall { to, amount, memo }.abi_encode().into(),
+            ITIP20::burnCall { amount }.abi_encode().into(),
+            ITIP20::burnWithMemoCall { amount, memo }.abi_encode().into(),
         ]
     }
 
     #[rustfmt::skip]
     /// Returns ABI-encoded calldata for TIP-20 selectors NOT recognized as payments.
-    fn non_payment_calldatas() -> [Vec<u8>; 3] {
-        let mut data = ITIP20::transferCall { to: Address::random(), amount: U256::random() }.abi_encode();
-        data[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+    ///
+    /// Covers: empty data, non-payment selectors, unknown selectors, payment selectors with trailing bytes.
+    pub fn non_payment_calldatas() -> [Bytes; 5] {
+        let transfer_calldata = ITIP20::transferCall { to: Address::random(), amount: U256::random() }.abi_encode();
+
+        // valid selector with excess trailing bytes
+        let mut excess = transfer_calldata.clone();
+        excess.extend_from_slice(&[0u8; 32]);
+
+        // unknown selector
+        let mut unknown = transfer_calldata;
+        unknown[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
 
         [
-            // non-payment TIP20 calls with known selectors
-            ITIP20::claimRewardsCall {}.abi_encode(),
+            // empty calldata
+            Bytes::new(),
+            // valid selector with excess trailing bytes
+            excess.into(),
+            // unknown selector
+            unknown.into(),
+            // known non-payment TIP20 selectors
+            ITIP20::claimRewardsCall {}.abi_encode().into(),
             ITIP20::permitCall {
                 owner: Address::random(), spender: Address::random(), value: U256::random(), deadline: U256::random(),
-                v: u8::MAX, r: B256::random(), s: B256::random() }.abi_encode(),
-            // non-payment TIP20 calls with unknown selectors
-            data,
+                v: u8::MAX, r: B256::random(), s: B256::random()
+            }.abi_encode().into(),
         ]
     }
+}
+
+#[cfg(test)]
+mod test {
+    use super::{test_utils::*, *};
 
     #[test]
     fn test_is_payment() {

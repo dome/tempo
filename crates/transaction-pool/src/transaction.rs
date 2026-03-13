@@ -635,10 +635,11 @@ impl EthPoolTransaction for TempoPooledTransaction {
 mod tests {
     use super::*;
     use crate::test_utils::TxBuilder;
-    use alloy_consensus::TxEip1559;
+    use alloy_consensus::{Signed, TxEip1559, TxEip2930, TxEip7702, TxLegacy};
     use alloy_primitives::{Address, Signature, TxKind, address};
-    use alloy_sol_types::SolCall;
-    use tempo_contracts::precompiles::ITIP20;
+    use tempo_contracts::precompiles::tip20::test_utils::{
+        non_payment_calldatas, payment_calldatas,
+    };
     use tempo_precompiles::{PATH_USD_ADDRESS, nonce::NonceManager};
     use tempo_primitives::transaction::{
         TempoTransaction,
@@ -647,70 +648,108 @@ mod tests {
         tt_signed::AASigned,
     };
 
+    const SENDER: Address = address!("0000000000000000000000000000000000000001");
+
+    /// Builds one [`TempoPooledTransaction`] per tx type targeting `to` with `input`.
+    fn pooled_txs_for(to: Address, input: Bytes) -> [TempoPooledTransaction; 5] {
+        let aa = TempoTransaction {
+            calls: vec![Call {
+                to: TxKind::Call(to),
+                input: input.clone(),
+                value: U256::ZERO,
+            }],
+            ..Default::default()
+        };
+        let envelopes = [
+            TempoTxEnvelope::Legacy(Signed::new_unhashed(
+                TxLegacy {
+                    to: TxKind::Call(to),
+                    input: input.clone(),
+                    ..Default::default()
+                },
+                Signature::test_signature(),
+            )),
+            TempoTxEnvelope::Eip2930(Signed::new_unhashed(
+                TxEip2930 {
+                    to: TxKind::Call(to),
+                    input: input.clone(),
+                    ..Default::default()
+                },
+                Signature::test_signature(),
+            )),
+            TempoTxEnvelope::Eip1559(Signed::new_unhashed(
+                TxEip1559 {
+                    to: TxKind::Call(to),
+                    input: input.clone(),
+                    ..Default::default()
+                },
+                Signature::test_signature(),
+            )),
+            TempoTxEnvelope::Eip7702(Signed::new_unhashed(
+                TxEip7702 {
+                    to,
+                    input,
+                    ..Default::default()
+                },
+                Signature::test_signature(),
+            )),
+            TempoTxEnvelope::AA(aa.into_signed(Signature::test_signature().into())),
+        ];
+        envelopes.map(|env| TempoPooledTransaction::new(Recovered::new_unchecked(env, SENDER)))
+    }
+
     #[test]
-    fn test_payment_classification_positive() {
-        // Test that TIP20 address prefix with valid calldata is classified as payment
-        let calldata = ITIP20::transferCall {
-            to: Address::random(),
-            amount: U256::random(),
+    fn test_payment_v2_accepts_valid_calldata() {
+        for calldata in payment_calldatas() {
+            for pooled_tx in pooled_txs_for(PATH_USD_ADDRESS, calldata.clone()) {
+                let ty = pooled_tx.inner().tx_type();
+                assert!(
+                    pooled_tx.is_payment(),
+                    "{ty:?} should be payment: {calldata}"
+                );
+            }
         }
-        .abi_encode();
-
-        let tx = TxEip1559 {
-            to: TxKind::Call(PATH_USD_ADDRESS),
-            gas_limit: 21000,
-            input: Bytes::from(calldata),
-            ..Default::default()
-        };
-
-        let envelope = TempoTxEnvelope::Eip1559(alloy_consensus::Signed::new_unchecked(
-            tx,
-            Signature::test_signature(),
-            B256::ZERO,
-        ));
-
-        let recovered = Recovered::new_unchecked(
-            envelope,
-            address!("0000000000000000000000000000000000000001"),
-        );
-
-        let pooled_tx = TempoPooledTransaction::new(recovered);
-        assert!(pooled_tx.is_payment());
     }
 
     #[test]
-    fn test_payment_classification_tip20_prefix_without_valid_calldata() {
-        // TIP20 prefix but no valid calldata should NOT be classified as payment in the pool
-        let payment_addr = address!("20c0000000000000000000000000000000000001");
-        let tx = TxEip1559 {
-            to: TxKind::Call(payment_addr),
-            gas_limit: 21000,
-            ..Default::default()
-        };
-
-        let envelope = TempoTxEnvelope::Eip1559(alloy_consensus::Signed::new_unchecked(
-            tx,
-            Signature::test_signature(),
-            B256::ZERO,
-        ));
-
-        let recovered = Recovered::new_unchecked(
-            envelope,
-            address!("0000000000000000000000000000000000000001"),
-        );
-
-        let pooled_tx = TempoPooledTransaction::new(recovered);
-        assert!(!pooled_tx.is_payment());
+    fn test_payment_v2_rejects_non_payment_calldata() {
+        for calldata in non_payment_calldatas() {
+            for pooled_tx in pooled_txs_for(PATH_USD_ADDRESS, calldata.clone()) {
+                let ty = pooled_tx.inner().tx_type();
+                assert!(
+                    !pooled_tx.is_payment(),
+                    "{ty:?} should not be payment with non-payment calldata: {calldata}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn test_payment_classification_negative() {
-        // Test that non-TIP20 address is NOT classified as payment
+    fn test_payment_v2_rejects_non_tip20_address() {
         let non_payment_addr = Address::random();
-        let pooled_tx = TxBuilder::eip1559(non_payment_addr)
-            .gas_limit(21000)
-            .build_eip1559();
-        assert!(!pooled_tx.is_payment());
+        for calldata in payment_calldatas() {
+            for pooled_tx in pooled_txs_for(non_payment_addr, calldata.clone()) {
+                let ty = pooled_tx.inner().tx_type();
+                assert!(
+                    !pooled_tx.is_payment(),
+                    "{ty:?} should not be payment for non-TIP20 address: {calldata}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_payment_v2_rejects_aa_empty_calls() {
+        let tx = TempoTransaction {
+            calls: vec![],
+            ..Default::default()
+        };
+        let envelope = TempoTxEnvelope::AA(tx.into_signed(Signature::test_signature().into()));
+        let pooled_tx = TempoPooledTransaction::new(Recovered::new_unchecked(envelope, SENDER));
+        assert!(
+            !pooled_tx.is_payment(),
+            "AA with empty calls should not be payment"
+        );
     }
 
     #[test]

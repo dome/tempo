@@ -68,7 +68,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "Prometheus"
+        "uid": "${DS_STG-NAE-PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -151,7 +151,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "editorMode": "code",
           "expr": "label_replace(avg(reth_tempo_payload_builder_total_transactions_last{namespace=\"$namespace\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -166,7 +166,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "Prometheus"
+        "uid": "${DS_STG-NAE-PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -250,7 +250,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "editorMode": "code",
           "expr": "label_replace(avg(reth_tempo_payload_builder_block_time_millis{namespace=\"$namespace\", quantile=\"0.5\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -261,7 +261,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "editorMode": "code",
           "expr": "label_replace(avg(reth_tempo_payload_builder_block_time_millis{namespace=\"$namespace\", quantile=\"0.9\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -272,7 +272,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "editorMode": "code",
           "expr": "label_replace(avg(reth_tempo_payload_builder_block_time_millis{namespace=\"$namespace\", quantile=\"0.99\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -287,7 +287,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "Prometheus"
+        "uid": "${DS_STG-NAE-PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -370,7 +370,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "editorMode": "code",
           "expr": "label_replace(avg(reth_tempo_payload_builder_gas_used_last{namespace=\"$namespace\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -385,7 +385,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "Prometheus"
+        "uid": "${DS_STG-NAE-PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -468,7 +468,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "editorMode": "code",
           "expr": "label_replace(avg(reth_tempo_payload_builder_gas_per_second_last{namespace=\"$namespace\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -496,7 +496,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "Prometheus"
+        "uid": "${DS_STG-NAE-PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -580,7 +580,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "editorMode": "code",
           "expr": "label_replace(avg(reth_tempo_payload_builder_payload_build_duration_seconds{namespace=\"$namespace\", quantile=\"0.5\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -591,7 +591,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "editorMode": "code",
           "expr": "label_replace(avg(reth_tempo_payload_builder_payload_build_duration_seconds{namespace=\"$namespace\", quantile=\"0.9\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -602,7 +602,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "editorMode": "code",
           "expr": "label_replace(avg(reth_tempo_payload_builder_payload_build_duration_seconds{namespace=\"$namespace\", quantile=\"0.99\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -617,7 +617,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "Prometheus"
+        "uid": "${DS_STG-NAE-PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -701,7 +701,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "editorMode": "code",
           "expr": "label_replace(avg(reth_tempo_payload_builder_total_transaction_execution_duration_seconds{namespace=\"$namespace\", quantile=\"0.5\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -712,7 +712,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "editorMode": "code",
           "expr": "label_replace(avg(reth_tempo_payload_builder_payload_finalization_duration_seconds{namespace=\"$namespace\", quantile=\"0.5\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -737,7 +737,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -821,7 +821,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_state_setup_duration_seconds{namespace=\"$namespace\", quantile=\"0.5\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -832,7 +832,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_state_setup_duration_seconds{namespace=\"$namespace\", quantile=\"0.9\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -843,7 +843,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_state_setup_duration_seconds{namespace=\"$namespace\", quantile=\"0.99\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -858,7 +858,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -942,7 +942,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_prepare_system_transactions_duration_seconds{namespace=\"$namespace\", quantile=\"0.5\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -953,7 +953,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_prepare_system_transactions_duration_seconds{namespace=\"$namespace\", quantile=\"0.9\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -964,7 +964,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_prepare_system_transactions_duration_seconds{namespace=\"$namespace\", quantile=\"0.99\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -979,7 +979,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -1063,7 +1063,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_total_normal_transaction_execution_duration_seconds{namespace=\"$namespace\", quantile=\"0.5\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -1074,7 +1074,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_total_normal_transaction_execution_duration_seconds{namespace=\"$namespace\", quantile=\"0.9\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -1085,7 +1085,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_total_normal_transaction_execution_duration_seconds{namespace=\"$namespace\", quantile=\"0.99\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -1100,7 +1100,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -1184,7 +1184,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_total_subblock_transaction_execution_duration_seconds{namespace=\"$namespace\", quantile=\"0.5\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -1195,7 +1195,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_total_subblock_transaction_execution_duration_seconds{namespace=\"$namespace\", quantile=\"0.9\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -1206,7 +1206,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_total_subblock_transaction_execution_duration_seconds{namespace=\"$namespace\", quantile=\"0.99\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -1221,7 +1221,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -1305,7 +1305,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_system_transactions_execution_duration_seconds{namespace=\"$namespace\", quantile=\"0.5\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -1316,7 +1316,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_system_transactions_execution_duration_seconds{namespace=\"$namespace\", quantile=\"0.9\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -1327,7 +1327,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_system_transactions_execution_duration_seconds{namespace=\"$namespace\", quantile=\"0.99\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -1342,7 +1342,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -1426,7 +1426,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_transaction_execution_duration_seconds{namespace=\"$namespace\", quantile=\"0.5\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -1437,7 +1437,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_transaction_execution_duration_seconds{namespace=\"$namespace\", quantile=\"0.9\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -1448,7 +1448,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_transaction_execution_duration_seconds{namespace=\"$namespace\", quantile=\"0.99\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -1463,7 +1463,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -1547,7 +1547,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_hashed_post_state_duration_seconds{namespace=\"$namespace\", quantile=\"0.5\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -1558,7 +1558,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_hashed_post_state_duration_seconds{namespace=\"$namespace\", quantile=\"0.9\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -1569,7 +1569,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_hashed_post_state_duration_seconds{namespace=\"$namespace\", quantile=\"0.99\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -1584,7 +1584,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -1668,7 +1668,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_state_root_with_updates_duration_seconds{namespace=\"$namespace\", quantile=\"0.5\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -1679,7 +1679,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_state_root_with_updates_duration_seconds{namespace=\"$namespace\", quantile=\"0.9\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -1690,7 +1690,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_state_root_with_updates_duration_seconds{namespace=\"$namespace\", quantile=\"0.99\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -1719,7 +1719,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -1802,7 +1802,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_subblocks_last{namespace=\"$namespace\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -1817,7 +1817,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -1900,7 +1900,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_subblock_transactions_last{namespace=\"$namespace\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -1915,7 +1915,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -1999,7 +1999,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_subblock_execution_duration_seconds{namespace=\"$namespace\", quantile=\"0.5\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -2010,7 +2010,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_subblock_execution_duration_seconds{namespace=\"$namespace\", quantile=\"0.9\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -2021,7 +2021,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_subblock_execution_duration_seconds{namespace=\"$namespace\", quantile=\"0.99\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -2036,7 +2036,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -2120,7 +2120,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_tempo_payload_builder_rlp_block_size_bytes_last{namespace=\"$namespace\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -2149,7 +2149,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -2232,7 +2232,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_transaction_pool_total_transactions{namespace=\"$namespace\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -2247,7 +2247,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -2330,7 +2330,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_transaction_pool_aa_2d_total_transactions{namespace=\"$namespace\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -2345,7 +2345,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -2429,7 +2429,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_transaction_pool_maintenance_block_update_duration_seconds{namespace=\"$namespace\", quantile=\"0.5\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -2440,7 +2440,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_transaction_pool_maintenance_block_update_duration_seconds{namespace=\"$namespace\", quantile=\"0.9\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -2451,7 +2451,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_transaction_pool_maintenance_block_update_duration_seconds{namespace=\"$namespace\", quantile=\"0.99\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -2466,7 +2466,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -2550,7 +2550,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_transaction_pool_maintenance_amm_cache_update_duration_seconds{namespace=\"$namespace\", quantile=\"0.5\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -2561,7 +2561,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_transaction_pool_maintenance_amm_cache_update_duration_seconds{namespace=\"$namespace\", quantile=\"0.9\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -2572,7 +2572,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_transaction_pool_maintenance_amm_cache_update_duration_seconds{namespace=\"$namespace\", quantile=\"0.99\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -2601,7 +2601,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -2684,10 +2684,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
-              "expr": "label_replace(avg(rate(reth_transaction_pool_maintenance_expired_transactions_evicted_total{namespace=\"$namespace\"}[5m])) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
+              "expr": "label_replace(avg(rate(reth_transaction_pool_maintenance_expired_transactions_evicted{namespace=\"$namespace\"}[5m])) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
               "legendFormat": "{{job}}",
               "range": true,
               "refId": "A"
@@ -2699,7 +2699,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -2782,10 +2782,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
-              "expr": "label_replace(avg(rate(reth_transaction_pool_maintenance_transactions_paused_total{namespace=\"$namespace\"}[5m])) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
+              "expr": "label_replace(avg(rate(reth_transaction_pool_maintenance_transactions_paused{namespace=\"$namespace\"}[5m])) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
               "legendFormat": "Paused",
               "range": true,
               "refId": "A"
@@ -2793,10 +2793,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
-              "expr": "label_replace(avg(rate(reth_transaction_pool_maintenance_transactions_unpaused_total{namespace=\"$namespace\"}[5m])) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
+              "expr": "label_replace(avg(rate(reth_transaction_pool_maintenance_transactions_unpaused{namespace=\"$namespace\"}[5m])) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
               "legendFormat": "Unpaused",
               "range": true,
               "refId": "B"
@@ -2808,7 +2808,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -2891,10 +2891,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
-              "expr": "label_replace(avg(rate(reth_transaction_pool_maintenance_transactions_invalidated_total{namespace=\"$namespace\"}[5m])) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
+              "expr": "label_replace(avg(rate(reth_transaction_pool_maintenance_transactions_invalidated{namespace=\"$namespace\"}[5m])) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
               "legendFormat": "{{job}}",
               "range": true,
               "refId": "A"
@@ -2906,7 +2906,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -2989,13 +2989,57 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
-              "expr": "label_replace(avg(rate(reth_tempo_payload_builder_pool_transactions_skipped_total{namespace=\"$namespace\"}[5m])) by (job, reason), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
-              "legendFormat": "{{reason}}",
+              "expr": "label_replace(avg(rate(reth_tempo_payload_builder_pool_transactions_skipped_nonce_too_low{namespace=\"$namespace\"}[5m])) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
+              "legendFormat": "Nonce Too Low",
               "range": true,
               "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
+              },
+              "editorMode": "code",
+              "expr": "label_replace(avg(rate(reth_tempo_payload_builder_pool_transactions_skipped_invalid_tx{namespace=\"$namespace\"}[5m])) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
+              "legendFormat": "Invalid Tx",
+              "range": true,
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
+              },
+              "editorMode": "code",
+              "expr": "label_replace(avg(rate(reth_tempo_payload_builder_pool_transactions_skipped_oversized_block{namespace=\"$namespace\"}[5m])) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
+              "legendFormat": "Oversized Block",
+              "range": true,
+              "refId": "C"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
+              },
+              "editorMode": "code",
+              "expr": "label_replace(avg(rate(reth_tempo_payload_builder_pool_transactions_skipped_exceeds_non_payment_gas_limit{namespace=\"$namespace\"}[5m])) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
+              "legendFormat": "Exceeds Non-Payment Gas",
+              "range": true,
+              "refId": "D"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
+              },
+              "editorMode": "code",
+              "expr": "label_replace(avg(rate(reth_tempo_payload_builder_pool_transactions_skipped_exceeds_non_shared_gas_limit{namespace=\"$namespace\"}[5m])) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
+              "legendFormat": "Exceeds Non-Shared Gas",
+              "range": true,
+              "refId": "E"
             }
           ],
           "title": "Pool Tx Skipped (by reason)",
@@ -3018,7 +3062,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -3102,7 +3146,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_sync_execution_execution_histogram{namespace=\"$namespace\", quantile=\"0.5\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -3113,7 +3157,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_sync_execution_execution_histogram{namespace=\"$namespace\", quantile=\"0.9\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -3124,7 +3168,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_sync_execution_execution_histogram{namespace=\"$namespace\", quantile=\"0.99\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -3139,7 +3183,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -3223,7 +3267,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_sync_block_validation_state_root_histogram{namespace=\"$namespace\", quantile=\"0.5\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -3234,7 +3278,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_sync_block_validation_state_root_histogram{namespace=\"$namespace\", quantile=\"0.9\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -3245,7 +3289,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_sync_block_validation_state_root_histogram{namespace=\"$namespace\", quantile=\"0.99\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -3260,7 +3304,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -3344,7 +3388,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_consensus_engine_beacon_new_payload_latency{namespace=\"$namespace\", quantile=\"0.5\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -3355,7 +3399,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_consensus_engine_beacon_new_payload_latency{namespace=\"$namespace\", quantile=\"0.9\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -3366,7 +3410,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_consensus_engine_beacon_new_payload_latency{namespace=\"$namespace\", quantile=\"0.99\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -3381,7 +3425,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "Prometheus"
+            "uid": "${DS_STG-NAE-PROMETHEUS}"
           },
           "fieldConfig": {
             "defaults": {
@@ -3464,7 +3508,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "Prometheus"
+                "uid": "${DS_STG-NAE-PROMETHEUS}"
               },
               "editorMode": "code",
               "expr": "label_replace(avg(reth_consensus_engine_beacon_new_payload_gas_per_second_last{namespace=\"$namespace\"}) by (job), \"job\", \"$1\", \"job\", \"^$namespace/(.*)\")",
@@ -3491,7 +3535,7 @@
         "current": {},
         "datasource": {
           "type": "prometheus",
-          "uid": "Prometheus"
+          "uid": "${DS_STG-NAE-PROMETHEUS}"
         },
         "definition": "label_values(reth_info,namespace)",
         "name": "namespace",
@@ -3532,7 +3576,7 @@
         "current": {},
         "datasource": {
           "type": "prometheus",
-          "uid": "Prometheus"
+          "uid": "${DS_STG-NAE-PROMETHEUS}"
         },
         "definition": "label_values(reth_info{namespace=\"$namespace\"}, job)",
         "name": "instance",

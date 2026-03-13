@@ -3550,29 +3550,6 @@
         "type": "query"
       },
       {
-        "current": {
-          "selected": true,
-          "text": "yes",
-          "value": "yes"
-        },
-        "name": "show_payload_builder",
-        "label": "Show Payload Builder",
-        "options": [
-          {
-            "selected": true,
-            "text": "yes",
-            "value": "yes"
-          },
-          {
-            "selected": false,
-            "text": "no",
-            "value": "no"
-          }
-        ],
-        "query": "yes,no",
-        "type": "custom"
-      },
-      {
         "current": {},
         "datasource": {
           "type": "prometheus",

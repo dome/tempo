@@ -1,6 +1,4 @@
-pub(super) use crate::validators::read_from_contract_at_height;
-
-use commonware_consensus::types::Height;
+use alloy_primitives::B256;
 use eyre::WrapErr as _;
 use tempo_node::TempoFullNode;
 use tracing::{Level, instrument};
@@ -12,16 +10,16 @@ use tracing::{Level, instrument};
 #[instrument(
     skip_all,
     fields(
-        at_height,
+        %at_hash,
     ),
     err,
     ret(level = Level::INFO)
 )]
 pub(super) fn read_next_full_dkg_ceremony(
     node: &TempoFullNode,
-    at_height: Height,
+    at_hash: B256,
 ) -> eyre::Result<u64> {
-    crate::validators::read_validator_config_at_height(node, at_height, |config| {
+    crate::validators::read_validator_config_at_hash(node, at_hash, |config| {
         config
             .get_next_full_dkg_ceremony()
             .wrap_err("failed to query contract for next full dkg ceremony")

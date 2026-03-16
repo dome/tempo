@@ -1,6 +1,5 @@
-use alloy_primitives::Address;
+use alloy_primitives::{Address, B256};
 use commonware_codec::DecodeExt as _;
-use commonware_consensus::types::Height;
 use commonware_cryptography::ed25519::PublicKey;
 use commonware_utils::ordered;
 use eyre::{OptionExt as _, WrapErr as _};
@@ -9,11 +8,12 @@ use prometheus_client::metrics::counter::Counter;
 use reth_ethereum::{
     evm::revm::{State, database::StateProviderDatabase},
     network::NetworkInfo,
+    rpc::eth::primitives::BlockNumHash,
 };
-use reth_node_builder::{Block as _, ConfigureEvm as _};
+use reth_node_builder::ConfigureEvm as _;
 use reth_provider::{
-    BlockHashReader as _, BlockIdReader as _, BlockNumReader as _, BlockReader as _, BlockSource,
-    CanonStateSubscriptions as _, StateProviderFactory as _,
+    BlockNumReader as _, CanonStateSubscriptions as _, HeaderProvider as _,
+    StateProviderFactory as _,
 };
 use std::{collections::HashMap, net::SocketAddr, time::Duration};
 use tempo_node::TempoFullNode;
@@ -24,17 +24,12 @@ use tempo_precompiles::{
 
 use tracing::{Level, debug, info, instrument, warn};
 
-pub(crate) enum ReadTarget {
-    AtLeast { height: Height },
-    Exact { height: Height },
-}
-
 /// Attempts to read the validator config from the smart contract, retrying
 /// until the required block height is available.
 pub(crate) async fn read_validator_config_with_retry(
     context: &impl commonware_runtime::Clock,
     node: &TempoFullNode,
-    target: ReadTarget,
+    target: BlockNumHash,
     total_attempts: &Counter,
 ) -> ordered::Map<PublicKey, DecodedValidator> {
     let mut attempts = 0;
@@ -47,18 +42,7 @@ pub(crate) async fn read_validator_config_with_retry(
         total_attempts.inc();
         attempts += 1;
 
-        let target_height = match target {
-            ReadTarget::Exact { height } => height,
-            ReadTarget::AtLeast { height } => node
-                .provider
-                .best_block_number()
-                .ok()
-                .map(Height::new)
-                .filter(|best| best >= &height)
-                .unwrap_or(height),
-        };
-
-        if let Ok(validators) = read_from_contract_at_height(attempts, node, target_height) {
+        if let Ok(validators) = read_from_contract_at_hash(attempts, node, target.hash) {
             break 'read_contract validators;
         }
 
@@ -68,14 +52,15 @@ pub(crate) async fn read_validator_config_with_retry(
         let blocks_behind = best_block
             .as_ref()
             .ok()
-            .map(|best| target_height.get().saturating_sub(*best));
+            .map(|best| target.number.saturating_sub(*best));
         tracing::warn_span!("read_validator_config_with_retry").in_scope(|| {
             warn!(
                 attempts,
                 retry_after = %tempo_telemetry_util::display_duration(retry_after),
                 is_syncing,
                 best_block = %tempo_telemetry_util::display_result(&best_block),
-                %target_height,
+                target.number,
+                %target.hash,
                 blocks_behind = %tempo_telemetry_util::display_option(&blocks_behind),
                 "reading validator config from contract failed; will retry",
             );
@@ -94,56 +79,33 @@ pub(crate) async fn read_validator_config_with_retry(
         }
     }
 }
-
 /// Reads state from the ValidatorConfig precompile at a given block height.
-pub(crate) fn read_validator_config_at_height<T>(
+pub(crate) fn read_validator_config_at_hash<T>(
     node: &TempoFullNode,
-    height: Height,
+    hash: B256,
     read_fn: impl FnOnce(&ValidatorConfig) -> eyre::Result<T>,
 ) -> eyre::Result<T> {
-    // Try mapping the block height to a hash tracked by reth.
-    //
-    // First check the canonical chain, then fallback to pending block state.
-    //
-    // Necessary because the DKG and application actors process finalized block concurrently.
-    let block_hash = if let Some(hash) = node
+    let header = node
         .provider
-        .block_hash(height.get())
-        .wrap_err_with(|| format!("failed reading block hash at height `{height}`"))?
-    {
-        hash
-    } else if let Some(pending) = node
-        .provider
-        .pending_block_num_hash()
-        .wrap_err("failed reading pending block state")?
-        && pending.number == height.get()
-    {
-        pending.hash
-    } else {
-        return Err(eyre::eyre!("block not found at height `{height}`"));
-    };
-
-    let block = node
-        .provider
-        .find_block_by_hash(block_hash, BlockSource::Any)
+        .header(hash)
         .map_err(Into::<eyre::Report>::into)
-        .and_then(|maybe| maybe.ok_or_eyre("execution layer returned empty block"))
-        .wrap_err_with(|| format!("failed reading block with hash `{block_hash}`"))?;
+        .and_then(|maybe| maybe.ok_or_eyre("execution layer returned empty header"))
+        .wrap_err_with(|| {
+            format!("failed getting header for hash `{hash}` from execution layer")
+        })?;
 
     let db = State::builder()
         .with_database(StateProviderDatabase::new(
-            node.provider
-                .state_by_block_hash(block_hash)
-                .wrap_err_with(|| {
-                    format!("failed to get state from node provider for hash `{block_hash}`")
-                })?,
+            node.provider.state_by_block_hash(hash).wrap_err_with(|| {
+                format!("failed to construct EVM state for execution layer at hash `{hash}`")
+            })?,
         ))
         .build();
 
     let mut evm = node
         .evm_config
-        .evm_for_block(db, block.header())
-        .wrap_err("failed instantiating evm for block")?;
+        .evm_for_block(db, &header)
+        .wrap_err("failed instantiating EVM for block")?;
 
     let ctx = evm.ctx_mut();
     StorageCtx::enter_evm(
@@ -164,16 +126,16 @@ pub(crate) fn read_validator_config_at_height<T>(
     skip_all,
     fields(
         attempt = _attempt,
-        %height,
+        %hash,
     ),
     err
 )]
-pub(crate) fn read_from_contract_at_height(
+pub(crate) fn read_from_contract_at_hash(
     _attempt: u32,
     node: &TempoFullNode,
-    height: Height,
+    hash: B256,
 ) -> eyre::Result<ordered::Map<PublicKey, DecodedValidator>> {
-    let raw_validators = read_validator_config_at_height(node, height, |config| {
+    let raw_validators = read_validator_config_at_hash(node, hash, |config| {
         config
             .get_validators()
             .wrap_err("failed to query contract for validator config")

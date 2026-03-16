@@ -282,6 +282,7 @@ where
                 oracle: self.peer_manager.clone(),
                 epoch_strategy: epoch_strategy.clone(),
                 last_finalized_height,
+                marshal: marshal_mailbox.clone(),
             },
         );
 

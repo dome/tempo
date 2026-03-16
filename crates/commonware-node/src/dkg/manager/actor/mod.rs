@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, num::NonZeroU32, task::Poll};
 
 use alloy_consensus::BlockHeader as _;
+use alloy_primitives::Sealable as _;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode as _, EncodeSize, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -32,14 +33,15 @@ use futures::{
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use rand_core::CryptoRngCore;
-use reth_provider::{BlockNumReader, HeaderProvider};
+use reth_ethereum::{chainspec::EthChainSpec as _, rpc::eth::primitives::BlockNumHash};
+use reth_provider::{BlockIdReader as _, HeaderProvider as _};
 use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
 use tempo_node::TempoFullNode;
 use tracing::{Level, Span, debug, info, info_span, instrument, warn, warn_span};
 
 use crate::{
     consensus::{Digest, block::Block},
-    validators::read_validator_config_with_retry,
+    validators::{read_from_contract_at_hash, read_validator_config_with_retry},
 };
 
 mod state;
@@ -698,13 +700,7 @@ where
         let all_validators = read_validator_config_with_retry(
             &self.context,
             &self.config.execution_node,
-            crate::validators::ReadTarget::Exact {
-                height: self
-                    .config
-                    .epoch_strategy
-                    .last(round.epoch())
-                    .expect("epoch strategy is valid for all epochs"),
-            },
+            BlockNumHash::new(block.number(), block.hash()),
             &self.metrics.attempts_to_read_validator_contract,
         )
         .await;
@@ -857,13 +853,7 @@ where
         let all_validators = read_validator_config_with_retry(
             &self.context,
             &self.config.execution_node,
-            crate::validators::ReadTarget::Exact {
-                height: self
-                    .config
-                    .epoch_strategy
-                    .last(round.epoch())
-                    .expect("epoch strategy is valid for all epochs"),
-            },
+            BlockNumHash::new(block.number(), block.hash()),
             &self.metrics.attempts_to_read_validator_contract,
         )
         .await;
@@ -1171,7 +1161,7 @@ where
         // Read from pre-last block of the epoch, but never ahead of the current request.
         let next_epoch = state.epoch.next();
         let is_next_full_dkg =
-            validators::read_next_full_dkg_ceremony(&self.config.execution_node, request.height)
+            validators::read_next_full_dkg_ceremony(&self.config.execution_node, request.digest.0)
                 // in theory it should never fail, but if it does, just stick to reshare.
                 .is_ok_and(|epoch| epoch == next_epoch.get());
         if is_next_full_dkg {
@@ -1227,18 +1217,18 @@ async fn read_initial_state_and_set_floor<TContext>(
 where
     TContext: CryptoRngCore,
 {
-    let newest_height = node
+    let latest_finalized = node
         .provider
-        .best_block_number()
-        .map(Height::new)
-        .wrap_err("failed reading newest block number from database")?;
+        .finalized_block_num_hash()
+        .wrap_err("unable to read highest finalized block from execution layer")?
+        .unwrap_or_else(|| BlockNumHash::new(0, node.chain_spec().genesis_hash()));
 
     let epoch_info = epoch_strategy
-        .containing(newest_height)
+        .containing(Height::new(latest_finalized.number))
         .expect("epoch strategy is for all heights");
 
-    let last_boundary = if epoch_info.last() == newest_height {
-        newest_height
+    let last_boundary = if epoch_info.last().get() == latest_finalized.number {
+        epoch_info.last()
     } else {
         epoch_info
             .epoch()
@@ -1250,13 +1240,14 @@ where
             })
     };
     info!(
-        %newest_height,
+        %latest_finalized.number,
+        %latest_finalized.hash,
         %last_boundary,
         "execution layer reported newest available block, reading on-chain \
         DKG outcome from last boundary height, and validator state from newest \
         block"
     );
-    let header = node
+    let boundary_header = node
         .provider
         .header_by_number(last_boundary.get())
         .map_or_else(
@@ -1265,21 +1256,20 @@ where
         )
         .wrap_err_with(|| {
             format!("failed to read header for last boundary block number `{last_boundary}`")
-        })?;
+        })?
+        .seal_slow();
 
-    // XXX: Reads the contract from the latest available block (newest_height),
-    // not from the boundary. The reason is that we cannot be sure that the
-    // boundary block is available. But we know that the on-chain state is
-    // immutable - validators never change their identity and never update their
-    // IP addresses (the latter would actually probably be fine; what matters is
-    // that identities don't change).
-    let onchain_outcome =
-        tempo_dkg_onchain_artifacts::OnchainDkgOutcome::read(&mut header.extra_data().as_ref())
-            .wrap_err("the boundary header did not contain the on-chain DKG outcome")?;
+    let onchain_outcome = tempo_dkg_onchain_artifacts::OnchainDkgOutcome::read(
+        &mut boundary_header.extra_data().as_ref(),
+    )
+    .wrap_err("the boundary header did not contain the on-chain DKG outcome")?;
 
-    let all_validators = validators::read_from_contract_at_height(0, node, newest_height)
+    let all_validators = read_from_contract_at_hash(0, node, boundary_header.hash())
         .wrap_err_with(|| {
-            format!("failed reading validator config from block height `{newest_height}`")
+            format!(
+                "failed reading validator config from block hash `{}` at height `{last_boundary}`",
+                boundary_header.hash(),
+            )
         })?;
 
     let share = state::ShareState::Plaintext('verify_initial_share: {
@@ -1303,8 +1293,8 @@ where
         Some(share)
     });
 
-    info!(%newest_height, "setting sync floor");
-    marshal.set_floor(newest_height).await;
+    info!(%last_boundary, "setting sync floor");
+    marshal.set_floor(last_boundary).await;
 
     Ok(State {
         epoch: onchain_outcome.epoch,

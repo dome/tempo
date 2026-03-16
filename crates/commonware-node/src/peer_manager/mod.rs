@@ -39,6 +39,8 @@ mod ingress;
 pub(crate) use actor::Actor;
 pub(crate) use ingress::Mailbox;
 
+use crate::alias::marshal;
+
 /// Configuration of the peer manager actor.
 pub(crate) struct Config<TOracle> {
     /// The mailbox to the P2P network to register the peer sets.
@@ -52,6 +54,9 @@ pub(crate) struct Config<TOracle> {
     /// Used during start to determine the correct boundary block, since
     /// the execution layer may be behind.
     pub(crate) last_finalized_height: Height,
+    /// The mailbox of the marshal actor. Used during bootstrapping to read
+    /// the hash of its latest finalized height.
+    pub(crate) marshal: marshal::Mailbox,
 }
 
 /// Initializes a peer manager actor from a `config` with runtime `context`.

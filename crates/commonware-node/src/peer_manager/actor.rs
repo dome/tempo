@@ -14,7 +14,7 @@ use commonware_utils::{Acknowledgement, acknowledgement::Exact};
 use eyre::{OptionExt as _, WrapErr as _};
 use futures::{StreamExt as _, channel::mpsc};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use reth_ethereum::network::NetworkInfo;
+use reth_ethereum::{network::NetworkInfo, rpc::eth::primitives::BlockNumHash};
 use reth_provider::{BlockNumReader as _, HeaderProvider};
 use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
 use tempo_node::TempoFullNode;
@@ -38,6 +38,7 @@ where
     epoch_strategy: FixedEpocher,
     last_finalized_height: Height,
     mailbox: mpsc::UnboundedReceiver<MessageWithCause>,
+    marshal: crate::alias::marshal::Mailbox,
 
     contract_read_attempts: Counter,
     peers: Gauge,
@@ -55,6 +56,7 @@ where
             execution_node,
             epoch_strategy,
             last_finalized_height,
+            marshal,
         }: super::Config<TPeerManager>,
         mailbox: mpsc::UnboundedReceiver<MessageWithCause>,
     ) -> Self {
@@ -77,6 +79,7 @@ where
             epoch_strategy,
             last_finalized_height,
             mailbox,
+            marshal,
             contract_read_attempts,
             peers,
         }
@@ -144,7 +147,7 @@ where
 
         // If we're exactly on a boundary, use it; otherwise use the previous
         // epoch's last block (or genesis).
-        let last_boundary = if epoch_info.last() == self.last_finalized_height {
+        let latest_boundary_height = if epoch_info.last() == self.last_finalized_height {
             self.last_finalized_height
         } else {
             epoch_info
@@ -156,26 +159,38 @@ where
                         .expect("epoch strategy covers all epochs")
                 })
         };
+        let Some((_, latest_boundary_digest)) = self.marshal.get_info(latest_boundary_height).await
+        else {
+            eyre::bail!(
+                "marshal actor does not have digest for the latest boundary height `{latest_boundary_height}`",
+            );
+        };
         let header = self
             .execution_node
             .provider
-            .header_by_number(last_boundary.get())
+            .header(latest_boundary_digest.0)
             .map_err(eyre::Report::new)
             .and_then(|h| h.ok_or_eyre("empty header"))
             .wrap_err_with(|| {
-                format!("header not yet available at boundary height {last_boundary}")
+                format!(
+                    "execution layer does not have header for boundary block, hash \
+                    `{latest_boundary_digest}`, height `{latest_boundary_height}`",
+                )
             })?;
 
         let onchain_outcome = match OnchainDkgOutcome::read(&mut header.extra_data().as_ref()) {
             Err(error) => panic!(
-                "boundary block at `{last_boundary}` did not contain a valid DKG outcome; {error}"
+                "boundary block at `{latest_boundary_height}` did not contain a valid DKG outcome; {error}"
             ),
             Ok(outcome) => outcome,
         };
 
-        let validators =
-            validators::read_from_contract_at_height(attempt, &self.execution_node, last_boundary)
-                .wrap_err_with(|| format!("failed reading contract at `{last_boundary}`"))?;
+        let validators = validators::read_from_contract_at_hash(
+            attempt,
+            &self.execution_node,
+            latest_boundary_digest.0,
+        )
+        .wrap_err_with(|| format!("failed reading contract at hash `{latest_boundary_digest}`, height `{latest_boundary_height}`"))?;
 
         let peers = construct_peer_set(&onchain_outcome, &validators);
         self.peers.set(peers.len() as i64);
@@ -249,9 +264,7 @@ where
             let all_validators = read_validator_config_with_retry(
                 &self.context,
                 &self.execution_node,
-                validators::ReadTarget::AtLeast {
-                    height: block.height(),
-                },
+                BlockNumHash::new(block.number(), block.hash()),
                 &self.contract_read_attempts,
             )
             .await;

@@ -11,7 +11,7 @@ pub use tempo_contracts::precompiles::{
 pub use slots as tip20_slots;
 
 use crate::{
-    PATH_USD_ADDRESS, TIP_FEE_MANAGER_ADDRESS,
+    ECRECOVER_GAS, PATH_USD_ADDRESS, TIP_FEE_MANAGER_ADDRESS,
     account_keychain::AccountKeychain,
     error::{Result, TempoPrecompileError},
     storage::{Handler, Mapping},
@@ -566,7 +566,10 @@ impl TIP20Token {
             .concat(),
         );
 
-        // 4. Validate ECDSA signature
+        // 4. Charge gas for ecrecover
+        self.storage.deduct_gas(ECRECOVER_GAS)?;
+
+        // 5. Validate ECDSA signature
         // Only v=27/28 is accepted; v=0/1 is intentionally NOT normalized (see TIP-1004 spec).
         if call.v != 27 && call.v != 28 {
             return Err(TIP20Error::invalid_signature().into());
@@ -579,17 +582,17 @@ impl TIP20Token {
             return Err(TIP20Error::invalid_signature().into());
         }
 
-        // 5. Increment nonce
+        // 6. Increment nonce
         self.permit_nonces[call.owner].write(
             nonce
                 .checked_add(U256::from(1))
                 .ok_or(TempoPrecompileError::under_overflow())?,
         )?;
 
-        // 6. Set allowance
+        // 7. Set allowance
         self.set_allowance(call.owner, call.spender, call.value)?;
 
-        // 7. Emit Approval event
+        // 8. Emit Approval event
         self.emit_event(TIP20Event::Approval(ITIP20::Approval {
             owner: call.owner,
             spender: call.spender,

@@ -227,6 +227,40 @@ tempo-bench run-max-tps --profile my-profile.yaml --target-urls https://rpc.temp
 
 See `profiles/` for example profiles.
 
+#### Burst spikes
+
+Any phase can overlay periodic burst spikes on top of its base TPS:
+
+```yaml
+- name: spikey-baseline
+  target_tps: 3000         # base TPS between bursts
+  duration: 300
+  burst:
+    tps: 20000             # spike to 20k during burst
+    duration: 5            # each burst lasts 5 seconds
+    interval: 30           # burst every 30 seconds
+```
+
+This produces a square-wave pattern: 25 seconds at 3k TPS, then 5 seconds at
+20k TPS, repeating. Useful for simulating bursty real-world traffic patterns
+without needing dozens of micro-phases.
+
+#### Multi-RPC saturation
+
+When multiple `--target-urls` are provided, each RPC gets its own independent
+concurrency budget of `--max-concurrent-requests`. Load is distributed via
+round-robin, so 3 RPCs with `--max-concurrent-requests 200` = 600 total
+concurrent connections (200 per RPC).
+
+```bash
+# Saturate 3 RPCs independently with 200 concurrent requests each
+tempo-bench run-max-tps --scenario sustained-max \
+  --target-urls http://node-1:8545 \
+  --target-urls http://node-2:8545 \
+  --target-urls http://node-3:8545 \
+  --max-concurrent-requests 200 --faucet
+```
+
 #### How it works
 
 The load profile controls **TPS over time**. For ramp phases, TPS is linearly

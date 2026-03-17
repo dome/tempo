@@ -2,6 +2,17 @@ use clap::ValueEnum;
 use serde::Deserialize;
 use std::{fmt, path::Path, time::Duration};
 
+/// Periodic burst/spike configuration within a phase.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BurstConfig {
+    /// TPS during the burst window.
+    pub tps: u64,
+    /// How long each burst lasts (seconds).
+    pub duration: u64,
+    /// Time between burst starts (seconds). Must be > burst duration.
+    pub interval: u64,
+}
+
 /// A single phase in a load profile.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Phase {
@@ -16,6 +27,9 @@ pub struct Phase {
     /// If false, jump to `target_tps` immediately.
     #[serde(default)]
     pub ramp: bool,
+    /// Optional periodic burst/spike overlay.
+    #[serde(default)]
+    pub burst: Option<BurstConfig>,
 }
 
 fn deserialize_duration_secs<'de, D>(deserializer: D) -> Result<Duration, D::Error>
@@ -55,7 +69,29 @@ impl LoadProfile {
         let mut prev_tps = 0u64;
         for phase in &self.phases {
             let secs = phase.duration.as_secs_f64();
-            if phase.ramp {
+            if let Some(burst) = &phase.burst {
+                let base_tps = if phase.ramp {
+                    (prev_tps as f64 + phase.target_tps as f64) / 2.0
+                } else {
+                    phase.target_tps as f64
+                };
+                let interval = burst.interval as f64;
+                let burst_dur = burst.duration as f64;
+                let normal_dur = interval - burst_dur;
+                let full_intervals = (secs / interval).floor() as u64;
+                let remainder = secs - (full_intervals as f64 * interval);
+                // Full intervals
+                total +=
+                    full_intervals as f64 * (burst.tps as f64 * burst_dur + base_tps * normal_dur);
+                // Partial last interval
+                if remainder > 0.0 {
+                    if remainder <= burst_dur {
+                        total += burst.tps as f64 * remainder;
+                    } else {
+                        total += burst.tps as f64 * burst_dur + base_tps * (remainder - burst_dur);
+                    }
+                }
+            } else if phase.ramp {
                 // Trapezoid: avg of start and end TPS
                 total += (prev_tps as f64 + phase.target_tps as f64) / 2.0 * secs;
             } else {
@@ -68,7 +104,11 @@ impl LoadProfile {
 
     /// Maximum TPS across all phases.
     pub fn max_tps(&self) -> u64 {
-        self.phases.iter().map(|p| p.target_tps).max().unwrap_or(0)
+        self.phases
+            .iter()
+            .map(|p| p.target_tps.max(p.burst.as_ref().map_or(0, |b| b.tps)))
+            .max()
+            .unwrap_or(0)
     }
 
     /// Returns the target TPS at elapsed time `t` from profile start.
@@ -79,13 +119,24 @@ impl LoadProfile {
         for phase in &self.phases {
             let phase_end = elapsed + phase.duration;
             if t < phase_end {
-                if phase.ramp && !phase.duration.is_zero() {
+                let base = if phase.ramp && !phase.duration.is_zero() {
                     let progress = (t - elapsed).as_secs_f64() / phase.duration.as_secs_f64();
                     let start = prev_tps as f64;
                     let end = phase.target_tps as f64;
-                    return start + (end - start) * progress;
+                    start + (end - start) * progress
+                } else {
+                    phase.target_tps as f64
+                };
+
+                if let Some(burst) = &phase.burst {
+                    let time_in_phase = (t - elapsed).as_secs_f64();
+                    let cycle_pos = time_in_phase % burst.interval as f64;
+                    if cycle_pos < burst.duration as f64 {
+                        return burst.tps as f64;
+                    }
                 }
-                return phase.target_tps as f64;
+
+                return base;
             }
             elapsed = phase_end;
             prev_tps = phase.target_tps;
@@ -192,6 +243,7 @@ impl Scenario {
                     target_tps: 10_000,
                     duration: Duration::from_secs(300),
                     ramp: false,
+                    burst: None,
                 }],
             },
             Scenario::MixedWorkload => LoadProfile {
@@ -200,6 +252,7 @@ impl Scenario {
                     target_tps: 5_000,
                     duration: Duration::from_secs(300),
                     ramp: false,
+                    burst: None,
                 }],
             },
             Scenario::BurstSpike => LoadProfile {
@@ -209,36 +262,42 @@ impl Scenario {
                         target_tps: 10_000,
                         duration: Duration::from_secs(60),
                         ramp: true,
+                        burst: None,
                     },
                     Phase {
                         name: "hold".into(),
                         target_tps: 10_000,
                         duration: Duration::from_secs(120),
                         ramp: false,
+                        burst: None,
                     },
                     Phase {
                         name: "spike".into(),
                         target_tps: 25_000,
                         duration: Duration::from_secs(30),
                         ramp: true,
+                        burst: None,
                     },
                     Phase {
                         name: "crash-down".into(),
                         target_tps: 1_000,
                         duration: Duration::from_secs(30),
                         ramp: true,
+                        burst: None,
                     },
                     Phase {
                         name: "recover".into(),
                         target_tps: 5_000,
                         duration: Duration::from_secs(180),
                         ramp: true,
+                        burst: None,
                     },
                     Phase {
                         name: "sustain".into(),
                         target_tps: 5_000,
                         duration: Duration::from_secs(180),
                         ramp: false,
+                        burst: None,
                     },
                 ],
             },
@@ -248,6 +307,7 @@ impl Scenario {
                     target_tps: 100,
                     duration: Duration::from_secs(120),
                     ramp: false,
+                    burst: None,
                 }],
             },
             Scenario::StateHeavy => LoadProfile {
@@ -256,6 +316,7 @@ impl Scenario {
                     target_tps: 5_000,
                     duration: Duration::from_secs(120),
                     ramp: false,
+                    burst: None,
                 }],
             },
             Scenario::TxpoolFlood => LoadProfile {
@@ -264,6 +325,7 @@ impl Scenario {
                     target_tps: 50_000,
                     duration: Duration::from_secs(60),
                     ramp: false,
+                    burst: None,
                 }],
             },
             Scenario::Conflicting => LoadProfile {
@@ -272,6 +334,7 @@ impl Scenario {
                     target_tps: 5_000,
                     duration: Duration::from_secs(120),
                     ramp: false,
+                    burst: None,
                 }],
             },
             Scenario::RpcSaturation => LoadProfile {
@@ -280,6 +343,7 @@ impl Scenario {
                     target_tps: 10_000,
                     duration: Duration::from_secs(300),
                     ramp: false,
+                    burst: None,
                 }],
             },
             Scenario::FullStressCycle => LoadProfile {
@@ -289,60 +353,70 @@ impl Scenario {
                         target_tps: 2_000,
                         duration: Duration::from_secs(120),
                         ramp: true,
+                        burst: None,
                     },
                     Phase {
                         name: "sustain-low".into(),
                         target_tps: 2_000,
                         duration: Duration::from_secs(600),
                         ramp: false,
+                        burst: None,
                     },
                     Phase {
                         name: "ramp-up".into(),
                         target_tps: 10_000,
                         duration: Duration::from_secs(180),
                         ramp: true,
+                        burst: None,
                     },
                     Phase {
                         name: "sustain-high".into(),
                         target_tps: 10_000,
                         duration: Duration::from_secs(900),
                         ramp: false,
+                        burst: None,
                     },
                     Phase {
                         name: "spike".into(),
                         target_tps: 25_000,
                         duration: Duration::from_secs(30),
                         ramp: true,
+                        burst: None,
                     },
                     Phase {
                         name: "crash-down".into(),
                         target_tps: 1_000,
                         duration: Duration::from_secs(30),
                         ramp: true,
+                        burst: None,
                     },
                     Phase {
                         name: "sustain-low-recovery".into(),
                         target_tps: 1_000,
                         duration: Duration::from_secs(600),
                         ramp: false,
+                        burst: None,
                     },
                     Phase {
                         name: "ramp-back".into(),
                         target_tps: 10_000,
                         duration: Duration::from_secs(300),
                         ramp: true,
+                        burst: None,
                     },
                     Phase {
                         name: "sustain-final".into(),
                         target_tps: 10_000,
                         duration: Duration::from_secs(600),
                         ramp: false,
+                        burst: None,
                     },
                     Phase {
                         name: "cooldown".into(),
                         target_tps: 0,
                         duration: Duration::from_secs(120),
                         ramp: true,
+                        burst: None,
                     },
                 ],
             },
@@ -434,6 +508,7 @@ mod tests {
                 target_tps: 5000,
                 duration: Duration::from_secs(60),
                 ramp: false,
+                burst: None,
             }],
         };
         assert_eq!(profile.tps_at(Duration::from_secs(0)), 5000.0);
@@ -450,6 +525,7 @@ mod tests {
                 target_tps: 10_000,
                 duration: Duration::from_secs(100),
                 ramp: true,
+                burst: None,
             }],
         };
         // Ramps from 0 (implicit start) to 10k over 100s
@@ -467,12 +543,14 @@ mod tests {
                     target_tps: 1000,
                     duration: Duration::from_secs(10),
                     ramp: false,
+                    burst: None,
                 },
                 Phase {
                     name: "ramp-up".into(),
                     target_tps: 5000,
                     duration: Duration::from_secs(10),
                     ramp: true,
+                    burst: None,
                 },
             ],
         };
@@ -491,6 +569,7 @@ mod tests {
                 target_tps: 1000,
                 duration: Duration::from_secs(10),
                 ramp: false,
+                burst: None,
             }],
         };
         assert_eq!(profile.expected_total_txs(), 10_000);
@@ -504,6 +583,7 @@ mod tests {
                 target_tps: 1000,
                 duration: Duration::from_secs(10),
                 ramp: true,
+                burst: None,
             }],
         };
         // Ramp from 0 to 1000 over 10s = avg 500 * 10 = 5000
@@ -526,12 +606,14 @@ mod tests {
                     target_tps: 100,
                     duration: Duration::from_secs(10),
                     ramp: false,
+                    burst: None,
                 },
                 Phase {
                     name: "b".into(),
                     target_tps: 200,
                     duration: Duration::from_secs(10),
                     ramp: false,
+                    burst: None,
                 },
             ],
         };
@@ -544,5 +626,69 @@ mod tests {
     fn test_max_tps() {
         let profile = Scenario::BurstSpike.profile();
         assert_eq!(profile.max_tps(), 25_000);
+    }
+
+    #[test]
+    fn test_burst_tps() {
+        let profile = LoadProfile {
+            phases: vec![Phase {
+                name: "burst-phase".into(),
+                target_tps: 2000,
+                duration: Duration::from_secs(60),
+                ramp: false,
+                burst: Some(BurstConfig {
+                    tps: 20_000,
+                    duration: 5,
+                    interval: 30,
+                }),
+            }],
+        };
+        // t=0: in burst window (cycle_pos=0 < 5)
+        assert_eq!(profile.tps_at(Duration::from_secs(0)), 20_000.0);
+        // t=6: outside burst window (cycle_pos=6 >= 5)
+        assert_eq!(profile.tps_at(Duration::from_secs(6)), 2000.0);
+        // t=30: second burst starts (cycle_pos=0 < 5)
+        assert_eq!(profile.tps_at(Duration::from_secs(30)), 20_000.0);
+        // t=36: outside second burst (cycle_pos=6 >= 5)
+        assert_eq!(profile.tps_at(Duration::from_secs(36)), 2000.0);
+    }
+
+    #[test]
+    fn test_burst_max_tps() {
+        let profile = LoadProfile {
+            phases: vec![Phase {
+                name: "burst-phase".into(),
+                target_tps: 2000,
+                duration: Duration::from_secs(60),
+                ramp: false,
+                burst: Some(BurstConfig {
+                    tps: 20_000,
+                    duration: 5,
+                    interval: 30,
+                }),
+            }],
+        };
+        assert_eq!(profile.max_tps(), 20_000);
+    }
+
+    #[test]
+    fn test_burst_expected_txs() {
+        let profile = LoadProfile {
+            phases: vec![Phase {
+                name: "burst-phase".into(),
+                target_tps: 2000,
+                duration: Duration::from_secs(60),
+                ramp: false,
+                burst: Some(BurstConfig {
+                    tps: 20_000,
+                    duration: 5,
+                    interval: 30,
+                }),
+            }],
+        };
+        // 60s / 30s interval = 2 full intervals, no remainder
+        // Each interval: 5s * 20000 + 25s * 2000 = 100000 + 50000 = 150000
+        // Total: 2 * 150000 = 300000
+        assert_eq!(profile.expected_total_txs(), 300_000);
     }
 }

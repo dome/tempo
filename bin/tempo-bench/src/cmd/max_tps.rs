@@ -282,6 +282,7 @@ impl MaxTpsArgs {
                     target_tps: tps,
                     duration: Duration::from_secs(self.duration),
                     ramp: false,
+                    burst: None,
                 }],
             });
         }
@@ -576,9 +577,14 @@ impl MaxTpsArgs {
         let expected_txs = profile.expected_total_txs();
         let pregen_buffer = (profile.max_tps() as usize).clamp(100, 5_000);
 
+        let providers_with_urls = signer_provider_manager.unsigned_providers_with_urls();
+        let num_urls = providers_with_urls.len();
+
         info!(
             expected_txs,
             pregen_buffer,
+            num_urls,
+            per_url_concurrency = self.max_concurrent_requests,
             total_duration_secs = total_duration.as_secs(),
             "Generating and sending transactions"
         );
@@ -617,11 +623,14 @@ impl MaxTpsArgs {
         let mut last_phase: Option<String> = None;
         let mut pending_txs: VecDeque<PendingTransactionBuilder<TempoNetwork>> = VecDeque::new();
         let tick = Duration::from_millis(50);
-        let mut in_flight = 0usize;
+
+        // Per-URL in-flight tracking with round-robin distribution
+        let mut in_flight_per_url = vec![0usize; num_urls];
+        let mut rr_index = 0usize;
 
         // Channel for collecting send results
         let (result_tx, mut result_rx) =
-            tokio::sync::mpsc::channel::<SendResult>(self.max_concurrent_requests * 2);
+            tokio::sync::mpsc::channel::<SendResult>(self.max_concurrent_requests * num_urls * 2);
 
         loop {
             let elapsed = start.elapsed();
@@ -634,9 +643,11 @@ impl MaxTpsArgs {
                 let current = current_phase.to_string();
                 if last_phase.as_deref() != Some(current_phase) {
                     let current_tps = profile.tps_at(elapsed);
+                    let total_in_flight: usize = in_flight_per_url.iter().sum();
                     info!(
                         phase = %current,
                         target_tps = current_tps as u64,
+                        total_in_flight,
                         elapsed_secs = elapsed.as_secs(),
                         "Phase transition"
                     );
@@ -650,49 +661,66 @@ impl MaxTpsArgs {
 
             // Drain completed send results
             while let Ok(result) = result_rx.try_recv() {
-                in_flight -= 1;
                 match result {
-                    SendResult::Success(pending_tx) => {
+                    SendResult::Success(url_idx, pending_tx) => {
+                        in_flight_per_url[url_idx] -= 1;
                         counters.sent.fetch_add(1, Ordering::Relaxed);
                         counters.success.fetch_add(1, Ordering::Relaxed);
                         pending_txs.push_back(pending_tx);
                     }
-                    SendResult::Failed => {
+                    SendResult::Failed(url_idx) => {
+                        in_flight_per_url[url_idx] -= 1;
                         counters.sent.fetch_add(1, Ordering::Relaxed);
                         counters.failed.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
 
-            // Dispatch transactions up to available credit and concurrency
-            let to_send = (credit.floor() as usize)
-                .min(self.max_concurrent_requests.saturating_sub(in_flight));
+            // Dispatch transactions up to available credit and per-URL concurrency
+            let total_capacity: usize = in_flight_per_url
+                .iter()
+                .map(|&f| self.max_concurrent_requests.saturating_sub(f))
+                .sum();
+            let to_send = (credit.floor() as usize).min(total_capacity);
 
             for _ in 0..to_send {
-                // Pull a pre-generated tx from the buffer
-                let Some(bytes) = tx_stream.next().await else {
-                    warn!("Transaction generator exhausted");
+                // Find next URL with available capacity via round-robin
+                let mut found = false;
+                for _ in 0..num_urls {
+                    let idx = rr_index % num_urls;
+                    rr_index += 1;
+                    if in_flight_per_url[idx] < self.max_concurrent_requests {
+                        // Pull a pre-generated tx from the buffer
+                        let Some(bytes) = tx_stream.next().await else {
+                            warn!("Transaction generator exhausted");
+                            break;
+                        };
+
+                        credit -= 1.0;
+                        in_flight_per_url[idx] += 1;
+
+                        let provider = providers_with_urls[idx].1.clone();
+                        let result_tx = result_tx.clone();
+                        tokio::spawn(async move {
+                            let result = tokio::time::timeout(
+                                Duration::from_secs(1),
+                                provider.send_raw_transaction(&bytes),
+                            )
+                            .await;
+
+                            let send_result = match result {
+                                Ok(Ok(pending_tx)) => SendResult::Success(idx, pending_tx),
+                                _ => SendResult::Failed(idx),
+                            };
+                            let _ = result_tx.send(send_result).await;
+                        });
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
                     break;
-                };
-
-                credit -= 1.0;
-                in_flight += 1;
-
-                let provider = signer_provider_manager.random_unsigned_provider();
-                let result_tx = result_tx.clone();
-                tokio::spawn(async move {
-                    let result = tokio::time::timeout(
-                        Duration::from_secs(1),
-                        provider.send_raw_transaction(&bytes),
-                    )
-                    .await;
-
-                    let send_result = match result {
-                        Ok(Ok(pending_tx)) => SendResult::Success(pending_tx),
-                        _ => SendResult::Failed,
-                    };
-                    let _ = result_tx.send(send_result).await;
-                });
+                }
             }
 
             tokio::time::sleep(tick).await;
@@ -702,12 +730,12 @@ impl MaxTpsArgs {
         drop(result_tx);
         while let Some(result) = result_rx.recv().await {
             match result {
-                SendResult::Success(pending_tx) => {
+                SendResult::Success(_, pending_tx) => {
                     counters.sent.fetch_add(1, Ordering::Relaxed);
                     counters.success.fetch_add(1, Ordering::Relaxed);
                     pending_txs.push_back(pending_tx);
                 }
-                SendResult::Failed => {
+                SendResult::Failed(_) => {
                     counters.sent.fetch_add(1, Ordering::Relaxed);
                     counters.failed.fetch_add(1, Ordering::Relaxed);
                 }
@@ -783,9 +811,10 @@ impl MaxTpsArgs {
 }
 
 /// Result of a single transaction send attempt.
+/// The `usize` is the URL index for per-URL in-flight tracking.
 enum SendResult {
-    Success(PendingTransactionBuilder<TempoNetwork>),
-    Failed,
+    Success(usize, PendingTransactionBuilder<TempoNetwork>),
+    Failed(usize),
 }
 
 #[derive(Debug, Clone)]

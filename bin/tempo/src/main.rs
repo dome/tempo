@@ -26,7 +26,7 @@ static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::ne
 ///
 /// See <https://github.com/jemalloc/jemalloc/wiki/Getting-Started>
 #[cfg(all(feature = "jemalloc-prof", unix))]
-#[unsafe(export_name = "_rjem_malloc_conf")]
+#[unsafe(export_name = "malloc_conf")]
 static MALLOC_CONF: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
 
 mod defaults;

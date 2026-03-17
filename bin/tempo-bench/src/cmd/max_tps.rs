@@ -16,7 +16,7 @@ use alloy::{
     consensus::BlockHeader,
     eips::Encodable2718,
     network::{EthereumWallet, ReceiptResponse, TransactionBuilder, TxSignerSync},
-    primitives::{Address, B256, BlockNumber, U256},
+    primitives::{address, Address, B256, BlockNumber, U256},
     providers::{
         DynProvider, PendingTransactionBuilder, PendingTransactionError, Provider, ProviderBuilder,
         SendableTx, WatchTxError, fillers::TxFiller,
@@ -151,8 +151,9 @@ pub struct MaxTpsArgs {
     #[arg(long, default_value_t = 0.0)]
     mpp_weight: f64,
 
-    /// Address of a deployed TempoStreamChannel contract. Required when `--mpp-weight` > 0.
-    #[arg(long, default_value = "0x33b901018174ddabe4841042ab76ba85d4e24f25")]
+    /// Address of a deployed TempoStreamChannel contract. Resolved automatically from chain ID
+    /// if not provided (mainnet: 0x33b9...4f25, testnet: 0xe1c4...a336).
+    #[arg(long)]
     mpp_contract_address: Option<Address>,
 
     /// Send transfers to existing signer accounts instead of random new addresses.
@@ -292,12 +293,6 @@ impl MaxTpsArgs {
         self,
         signer_provider_manager: SignerProviderManager<F>,
     ) -> eyre::Result<()> {
-        // Validate required addresses before sending any transactions
-        eyre::ensure!(
-            self.mpp_weight == 0.0 || self.mpp_contract_address.is_some(),
-            "--mpp-contract-address is required when --mpp-weight > 0"
-        );
-
         let signer_providers = signer_provider_manager.signer_providers();
 
         if self.clear_txpool {
@@ -314,6 +309,19 @@ impl MaxTpsArgs {
 
         // Grab first provider to call some RPC methods
         let provider = signer_providers[0].1.clone();
+
+        // Resolve MPP contract address from chain ID if not explicitly provided
+        let mpp_contract_address = if self.mpp_weight > 0.0 {
+            Some(match self.mpp_contract_address {
+                Some(addr) => addr,
+                None => {
+                    let chain_id = provider.get_chain_id().await?;
+                    resolve_mpp_contract_address(chain_id)?
+                }
+            })
+        } else {
+            self.mpp_contract_address
+        };
 
         // Fund accounts from faucet if requested
         if self.faucet {
@@ -389,8 +397,8 @@ impl MaxTpsArgs {
             Vec::new()
         };
 
-        let mpp_contract_address = if self.mpp_weight > 0.0 {
-            let addr = self.mpp_contract_address.expect("validated above");
+        if let Some(addr) = mpp_contract_address {
+            info!(%addr, "Setting up MPP contract");
             mpp::setup(
                 signer_providers,
                 addr,
@@ -399,10 +407,7 @@ impl MaxTpsArgs {
                 self.max_concurrent_transactions,
             )
             .await?;
-            Some(addr)
-        } else {
-            None
-        };
+        }
 
         // Generate and send transactions
         let total_txs = self.tps * self.duration;
@@ -1106,4 +1111,22 @@ async fn assert_receipt<R: ReceiptResponse>(receipt: R) -> eyre::Result<()> {
         receipt.transaction_hash()
     );
     Ok(())
+}
+
+/// Mainnet (presto) MPP contract address.
+const MAINNET_MPP_CONTRACT_ADDRESS: Address = address!("0x33b901018174ddabe4841042ab76ba85d4e24f25");
+/// Testnet (moderato) MPP contract address.
+const TESTNET_MPP_CONTRACT_ADDRESS: Address = address!("0xe1c4d3dce17bc111181ddf716f75bae49e61a336");
+
+/// Resolves the MPP contract address from the chain ID.
+fn resolve_mpp_contract_address(chain_id: u64) -> eyre::Result<Address> {
+    match chain_id {
+        // Presto (mainnet)
+        4217 => Ok(MAINNET_MPP_CONTRACT_ADDRESS),
+        // Moderato (testnet)
+        42431 => Ok(TESTNET_MPP_CONTRACT_ADDRESS),
+        other => eyre::bail!(
+            "unknown chain ID {other} for MPP contract address, use --mpp-contract-address to specify it explicitly"
+        ),
+    }
 }

@@ -428,13 +428,12 @@ fn main() -> eyre::Result<()> {
                     .discovery
                     .enable_discv5_discovery = true;
 
-                // Add bootnodes as trusted peers so they are always maintained
-                if let Some(bootnodes) = builder.config().chain.bootnodes() {
-                    let trusted = &mut builder.config_mut().network.trusted_peers;
-                    for peer in bootnodes.into_iter().map(TrustedPeer::from) {
-                        if !trusted.contains(&peer) {
-                            trusted.push(peer);
-                        }
+                // Add bootnodes as trusted peers so they are always maintained.
+                // If --trusted-peers was provided on the CLI, use those instead.
+                if builder.config().network.trusted_peers.is_empty() {
+                    if let Some(bootnodes) = builder.config().chain.bootnodes() {
+                        builder.config_mut().network.trusted_peers =
+                            bootnodes.into_iter().map(TrustedPeer::from).collect();
                     }
                 }
 

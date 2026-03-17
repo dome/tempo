@@ -1,43 +1,169 @@
 use clap::ValueEnum;
-use std::fmt;
+use serde::Deserialize;
+use std::{fmt, path::Path, time::Duration};
 
-/// Predefined benchmark scenarios for stress testing.
+/// A single phase in a load profile.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Phase {
+    /// Human-readable name for logging.
+    pub name: String,
+    /// Target TPS at the end of this phase.
+    pub target_tps: u64,
+    /// How long this phase lasts.
+    #[serde(deserialize_with = "deserialize_duration_secs")]
+    pub duration: Duration,
+    /// If true, linearly ramp from previous phase's TPS to `target_tps`.
+    /// If false, jump to `target_tps` immediately.
+    #[serde(default)]
+    pub ramp: bool,
+}
+
+fn deserialize_duration_secs<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let secs = u64::deserialize(deserializer)?;
+    Ok(Duration::from_secs(secs))
+}
+
+/// A load profile defines TPS over time as a sequence of phases.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoadProfile {
+    pub phases: Vec<Phase>,
+}
+
+impl LoadProfile {
+    /// Load a profile from a YAML file.
+    pub fn from_file(path: &Path) -> eyre::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let profile: LoadProfile = serde_yaml::from_str(&content)?;
+        eyre::ensure!(
+            !profile.phases.is_empty(),
+            "profile must have at least one phase"
+        );
+        Ok(profile)
+    }
+
+    /// Total duration across all phases.
+    pub fn total_duration(&self) -> Duration {
+        self.phases.iter().map(|p| p.duration).sum()
+    }
+
+    /// Expected total transactions (area under the TPS curve).
+    pub fn expected_total_txs(&self) -> u64 {
+        let mut total = 0.0f64;
+        let mut prev_tps = 0u64;
+        for phase in &self.phases {
+            let secs = phase.duration.as_secs_f64();
+            if phase.ramp {
+                // Trapezoid: avg of start and end TPS
+                total += (prev_tps as f64 + phase.target_tps as f64) / 2.0 * secs;
+            } else {
+                total += phase.target_tps as f64 * secs;
+            }
+            prev_tps = phase.target_tps;
+        }
+        total.ceil() as u64
+    }
+
+    /// Maximum TPS across all phases.
+    pub fn max_tps(&self) -> u64 {
+        self.phases.iter().map(|p| p.target_tps).max().unwrap_or(0)
+    }
+
+    /// Returns the target TPS at elapsed time `t` from profile start.
+    pub fn tps_at(&self, t: Duration) -> f64 {
+        let mut elapsed = Duration::ZERO;
+        let mut prev_tps = 0u64;
+
+        for phase in &self.phases {
+            let phase_end = elapsed + phase.duration;
+            if t < phase_end {
+                if phase.ramp && !phase.duration.is_zero() {
+                    let progress = (t - elapsed).as_secs_f64() / phase.duration.as_secs_f64();
+                    let start = prev_tps as f64;
+                    let end = phase.target_tps as f64;
+                    return start + (end - start) * progress;
+                }
+                return phase.target_tps as f64;
+            }
+            elapsed = phase_end;
+            prev_tps = phase.target_tps;
+        }
+
+        // Past the end of the profile
+        0.0
+    }
+
+    /// Compute number of transactions that should have been sent between `from` and `to`.
+    pub fn tx_budget_between(&self, from: Duration, to: Duration) -> f64 {
+        // Numerical integration with 100ms steps
+        let step = Duration::from_millis(100);
+        let mut t = from;
+        let mut budget = 0.0f64;
+        while t < to {
+            let dt = (to - t).min(step);
+            let tps = self.tps_at(t + dt / 2); // midpoint for better accuracy
+            budget += tps * dt.as_secs_f64();
+            t += dt;
+        }
+        budget
+    }
+
+    /// Name of the current phase at elapsed time `t`.
+    pub fn phase_at(&self, t: Duration) -> Option<&str> {
+        let mut elapsed = Duration::ZERO;
+        for phase in &self.phases {
+            let phase_end = elapsed + phase.duration;
+            if t < phase_end {
+                return Some(&phase.name);
+            }
+            elapsed = phase_end;
+        }
+        None
+    }
+}
+
+/// Static overrides that a scenario applies to [`MaxTpsArgs`].
+/// `None` means "keep whatever the user passed (or the CLI default)".
+#[derive(Default)]
+pub struct ScenarioOverrides {
+    pub accounts: Option<u64>,
+    pub max_concurrent_requests: Option<usize>,
+    pub tip20_weight: Option<f64>,
+    pub erc20_weight: Option<f64>,
+    pub mpp_weight: Option<f64>,
+    pub place_order_weight: Option<f64>,
+    pub swap_weight: Option<f64>,
+    pub existing_recipients: Option<bool>,
+    pub benchmark_mode: Option<String>,
+}
+
+/// Predefined benchmark scenarios.
 ///
-/// Each scenario overrides specific CLI defaults (TPS, duration, weights, concurrency, etc.)
-/// while still allowing individual flags to take precedence.
+/// Each scenario provides a load profile (phases) plus static overrides
+/// for accounts, weights, concurrency, etc.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Scenario {
-    /// 10k TPS sustained for 5 minutes. Tests txpool backlog and drain behavior
-    /// when ingress exceeds processing capacity.
+    /// 10k TPS sustained for 5 minutes.
     SustainedMax,
-
-    /// Realistic mainnet traffic: 80% TIP-20, 15% MPP, 5% ERC-20 at 5k TPS for 5 minutes.
+    /// Realistic mainnet traffic: 80% TIP-20, 15% MPP, 5% ERC-20 at 5k TPS for 5 min.
     MixedWorkload,
-
-    /// 1k TPS baseline → instant spike to 10k TPS → back to 1k.
-    /// Tests txpool elasticity and recovery.
+    /// Ramp to 10k, hold, spike to 25k, crash to 1k, recover — 10 min total.
     BurstSpike,
-
-    /// Low TPS with existing recipients — placeholder for future fat-batch tx generator
-    /// that targets 30M gas cap per tx. Currently sends normal TIP-20 transfers at low TPS.
+    /// Low TPS placeholder for future fat-batch txs.
     FatBatch,
-
-    /// Transactions to random new addresses (cold SSTOREs for account creation).
-    /// Forces disk I/O and state growth, breaking the in-memory fast path.
+    /// Random new recipients (cold SSTOREs). Forces disk I/O.
     StateHeavy,
-
-    /// 50k TPS flood of cheap TIP-20 transfers for 60 seconds.
-    /// Tests txpool memory limits and OOM resilience.
+    /// 50k TPS flood for 60 seconds.
     TxpoolFlood,
-
-    /// Transfers to existing signer addresses from many accounts.
-    /// Placeholder for future hot-spot recipient mode that forces serial state access.
-    /// Currently uses random existing recipients from the signer set.
+    /// Existing recipients, placeholder for hot-spot mode.
     Conflicting,
-
-    /// 10k TPS with high concurrency (500 concurrent requests).
-    /// Use multiple `--target-urls` for full RPC saturation effect.
+    /// High concurrency (500 concurrent requests).
     RpcSaturation,
+    /// Full stress cycle: warm up → sustain → spike → crash → recover → sustain → cool down.
+    /// ~58 minutes total.
+    FullStressCycle,
 }
 
 impl fmt::Display for Scenario {
@@ -51,43 +177,190 @@ impl fmt::Display for Scenario {
             Scenario::TxpoolFlood => write!(f, "txpool-flood"),
             Scenario::Conflicting => write!(f, "conflicting"),
             Scenario::RpcSaturation => write!(f, "rpc-saturation"),
+            Scenario::FullStressCycle => write!(f, "full-stress-cycle"),
         }
     }
 }
 
-/// Overrides that a scenario applies to [`MaxTpsArgs`].
-/// `None` means "keep whatever the user passed (or the CLI default)".
-#[derive(Default)]
-pub struct ScenarioOverrides {
-    pub tps: Option<u64>,
-    pub duration: Option<u64>,
-    pub accounts: Option<u64>,
-    pub max_concurrent_requests: Option<usize>,
-    pub tip20_weight: Option<f64>,
-    pub erc20_weight: Option<f64>,
-    pub mpp_weight: Option<f64>,
-    pub place_order_weight: Option<f64>,
-    pub swap_weight: Option<f64>,
-    pub existing_recipients: Option<bool>,
-    pub benchmark_mode: Option<String>,
-}
-
 impl Scenario {
+    /// Load profile for this scenario.
+    pub fn profile(self) -> LoadProfile {
+        match self {
+            Scenario::SustainedMax => LoadProfile {
+                phases: vec![Phase {
+                    name: "sustained-max".into(),
+                    target_tps: 10_000,
+                    duration: Duration::from_secs(300),
+                    ramp: false,
+                }],
+            },
+            Scenario::MixedWorkload => LoadProfile {
+                phases: vec![Phase {
+                    name: "mixed-workload".into(),
+                    target_tps: 5_000,
+                    duration: Duration::from_secs(300),
+                    ramp: false,
+                }],
+            },
+            Scenario::BurstSpike => LoadProfile {
+                phases: vec![
+                    Phase {
+                        name: "ramp-up".into(),
+                        target_tps: 10_000,
+                        duration: Duration::from_secs(60),
+                        ramp: true,
+                    },
+                    Phase {
+                        name: "hold".into(),
+                        target_tps: 10_000,
+                        duration: Duration::from_secs(120),
+                        ramp: false,
+                    },
+                    Phase {
+                        name: "spike".into(),
+                        target_tps: 25_000,
+                        duration: Duration::from_secs(30),
+                        ramp: true,
+                    },
+                    Phase {
+                        name: "crash-down".into(),
+                        target_tps: 1_000,
+                        duration: Duration::from_secs(30),
+                        ramp: true,
+                    },
+                    Phase {
+                        name: "recover".into(),
+                        target_tps: 5_000,
+                        duration: Duration::from_secs(180),
+                        ramp: true,
+                    },
+                    Phase {
+                        name: "sustain".into(),
+                        target_tps: 5_000,
+                        duration: Duration::from_secs(180),
+                        ramp: false,
+                    },
+                ],
+            },
+            Scenario::FatBatch => LoadProfile {
+                phases: vec![Phase {
+                    name: "fat-batch".into(),
+                    target_tps: 100,
+                    duration: Duration::from_secs(120),
+                    ramp: false,
+                }],
+            },
+            Scenario::StateHeavy => LoadProfile {
+                phases: vec![Phase {
+                    name: "state-heavy".into(),
+                    target_tps: 5_000,
+                    duration: Duration::from_secs(120),
+                    ramp: false,
+                }],
+            },
+            Scenario::TxpoolFlood => LoadProfile {
+                phases: vec![Phase {
+                    name: "txpool-flood".into(),
+                    target_tps: 50_000,
+                    duration: Duration::from_secs(60),
+                    ramp: false,
+                }],
+            },
+            Scenario::Conflicting => LoadProfile {
+                phases: vec![Phase {
+                    name: "conflicting".into(),
+                    target_tps: 5_000,
+                    duration: Duration::from_secs(120),
+                    ramp: false,
+                }],
+            },
+            Scenario::RpcSaturation => LoadProfile {
+                phases: vec![Phase {
+                    name: "rpc-saturation".into(),
+                    target_tps: 10_000,
+                    duration: Duration::from_secs(300),
+                    ramp: false,
+                }],
+            },
+            Scenario::FullStressCycle => LoadProfile {
+                phases: vec![
+                    Phase {
+                        name: "warm-up".into(),
+                        target_tps: 2_000,
+                        duration: Duration::from_secs(120),
+                        ramp: true,
+                    },
+                    Phase {
+                        name: "sustain-low".into(),
+                        target_tps: 2_000,
+                        duration: Duration::from_secs(600),
+                        ramp: false,
+                    },
+                    Phase {
+                        name: "ramp-up".into(),
+                        target_tps: 10_000,
+                        duration: Duration::from_secs(180),
+                        ramp: true,
+                    },
+                    Phase {
+                        name: "sustain-high".into(),
+                        target_tps: 10_000,
+                        duration: Duration::from_secs(900),
+                        ramp: false,
+                    },
+                    Phase {
+                        name: "spike".into(),
+                        target_tps: 25_000,
+                        duration: Duration::from_secs(30),
+                        ramp: true,
+                    },
+                    Phase {
+                        name: "crash-down".into(),
+                        target_tps: 1_000,
+                        duration: Duration::from_secs(30),
+                        ramp: true,
+                    },
+                    Phase {
+                        name: "sustain-low-recovery".into(),
+                        target_tps: 1_000,
+                        duration: Duration::from_secs(600),
+                        ramp: false,
+                    },
+                    Phase {
+                        name: "ramp-back".into(),
+                        target_tps: 10_000,
+                        duration: Duration::from_secs(300),
+                        ramp: true,
+                    },
+                    Phase {
+                        name: "sustain-final".into(),
+                        target_tps: 10_000,
+                        duration: Duration::from_secs(600),
+                        ramp: false,
+                    },
+                    Phase {
+                        name: "cooldown".into(),
+                        target_tps: 0,
+                        duration: Duration::from_secs(120),
+                        ramp: true,
+                    },
+                ],
+            },
+        }
+    }
+
+    /// Static overrides (accounts, weights, concurrency) for this scenario.
     pub fn overrides(self) -> ScenarioOverrides {
         match self {
-            Scenario::SustainedMax => ScenarioOverrides {
-                tps: Some(10_000),
-                duration: Some(300),
+            Scenario::SustainedMax | Scenario::FullStressCycle => ScenarioOverrides {
                 accounts: Some(200),
                 max_concurrent_requests: Some(200),
                 tip20_weight: Some(1.0),
                 existing_recipients: Some(true),
-                benchmark_mode: Some("sustained-max".into()),
+                benchmark_mode: Some(self.to_string()),
                 ..ScenarioOverrides::default()
             },
             Scenario::MixedWorkload => ScenarioOverrides {
-                tps: Some(5_000),
-                duration: Some(300),
                 accounts: Some(200),
                 max_concurrent_requests: Some(200),
                 tip20_weight: Some(0.80),
@@ -98,11 +371,6 @@ impl Scenario {
                 ..ScenarioOverrides::default()
             },
             Scenario::BurstSpike => ScenarioOverrides {
-                // The burst is emulated by running at 10k TPS for a short window.
-                // A real multi-phase ramp requires orchestrator changes;
-                // for now, the spike phase is the interesting part.
-                tps: Some(10_000),
-                duration: Some(30),
                 accounts: Some(200),
                 max_concurrent_requests: Some(200),
                 tip20_weight: Some(1.0),
@@ -111,9 +379,6 @@ impl Scenario {
                 ..ScenarioOverrides::default()
             },
             Scenario::FatBatch => ScenarioOverrides {
-                // Lower TPS because each tx is huge (~30M gas).
-                tps: Some(100),
-                duration: Some(120),
                 accounts: Some(50),
                 max_concurrent_requests: Some(50),
                 tip20_weight: Some(1.0),
@@ -122,19 +387,14 @@ impl Scenario {
                 ..ScenarioOverrides::default()
             },
             Scenario::StateHeavy => ScenarioOverrides {
-                tps: Some(5_000),
-                duration: Some(120),
                 accounts: Some(500),
                 max_concurrent_requests: Some(200),
                 tip20_weight: Some(1.0),
-                // Random recipients = cold SSTOREs for new accounts
                 existing_recipients: Some(false),
                 benchmark_mode: Some("state-heavy".into()),
                 ..ScenarioOverrides::default()
             },
             Scenario::TxpoolFlood => ScenarioOverrides {
-                tps: Some(50_000),
-                duration: Some(60),
                 accounts: Some(500),
                 max_concurrent_requests: Some(500),
                 tip20_weight: Some(1.0),
@@ -143,8 +403,6 @@ impl Scenario {
                 ..ScenarioOverrides::default()
             },
             Scenario::Conflicting => ScenarioOverrides {
-                tps: Some(5_000),
-                duration: Some(120),
                 accounts: Some(500),
                 max_concurrent_requests: Some(200),
                 tip20_weight: Some(1.0),
@@ -153,8 +411,6 @@ impl Scenario {
                 ..ScenarioOverrides::default()
             },
             Scenario::RpcSaturation => ScenarioOverrides {
-                tps: Some(10_000),
-                duration: Some(300),
                 accounts: Some(200),
                 max_concurrent_requests: Some(500),
                 tip20_weight: Some(1.0),
@@ -163,5 +419,130 @@ impl Scenario {
                 ..ScenarioOverrides::default()
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_constant_phase_tps() {
+        let profile = LoadProfile {
+            phases: vec![Phase {
+                name: "hold".into(),
+                target_tps: 5000,
+                duration: Duration::from_secs(60),
+                ramp: false,
+            }],
+        };
+        assert_eq!(profile.tps_at(Duration::from_secs(0)), 5000.0);
+        assert_eq!(profile.tps_at(Duration::from_secs(30)), 5000.0);
+        assert_eq!(profile.tps_at(Duration::from_secs(59)), 5000.0);
+        assert_eq!(profile.tps_at(Duration::from_secs(60)), 0.0); // past end
+    }
+
+    #[test]
+    fn test_ramp_phase_tps() {
+        let profile = LoadProfile {
+            phases: vec![Phase {
+                name: "ramp".into(),
+                target_tps: 10_000,
+                duration: Duration::from_secs(100),
+                ramp: true,
+            }],
+        };
+        // Ramps from 0 (implicit start) to 10k over 100s
+        assert_eq!(profile.tps_at(Duration::ZERO), 0.0);
+        assert_eq!(profile.tps_at(Duration::from_secs(50)), 5000.0);
+        assert_eq!(profile.tps_at(Duration::from_secs(100)), 0.0); // past end
+    }
+
+    #[test]
+    fn test_multi_phase_tps() {
+        let profile = LoadProfile {
+            phases: vec![
+                Phase {
+                    name: "hold-low".into(),
+                    target_tps: 1000,
+                    duration: Duration::from_secs(10),
+                    ramp: false,
+                },
+                Phase {
+                    name: "ramp-up".into(),
+                    target_tps: 5000,
+                    duration: Duration::from_secs(10),
+                    ramp: true,
+                },
+            ],
+        };
+        // First phase: constant 1000
+        assert_eq!(profile.tps_at(Duration::from_secs(5)), 1000.0);
+        // Second phase: ramp from 1000 to 5000 over 10s
+        assert_eq!(profile.tps_at(Duration::from_secs(10)), 1000.0); // start of ramp
+        assert_eq!(profile.tps_at(Duration::from_secs(15)), 3000.0); // midpoint
+    }
+
+    #[test]
+    fn test_expected_total_txs() {
+        let profile = LoadProfile {
+            phases: vec![Phase {
+                name: "hold".into(),
+                target_tps: 1000,
+                duration: Duration::from_secs(10),
+                ramp: false,
+            }],
+        };
+        assert_eq!(profile.expected_total_txs(), 10_000);
+    }
+
+    #[test]
+    fn test_expected_total_txs_ramp() {
+        let profile = LoadProfile {
+            phases: vec![Phase {
+                name: "ramp".into(),
+                target_tps: 1000,
+                duration: Duration::from_secs(10),
+                ramp: true,
+            }],
+        };
+        // Ramp from 0 to 1000 over 10s = avg 500 * 10 = 5000
+        assert_eq!(profile.expected_total_txs(), 5000);
+    }
+
+    #[test]
+    fn test_full_stress_cycle_duration() {
+        let profile = Scenario::FullStressCycle.profile();
+        // 120 + 600 + 180 + 900 + 30 + 30 + 600 + 300 + 600 + 120 = 3480s = 58 min
+        assert_eq!(profile.total_duration(), Duration::from_secs(3480));
+    }
+
+    #[test]
+    fn test_phase_at() {
+        let profile = LoadProfile {
+            phases: vec![
+                Phase {
+                    name: "a".into(),
+                    target_tps: 100,
+                    duration: Duration::from_secs(10),
+                    ramp: false,
+                },
+                Phase {
+                    name: "b".into(),
+                    target_tps: 200,
+                    duration: Duration::from_secs(10),
+                    ramp: false,
+                },
+            ],
+        };
+        assert_eq!(profile.phase_at(Duration::from_secs(5)), Some("a"));
+        assert_eq!(profile.phase_at(Duration::from_secs(15)), Some("b"));
+        assert_eq!(profile.phase_at(Duration::from_secs(20)), None);
+    }
+
+    #[test]
+    fn test_max_tps() {
+        let profile = Scenario::BurstSpike.profile();
+        assert_eq!(profile.max_tps(), 25_000);
     }
 }

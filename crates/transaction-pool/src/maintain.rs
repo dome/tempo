@@ -560,6 +560,14 @@ where
                             error!(target: "txpool", ?err, "AMM liquidity cache repopulate after reorg failed");
                         }
 
+                        // Extract invalidation events from the new canonical segment
+                        // and evict affected transactions. Without this, events like key
+                        // revocations, spending limit changes, validator/user token changes,
+                        // and blacklist additions in the reorg segment would be ignored.
+                        let updates = TempoPoolUpdates::from_chain(&new);
+                        evict_invalidated_from_pool(&pool, &mut state, &metrics, &updates);
+                        evict_invalidated_from_paused_pool(&mut state, &updates);
+
                         continue;
                     }
                     CanonStateNotification::Commit { new } => new,
@@ -765,16 +773,7 @@ where
                 }
 
                 // 5. Evict revoked keys and spending limit updates from paused pool
-                if !updates.revoked_keys.is_empty()
-                    || !updates.spending_limit_changes.is_empty()
-                    || !updates.spending_limit_spends.is_empty()
-                {
-                    state.paused_pool.evict_invalidated(
-                        &updates.revoked_keys,
-                        &updates.spending_limit_changes,
-                        &updates.spending_limit_spends,
-                    );
-                }
+                evict_invalidated_from_paused_pool(&mut state, &updates);
                 metrics.pause_events_duration_seconds.record(pause_start.elapsed());
 
                 // 6. Update 2D nonce pool
@@ -805,28 +804,7 @@ where
                 // This checks revoked keys, spending limit changes, validator token changes,
                 // blacklist additions, and whitelist removals together to avoid scanning
                 // all transactions multiple times per block.
-                if updates.has_invalidation_events() {
-                    let invalidation_start = Instant::now();
-                    debug!(
-                        target: "txpool",
-                        revoked_keys = updates.revoked_keys.len(),
-                        spending_limit_changes = updates.spending_limit_changes.len(),
-                        spending_limit_spends = updates.spending_limit_spends.len(),
-                        validator_token_changes = updates.validator_token_changes.len(),
-                        user_token_changes = updates.user_token_changes.len(),
-                        blacklist_additions = updates.blacklist_additions.len(),
-                        whitelist_removals = updates.whitelist_removals.len(),
-                        "Processing transaction invalidation events"
-                    );
-                    let evicted = pool.evict_invalidated_transactions(&updates);
-                    for hash in &evicted {
-                        state.untrack_expiry(hash);
-                    }
-                    metrics.transactions_invalidated.increment(evicted.len() as u64);
-                    metrics
-                        .invalidation_eviction_duration_seconds
-                        .record(invalidation_start.elapsed());
-                }
+                evict_invalidated_from_pool(&pool, &mut state, &metrics, &updates);
 
                 // 10. Evict stale pending transactions (must happen after AA pool promotions in step 6)
                 // Only runs once per interval (~30 min) to avoid overhead on every block.
@@ -888,6 +866,63 @@ where
     }
 
     count
+}
+
+/// Evicts invalidated transactions from the main pool in a single scan.
+///
+/// Checks revoked keys, spending limit changes, validator token changes,
+/// blacklist additions, and whitelist removals.
+fn evict_invalidated_from_pool<Client>(
+    pool: &TempoTransactionPool<Client>,
+    state: &mut TempoPoolState,
+    metrics: &TempoPoolMaintenanceMetrics,
+    updates: &TempoPoolUpdates,
+) where
+    Client: StateProviderFactory + ChainSpecProvider<ChainSpec = TempoChainSpec> + 'static,
+{
+    if !updates.has_invalidation_events() {
+        return;
+    }
+
+    let invalidation_start = Instant::now();
+    debug!(
+        target: "txpool",
+        revoked_keys = updates.revoked_keys.len(),
+        spending_limit_changes = updates.spending_limit_changes.len(),
+        spending_limit_spends = updates.spending_limit_spends.len(),
+        validator_token_changes = updates.validator_token_changes.len(),
+        user_token_changes = updates.user_token_changes.len(),
+        blacklist_additions = updates.blacklist_additions.len(),
+        whitelist_removals = updates.whitelist_removals.len(),
+        "Processing transaction invalidation events"
+    );
+    let evicted = pool.evict_invalidated_transactions(updates);
+    for hash in &evicted {
+        state.untrack_expiry(hash);
+    }
+    metrics
+        .transactions_invalidated
+        .increment(evicted.len() as u64);
+    metrics
+        .invalidation_eviction_duration_seconds
+        .record(invalidation_start.elapsed());
+}
+
+/// Evicts invalidated transactions from the paused pool.
+///
+/// Removes paused transactions whose keychain keys were revoked or whose
+/// spending limits changed.
+fn evict_invalidated_from_paused_pool(state: &mut TempoPoolState, updates: &TempoPoolUpdates) {
+    if !updates.revoked_keys.is_empty()
+        || !updates.spending_limit_changes.is_empty()
+        || !updates.spending_limit_spends.is_empty()
+    {
+        state.paused_pool.evict_invalidated(
+            &updates.revoked_keys,
+            &updates.spending_limit_changes,
+            &updates.spending_limit_spends,
+        );
+    }
 }
 
 /// Handles a reorg event by identifying orphaned AA 2D transactions from the old chain

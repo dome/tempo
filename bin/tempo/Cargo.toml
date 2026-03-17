@@ -120,6 +120,7 @@ jemalloc-prof = [
 ]
 jemalloc-symbols = [
 	"jemalloc-prof",
+	"jemalloc_pprof?/symbolize",
 	"reth-ethereum-cli/jemalloc-symbols",
 	"tempo-node/jemalloc-symbols",
 	"reth-ethereum/jemalloc-symbols",

@@ -1080,25 +1080,17 @@ impl AA2dPool {
 
     /// Removes expiring nonce transactions that were included in a block.
     ///
-    /// This should be called with the transaction hashes from mined blocks to clean up
-    /// expiring nonce transactions on inclusion, rather than waiting for expiry.
-    pub(crate) fn remove_included_expiring_nonce_txs<'a>(
+    /// Called with the `expiring_nonce_hash` values computed from mined block transactions
+    /// so that sibling variants (same payload, different fee payer) are correctly cleaned up.
+    pub(crate) fn remove_included_expiring_nonce_txs(
         &mut self,
-        tx_hashes: impl Iterator<Item = &'a TxHash>,
+        expiring_nonce_hashes: impl Iterator<Item = B256>,
     ) -> Vec<Arc<ValidPoolTransaction<TempoPooledTransaction>>> {
         let mut removed = Vec::new();
-        for tx_hash in tx_hashes {
-            let Some(tx) = self.by_hash.get(tx_hash).cloned() else {
-                continue;
-            };
-            if !tx.transaction.is_expiring_nonce() {
-                continue;
-            }
-            if let Some(pending_tx) = self
-                .expiring_nonce_txs
-                .remove(&Self::expiring_nonce_hash(&tx))
-            {
-                self.by_hash.remove(tx_hash);
+        for exp_nonce_hash in expiring_nonce_hashes {
+            if let Some(pending_tx) = self.expiring_nonce_txs.remove(&exp_nonce_hash) {
+                let tx_hash = *pending_tx.transaction.hash();
+                self.by_hash.remove(&tx_hash);
                 self.decrement_sender_count(pending_tx.transaction.sender());
                 removed.push(pending_tx.transaction);
             }
@@ -5187,8 +5179,7 @@ mod tests {
     }
 
     /// Verifies that `remove_included_expiring_nonce_txs` (called on block mining) correctly
-    /// removes an expiring nonce tx using the two-step lookup: tx_hash → by_hash → derive
-    /// expiring_nonce_hash → remove from expiring_nonce_txs.
+    /// removes an expiring nonce tx by its `expiring_nonce_hash` replay protection key.
     #[test]
     fn remove_included_expiring_nonce_tx_uses_correct_key() {
         let mut pool = AA2dPool::default();
@@ -5220,6 +5211,7 @@ mod tests {
         let signature =
             TempoSignature::Primitive(PrimitiveSignature::Secp256k1(Signature::test_signature()));
         let aa_signed = AASigned::new_unhashed(tx, signature);
+        let exp_nonce_hash = aa_signed.expiring_nonce_hash(sender);
         let envelope: TempoTxEnvelope = aa_signed.into();
         let recovered = Recovered::new_unchecked(envelope, sender);
         let pooled = TempoPooledTransaction::new(recovered);
@@ -5236,9 +5228,13 @@ mod tests {
         assert!(pool.by_hash.contains_key(&tx_hash));
         pool.assert_invariants();
 
-        // Simulate block mining: remove by tx_hash (what the block contains)
-        let removed = pool.remove_included_expiring_nonce_txs(std::iter::once(&tx_hash));
-        assert_eq!(removed.len(), 1, "should remove the tx by its tx_hash");
+        // Simulate block mining: remove by expiring_nonce_hash (replay protection key)
+        let removed = pool.remove_included_expiring_nonce_txs(std::iter::once(exp_nonce_hash));
+        assert_eq!(
+            removed.len(),
+            1,
+            "should remove the tx by its expiring_nonce_hash"
+        );
         assert_eq!(*removed[0].hash(), tx_hash);
 
         // Both maps must be empty
@@ -5510,7 +5506,8 @@ mod tests {
             .max_fee(2_000_000_000)
             .build();
         let valid_tx1 = wrap_valid_tx(tx1, TransactionOrigin::Local);
-        let tx1_hash = *valid_tx1.hash();
+        let valid_tx1 = Arc::new(valid_tx1);
+        let exp_nonce_hash1 = AA2dPool::expiring_nonce_hash(&valid_tx1);
 
         let tx2 = TxBuilder::aa(sender)
             .nonce_key(U256::MAX)
@@ -5519,7 +5516,7 @@ mod tests {
             .build();
         let valid_tx2 = wrap_valid_tx(tx2, TransactionOrigin::Local);
 
-        pool.add_transaction(Arc::new(valid_tx1), 0, TempoHardfork::T1)
+        pool.add_transaction(valid_tx1, 0, TempoHardfork::T1)
             .unwrap();
         pool.add_transaction(Arc::new(valid_tx2), 0, TempoHardfork::T1)
             .unwrap();
@@ -5530,7 +5527,7 @@ mod tests {
         pool.assert_invariants();
 
         // Remove one via the included txs path
-        let removed = pool.remove_included_expiring_nonce_txs(std::iter::once(&tx1_hash));
+        let removed = pool.remove_included_expiring_nonce_txs(std::iter::once(exp_nonce_hash1));
         assert_eq!(removed.len(), 1, "Should remove exactly 1 transaction");
 
         // Verify pending count decremented

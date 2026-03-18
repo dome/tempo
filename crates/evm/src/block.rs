@@ -297,6 +297,7 @@ where
         &self,
         tx: &TempoTxEnvelope,
         gas_used: u64,
+        is_payment: bool,
     ) -> Result<BlockSection, BlockValidationError> {
         // Start with processing of transaction kinds that require specific sections.
         if tx.is_system_tx() {
@@ -329,7 +330,7 @@ where
             match self.section {
                 BlockSection::StartOfBlock | BlockSection::NonShared => {
                     if gas_used > self.non_shared_gas_left
-                        || (!tx.is_payment() && gas_used > self.non_payment_gas_left)
+                        || (!is_payment && gas_used > self.non_payment_gas_left)
                     {
                         // Assume that this transaction wants to make use of gas incentive section
                         //
@@ -421,11 +422,24 @@ where
 
         let inner = result?;
 
-        let next_section = self.validate_tx(recovered.tx(), inner.result.result.gas_used())?;
+        // Determine payment lane criteria based on active hardfork
+        let is_payment = if self
+            .inner
+            .spec
+            .tempo_hardfork_at(self.evm().block().timestamp.to::<u64>())
+            .is_t2()
+        {
+            recovered.tx().is_payment_v2()
+        } else {
+            recovered.tx().is_payment_v1()
+        };
+
+        let next_section =
+            self.validate_tx(recovered.tx(), inner.result.result.gas_used(), is_payment)?;
         Ok(TempoTxResult {
             inner,
             next_section,
-            is_payment: recovered.tx().is_payment(),
+            is_payment,
             tx: matches!(next_section, BlockSection::SubBlock { .. })
                 .then(|| recovered.tx().clone()),
         })

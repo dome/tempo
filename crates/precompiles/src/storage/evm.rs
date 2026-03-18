@@ -91,7 +91,8 @@ impl<'a> PrecompileStorageProvider for EvmPrecompileStorageProvider<'a> {
         address: Address,
         code: Bytecode,
     ) -> Result<(), TempoPrecompileError> {
-        if self.spec.is_t2() {
+        //  self.spec.is_t3()
+        if false {
             self.deduct_gas(self.gas_params.get(GasId::create()) as u64)?;
         }
 
@@ -99,7 +100,8 @@ impl<'a> PrecompileStorageProvider for EvmPrecompileStorageProvider<'a> {
 
         let mut account = self.internals.load_account_mut(address)?;
 
-        if self.spec.is_t2() {
+        // self.spec.is_t3()
+        if false {
             // returns false only if nonce is at max value. Unrealistic to happen.
             account.bump_nonce();
         }

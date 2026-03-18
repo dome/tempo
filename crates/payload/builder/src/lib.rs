@@ -382,6 +382,7 @@ where
 
         let execution_start = Instant::now();
         let _block_fill_span = debug_span!(target: "payload_builder", "block_fill").entered();
+        let mut payment_volume = U256::ZERO;
         while let Some(pool_tx) = best_txs.next() {
             // Ensure we still have capacity for this transaction within the non-shared gas limit.
             // The remaining `shared_gas_limit` is reserved for validator subblocks and must not
@@ -490,6 +491,7 @@ where
 
             // update and add to total fees
             total_fees += calc_gas_balance_spending(gas_used, effective_gas_price);
+            payment_volume = payment_volume.saturating_add(pool_tx.transaction.value());
             cumulative_gas_used += gas_used;
             if !is_payment {
                 non_payment_gas_used += gas_used;
@@ -551,6 +553,7 @@ where
                     }
                 }
 
+                payment_volume = payment_volume.saturating_add(tx.value());
                 subblock_tx_count += 1.0;
             }
 
@@ -625,6 +628,10 @@ where
         let gas_used = block.gas_used();
         self.metrics.gas_used.record(gas_used as f64);
         self.metrics.gas_used_last.set(gas_used as f64);
+
+        let payment_volume_f64 = payment_volume.saturating_to::<u128>() as f64;
+        self.metrics.payment_volume.record(payment_volume_f64);
+        self.metrics.payment_volume_last.set(payment_volume_f64);
 
         let requests = chain_spec
             .is_prague_active_at_timestamp(attributes.timestamp())

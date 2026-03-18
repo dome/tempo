@@ -73,6 +73,10 @@ pub(crate) struct TempoPayloadBuilderMetrics {
     pub(crate) rlp_block_size_bytes: Histogram,
     /// RLP-encoded block size in bytes for the last payload.
     pub(crate) rlp_block_size_bytes_last: Gauge,
+    /// Total payment volume (sum of transaction values) in the payload, in wei.
+    pub(crate) payment_volume: Histogram,
+    /// Total payment volume for the last payload, in wei.
+    pub(crate) payment_volume_last: Gauge,
     /// Time to compute the hashed post-state from the bundle state.
     pub(crate) hashed_post_state_duration_seconds: Histogram,
     /// Time to compute the state root and trie updates via `state_root_with_updates`.

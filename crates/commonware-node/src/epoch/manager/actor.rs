@@ -272,6 +272,7 @@ where
         skip_all,
         fields(
             %epoch,
+            network_identity = %public.public(),
             ?participants,
         ),
         err(level = Level::WARN)

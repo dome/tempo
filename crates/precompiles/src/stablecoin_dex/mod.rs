@@ -733,12 +733,23 @@ impl StablecoinDEX {
         )
         .ok_or(TempoPrecompileError::under_overflow())?;
 
-        if order.is_bid() {
-            // Bid order maker receives base tokens (exact amount)
-            self.increment_balance(order.maker(), orderbook.base, fill_amount)?;
+        // Credit maker only if still authorized as recipient for the payout token.
+        // (T2+) If policy deauthorized the maker after order placement, DEX retains the tokens.
+        let (maker_token, maker_amount) = if order.is_bid() {
+            (orderbook.base, fill_amount)
         } else {
-            // Ask order maker receives quote tokens
-            self.increment_balance(order.maker(), orderbook.quote, quote_amount)?;
+            (orderbook.quote, quote_amount)
+        };
+
+        let policy_id = TIP20Token::from_address(maker_token)?.transfer_policy_id()?;
+        if !self.storage.spec().is_t2()
+            || TIP403Registry::new().is_authorized_as(
+                policy_id,
+                order.maker(),
+                AuthRole::recipient(),
+            )?
+        {
+            self.increment_balance(order.maker(), maker_token, maker_amount)?;
         }
 
         // Taker output: bid→quote, ask→base (zero-sum with maker)
@@ -779,22 +790,29 @@ impl StablecoinDEX {
         let fill_amount = order.remaining();
 
         // Settlement: bid rounds DOWN (taker receives less), ask rounds UP (maker receives more)
-        let amount_out = if order.is_bid() {
-            // Bid maker receives base tokens (exact amount)
-            self.increment_balance(order.maker(), orderbook.base, fill_amount)?;
-            // Taker receives quote tokens - round DOWN
-            base_to_quote(fill_amount, order.tick(), RoundingDirection::Down)
-                .ok_or(TempoPrecompileError::under_overflow())?
+        let (amount_out, maker_token, maker_amount) = if order.is_bid() {
+            // Bid: maker receives base (exact), taker receives quote (round DOWN)
+            let quote_amount = base_to_quote(fill_amount, order.tick(), RoundingDirection::Down)
+                .ok_or(TempoPrecompileError::under_overflow())?;
+            (quote_amount, orderbook.base, fill_amount)
         } else {
-            // Ask maker receives quote tokens - round UP to favor maker
+            // Ask: maker receives quote (round UP), taker receives base (exact)
             let quote_amount = base_to_quote(fill_amount, order.tick(), RoundingDirection::Up)
                 .ok_or(TempoPrecompileError::under_overflow())?;
-
-            self.increment_balance(order.maker(), orderbook.quote, quote_amount)?;
-
-            // Taker receives base tokens (exact amount)
-            fill_amount
+            (fill_amount, orderbook.quote, quote_amount)
         };
+
+        // Credit maker only if still authorized as recipient for the payout token (T2+)
+        let policy_id = TIP20Token::from_address(maker_token)?.transfer_policy_id()?;
+        if !self.storage.spec().is_t2()
+            || TIP403Registry::new().is_authorized_as(
+                policy_id,
+                order.maker(),
+                AuthRole::recipient(),
+            )?
+        {
+            self.increment_balance(order.maker(), maker_token, maker_amount)?;
+        }
 
         // Emit OrderFilled event for complete fill
         self.emit_order_filled(order.order_id(), order.maker(), taker, fill_amount, false)?;
@@ -4495,8 +4513,10 @@ mod tests {
                     "[{spec:?}] Swap should succeed when flip hits a business logic error"
                 );
 
-                // Alice keeps the fill proceeds (base tokens credited during fill, not escrowed)
-                assert_eq!(exchange.balance_of(alice, base_token)?, amount);
+                // Pre-T2: alice keeps fill proceeds (no recipient re-check at fill time)
+                // T2+: alice is blacklisted as recipient, DEX retains the tokens
+                let expected = if spec.is_t2() { 0 } else { amount };
+                assert_eq!(exchange.balance_of(alice, base_token)?, expected);
 
                 // No flipped order exists — the ask tick level at flip_tick is empty
                 let level = exchange.books[book_key]

@@ -272,7 +272,6 @@ where
         skip_all,
         fields(
             %epoch,
-            ?public,
             ?participants,
         ),
         err(level = Level::WARN)

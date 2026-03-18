@@ -888,12 +888,20 @@ fn test_t2_store_multi_slot_packed_skips_sload() -> eyre::Result<()> {
         Rule3TestPartial::handle(base_slot, LayoutCtx::FULL, address).write(value.clone())?;
 
         // Pre-T2: 2 SLOADs (one per packed slot), 2 SSTOREs
-        assert_eq!(StorageCtx.counter_sload(), 2, "pre-T2 should SLOAD both packed slots");
+        assert_eq!(
+            StorageCtx.counter_sload(),
+            2,
+            "pre-T2 should SLOAD both packed slots"
+        );
         assert_eq!(StorageCtx.counter_sstore(), 2);
 
         // Slot 1 unused bytes (31 bytes unused) should retain garbage from the SLOAD
         let slot1 = U256::handle(base_slot + U256::from(1), LayoutCtx::FULL, address).read()?;
-        assert_ne!(slot1, U256::from(0x42u8), "pre-T2 should preserve garbage in unused bytes");
+        assert_ne!(
+            slot1,
+            U256::from(0x42u8),
+            "pre-T2 should preserve garbage in unused bytes"
+        );
 
         Ok::<(), error::TempoPrecompileError>(())
     })?;
@@ -909,12 +917,20 @@ fn test_t2_store_multi_slot_packed_skips_sload() -> eyre::Result<()> {
         Rule3TestPartial::handle(base_slot, LayoutCtx::FULL, address).write(value.clone())?;
 
         // T2: 0 SLOADs (elided for both slots), 2 SSTOREs
-        assert_eq!(StorageCtx.counter_sload(), 0, "T2 should elide SLOADs for all packed slots");
+        assert_eq!(
+            StorageCtx.counter_sload(),
+            0,
+            "T2 should elide SLOADs for all packed slots"
+        );
         assert_eq!(StorageCtx.counter_sstore(), 2);
 
         // Slot 1 unused bytes should be zero — proves SLOAD was skipped
         let slot1 = U256::handle(base_slot + U256::from(1), LayoutCtx::FULL, address).read()?;
-        assert_eq!(slot1, U256::from(0x42u8), "T2 should zero unused bytes in new packed slot");
+        assert_eq!(
+            slot1,
+            U256::from(0x42u8),
+            "T2 should zero unused bytes in new packed slot"
+        );
 
         Ok(())
     })
@@ -948,13 +964,13 @@ fn test_t2_multi_slot_packed_preserves_neighbor_slots() -> eyre::Result<()> {
 
         // Overwrite with different packed fields in slots 1 and 2
         let updated = PackedThreeSlot {
-            value: U256::from(0xDEAD_u64), // slot 0, same
-            timestamp: 0xAAAAAAAAAAAAAAAA,  // slot 1, different
-            start_time: 0xBBBBBBBBBBBBBBBB, // slot 1, different
-            end_time: 0xCCCCCCCCCCCCCCCC,  // slot 1, different
-            nonce: 0xDDDDDDDDDDDDDDDD,     // slot 1, different
+            value: U256::from(0xDEAD_u64),    // slot 0, same
+            timestamp: 0xAAAAAAAAAAAAAAAA,    // slot 1, different
+            start_time: 0xBBBBBBBBBBBBBBBB,   // slot 1, different
+            end_time: 0xCCCCCCCCCCCCCCCC,     // slot 1, different
+            nonce: 0xDDDDDDDDDDDDDDDD,        // slot 1, different
             owner: Address::from([0xBB; 20]), // slot 2, different
-            active: false,                   // slot 2, different
+            active: false,                    // slot 2, different
         };
         PackedThreeSlot::handle(base_slot, LayoutCtx::FULL, address).write(updated.clone())?;
 

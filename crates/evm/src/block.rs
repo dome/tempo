@@ -26,7 +26,10 @@ use reth_revm::{
     state::{Account, Bytecode, EvmState},
 };
 use std::collections::{HashMap, HashSet};
-use tempo_chainspec::{TempoChainSpec, hardfork::{TempoHardfork, TempoHardforks}};
+use tempo_chainspec::{
+    TempoChainSpec,
+    hardfork::{TempoHardfork, TempoHardforks},
+};
 use tempo_contracts::precompiles::VALIDATOR_CONFIG_V2_ADDRESS;
 use tempo_primitives::{
     SubBlock, SubBlockMetadata, TempoReceipt, TempoTxEnvelope, TempoTxType,

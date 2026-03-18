@@ -1184,19 +1184,34 @@ impl StablecoinDEX {
         }
 
         let book = self.books[order.book_key()].read()?;
-        let token = if order.is_bid() {
-            book.quote
+        let (escrow_token, payout_token) = if order.is_bid() {
+            (book.quote, book.base)
         } else {
-            book.base
+            (book.base, book.quote)
         };
 
-        let policy_id = TIP20Token::from_address(token)?.transfer_policy_id()?;
+        let registry = TIP403Registry::new();
+
+        // Check sender auth on escrow token
+        let escrow_policy = TIP20Token::from_address(escrow_token)?.transfer_policy_id()?;
         // Invalid policy ids throw under_overflow. Treat as unauthorized to clear the orders.
-        match TIP403Registry::new().is_authorized_as(policy_id, order.maker(), AuthRole::sender()) {
-            Ok(true) => Err(StablecoinDEXError::order_not_stale().into()),
-            Err(e) if e != TempoPrecompileError::under_overflow() => Err(e),
-            _ => self.cancel_active_order(order),
+        match registry.is_authorized_as(escrow_policy, order.maker(), AuthRole::sender()) {
+            Ok(true) => {}
+            Err(e) if e != TempoPrecompileError::under_overflow() => return Err(e),
+            _ => return self.cancel_active_order(order),
         }
+
+        // (T2+) Check recipient auth on payout token
+        if self.storage.spec().is_t2() {
+            let payout_policy = TIP20Token::from_address(payout_token)?.transfer_policy_id()?;
+            match registry.is_authorized_as(payout_policy, order.maker(), AuthRole::recipient()) {
+                Ok(true) => {}
+                Err(e) if e != TempoPrecompileError::under_overflow() => return Err(e),
+                _ => return self.cancel_active_order(order),
+            }
+        }
+
+        Err(StablecoinDEXError::order_not_stale().into())
     }
 
     /// Withdraws `amount` from the caller's DEX balance, transferring

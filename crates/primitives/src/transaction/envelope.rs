@@ -190,7 +190,10 @@ impl TempoTxEnvelope {
             Self::Legacy(tx) => is_tip20_payment(tx.tx().to.to(), &tx.tx().input),
             Self::Eip2930(tx) => is_tip20_payment(tx.tx().to.to(), &tx.tx().input),
             Self::Eip1559(tx) => is_tip20_payment(tx.tx().to.to(), &tx.tx().input),
-            Self::Eip7702(tx) => is_tip20_payment(Some(&tx.tx().to), &tx.tx().input),
+            Self::Eip7702(tx) => {
+                tx.tx().authorization_list.is_empty()
+                    && is_tip20_payment(Some(&tx.tx().to), &tx.tx().input)
+            }
             Self::AA(tx) => {
                 let inner = tx.tx();
                 !inner.calls.is_empty()
@@ -958,6 +961,120 @@ mod tests {
             let envelope = create_aa_envelope(call);
             assert!(envelope.is_payment_v2());
         }
+    }
+
+    #[test]
+    fn test_payment_v2_eip7702_rejects_authorization_list() {
+        use alloy_consensus::TxEip7702;
+        use alloy_eips::eip7702::SignedAuthorization;
+
+        let calldata = ITIP20::transferCall {
+            to: Address::random(),
+            amount: U256::from(1),
+        }
+        .abi_encode();
+        let tx = TxEip7702 {
+            to: PAYMENT_TKN,
+            input: Bytes::from(calldata),
+            authorization_list: vec![SignedAuthorization::new_unchecked(
+                alloy_eips::eip7702::Authorization {
+                    chain_id: U256::from(1),
+                    address: Address::random(),
+                    nonce: 0,
+                },
+                0,
+                U256::ZERO,
+                U256::ZERO,
+            )],
+            ..Default::default()
+        };
+        let envelope =
+            TempoTxEnvelope::Eip7702(Signed::new_unhashed(tx, Signature::test_signature()));
+        assert!(
+            envelope.is_payment_v1(),
+            "V1 ignores authorization_list (backwards compat)"
+        );
+        assert!(
+            !envelope.is_payment_v2(),
+            "V2 must reject EIP-7702 tx with non-empty authorization_list"
+        );
+    }
+
+    #[test]
+    fn test_payment_v2_aa_rejects_key_authorization() {
+        use crate::transaction::key_authorization::{KeyAuthorization, SignedKeyAuthorization};
+        use crate::transaction::tt_signature::PrimitiveSignature;
+
+        let calldata = ITIP20::transferCall {
+            to: Address::random(),
+            amount: U256::from(1),
+        }
+        .abi_encode();
+        let tx = TempoTransaction {
+            fee_token: Some(PAYMENT_TKN),
+            calls: vec![Call {
+                to: TxKind::Call(PAYMENT_TKN),
+                value: U256::ZERO,
+                input: Bytes::from(calldata),
+            }],
+            key_authorization: Some(SignedKeyAuthorization {
+                authorization: KeyAuthorization {
+                    chain_id: 1,
+                    key_type: crate::SignatureType::Secp256k1,
+                    key_id: Address::random(),
+                    expiry: None,
+                    limits: None,
+                },
+                signature: PrimitiveSignature::Secp256k1(Signature::test_signature()),
+            }),
+            ..Default::default()
+        };
+        let envelope = TempoTxEnvelope::AA(tx.into_signed(Signature::test_signature().into()));
+        assert!(
+            envelope.is_payment_v1(),
+            "V1 ignores side-effect fields (backwards compat)"
+        );
+        assert!(
+            !envelope.is_payment_v2(),
+            "V2 must reject AA tx with key_authorization"
+        );
+    }
+
+    #[test]
+    fn test_payment_v2_aa_rejects_tempo_authorization_list() {
+        use crate::transaction::TempoSignedAuthorization;
+
+        let calldata = ITIP20::transferCall {
+            to: Address::random(),
+            amount: U256::from(1),
+        }
+        .abi_encode();
+        let tx = TempoTransaction {
+            fee_token: Some(PAYMENT_TKN),
+            calls: vec![Call {
+                to: TxKind::Call(PAYMENT_TKN),
+                value: U256::ZERO,
+                input: Bytes::from(calldata),
+            }],
+            tempo_authorization_list: vec![TempoSignedAuthorization::new_unchecked(
+                alloy_eips::eip7702::Authorization {
+                    chain_id: U256::from(1),
+                    address: Address::random(),
+                    nonce: 0,
+                },
+                Signature::test_signature().into(),
+            )],
+            ..Default::default()
+        };
+        let envelope = TempoTxEnvelope::AA(tx.into_signed(Signature::test_signature().into()));
+        assert!(
+            envelope.is_payment_v1(),
+            "V1 ignores side-effect fields (backwards compat)"
+        );
+        assert!(
+            !envelope.is_payment_v2(),
+            "V2 must reject AA tx with tempo_authorization_list"
+        );
     }
 
     #[test]

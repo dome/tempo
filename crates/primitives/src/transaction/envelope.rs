@@ -192,9 +192,11 @@ impl TempoTxEnvelope {
             Self::Eip1559(tx) => is_tip20_payment(tx.tx().to.to(), &tx.tx().input),
             Self::Eip7702(tx) => is_tip20_payment(Some(&tx.tx().to), &tx.tx().input),
             Self::AA(tx) => {
-                !tx.tx().calls.is_empty()
-                    && tx
-                        .tx()
+                let inner = tx.tx();
+                !inner.calls.is_empty()
+                    && inner.key_authorization.is_none()
+                    && inner.tempo_authorization_list.is_empty()
+                    && inner
                         .calls
                         .iter()
                         .all(|call| is_tip20_payment(call.to.to(), &call.input))

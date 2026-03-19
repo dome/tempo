@@ -892,15 +892,10 @@ fn evict_invalidated_from_pool<Client>(
 /// Removes paused transactions whose keychain keys were revoked or whose
 /// spending limits changed.
 fn evict_invalidated_from_paused_pool(state: &mut TempoPoolState, updates: &TempoPoolUpdates) {
-    if !updates.revoked_keys.is_empty()
-        || !updates.spending_limit_changes.is_empty()
-        || !updates.spending_limit_spends.is_empty()
-    {
-        state.paused_pool.evict_invalidated(
-            &updates.revoked_keys,
-            &updates.spending_limit_changes,
-            &updates.spending_limit_spends,
-        );
+    if !updates.revoked_keys.is_empty() || !updates.spending_limit_changes.is_empty() {
+        state
+            .paused_pool
+            .evict_invalidated(&updates.revoked_keys, &updates.spending_limit_changes);
     }
 }
 

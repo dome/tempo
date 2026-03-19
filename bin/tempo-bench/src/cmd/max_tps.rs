@@ -1,5 +1,6 @@
 mod dex;
 mod erc20;
+pub(crate) mod metrics_scraper;
 mod mpp;
 pub(crate) mod scenario;
 
@@ -211,6 +212,19 @@ pub struct MaxTpsArgs {
     /// nonce management.
     #[arg(long)]
     use_standard_nonces: bool,
+
+    /// Prometheus metrics endpoints to scrape during the benchmark.
+    ///
+    /// When set, periodically fetches Prometheus metrics from each URL and includes
+    /// the time-series data in `report.json` for post-run analysis/graphing.
+    ///
+    /// Example: `--metrics-urls http://localhost:9001/metrics`
+    #[arg(long, value_delimiter = ',', action = clap::ArgAction::Append)]
+    metrics_urls: Vec<Url>,
+
+    /// Interval in seconds between metrics scrapes.
+    #[arg(long, default_value_t = 1)]
+    metrics_interval: u64,
 }
 
 impl MaxTpsArgs {
@@ -599,6 +613,17 @@ impl MaxTpsArgs {
             cancel_token.clone(),
         ));
 
+        // Start metrics scraper if configured
+        let metrics_collector = if !self.metrics_urls.is_empty() {
+            Some(metrics_scraper::spawn_scraper(
+                self.metrics_urls.clone(),
+                Duration::from_secs(self.metrics_interval),
+                cancel_token.clone(),
+            ))
+        } else {
+            None
+        };
+
         let start_block_number = provider.get_block_number().await?;
 
         // Pre-generate a buffer of signed transaction bytes from the infinite generator stream
@@ -797,12 +822,25 @@ impl MaxTpsArgs {
             "Collected a sample of receipts"
         );
 
+        // Collect metrics snapshots
+        let metrics_snapshots = metrics_collector
+            .map(|c| c.into_snapshots())
+            .unwrap_or_default();
+
+        if !metrics_snapshots.is_empty() {
+            info!(
+                snapshots = metrics_snapshots.len(),
+                "Collected metrics snapshots"
+            );
+        }
+
         generate_report(
             provider,
             start_block_number,
             end_block_number,
             &self,
             &profile,
+            metrics_snapshots,
         )
         .await?;
 
@@ -1186,6 +1224,8 @@ struct BenchmarkMetadata {
 struct BenchmarkReport {
     metadata: BenchmarkMetadata,
     blocks: Vec<BenchmarkedBlock>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    metrics: Vec<metrics_scraper::MetricsSnapshot>,
 }
 
 pub async fn generate_report(
@@ -1194,6 +1234,7 @@ pub async fn generate_report(
     end_block: BlockNumber,
     args: &MaxTpsArgs,
     profile: &LoadProfile,
+    metrics_snapshots: Vec<metrics_scraper::MetricsSnapshot>,
 ) -> eyre::Result<()> {
     info!(start_block, end_block, "Generating report");
 
@@ -1272,6 +1313,7 @@ pub async fn generate_report(
     let report = BenchmarkReport {
         metadata,
         blocks: benchmarked_blocks,
+        metrics: metrics_snapshots,
     };
 
     let path = "report.json";

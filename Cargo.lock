@@ -11898,6 +11898,7 @@ dependencies = [
  "rand 0.8.5",
  "rand 0.9.2",
  "rayon",
+ "reqwest 0.13.2",
  "reth-tracing",
  "rlimit",
  "serde",

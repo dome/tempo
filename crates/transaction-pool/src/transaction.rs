@@ -155,6 +155,18 @@ impl TempoPooledTransaction {
         })
     }
 
+    /// Returns true if this transaction carries an inline key authorization that matches a
+    /// newly authorized key.
+    ///
+    /// This covers root-signed inline key-auth transactions that do not have keychain signatures,
+    /// so `keychain_subject()` would be `None`.
+    pub fn matches_authorized_inline_key(&self, authorized_keys: &AuthorizedKeys) -> bool {
+        self.inner()
+            .as_aa()
+            .and_then(|aa| aa.tx().key_authorization.as_ref())
+            .is_some_and(|auth| authorized_keys.contains(self.sender(), auth.key_id))
+    }
+
     /// Returns the unique identifier for this AA transaction.
     pub(crate) fn aa_transaction_id(&self) -> Option<AA2dTransactionId> {
         let nonce_key = self.nonce_key()?;
@@ -1007,6 +1019,45 @@ mod tests {
 
         authorized.insert(account, key_id);
         assert!(subject.matches_authorized(&authorized));
+    }
+
+    #[test]
+    fn matches_authorized_inline_key_for_root_signed_tx() {
+        let user_address = Address::random();
+        let key_id = Address::random();
+
+        let mut tx = TxBuilder::aa(user_address).build();
+        if let Some(aa) = tx.inner().as_aa() {
+            let mut inner = aa.tx().clone();
+            inner.key_authorization = Some(
+                tempo_primitives::transaction::KeyAuthorization {
+                    chain_id: 42431,
+                    key_type: tempo_primitives::transaction::SignatureType::Secp256k1,
+                    key_id,
+                    expiry: None,
+                    limits: None,
+                }
+                .into_signed(
+                    tempo_primitives::transaction::PrimitiveSignature::Secp256k1(
+                        Signature::test_signature(),
+                    ),
+                ),
+            );
+            let recovered = Recovered::new_unchecked(
+                tempo_primitives::TempoTxEnvelope::AA(tempo_primitives::AASigned::new_unhashed(
+                    inner,
+                    aa.signature().clone(),
+                )),
+                user_address,
+            );
+            tx = TempoPooledTransaction::new(recovered);
+        }
+
+        let mut authorized = AuthorizedKeys::new();
+        assert!(!tx.matches_authorized_inline_key(&authorized));
+
+        authorized.insert(user_address, key_id);
+        assert!(tx.matches_authorized_inline_key(&authorized));
     }
 
     #[test]

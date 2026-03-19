@@ -224,11 +224,7 @@ where
             if !updates.authorized_keys.is_empty()
                 && tx
                     .transaction
-                    .inner()
-                    .as_aa()
-                    .is_some_and(|aa| aa.tx().key_authorization.is_some())
-                && let Some(ref subject) = keychain_subject
-                && subject.matches_authorized(&updates.authorized_keys)
+                    .matches_authorized_inline_key(&updates.authorized_keys)
             {
                 to_remove.push(*tx.hash());
                 authorized_count += 1;

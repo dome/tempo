@@ -221,15 +221,15 @@ impl PausedFeeTokenPool {
             let before = meta.entries.len();
             meta.entries.retain(|entry| {
                 let Some(subject) = entry.tx.transaction.keychain_subject() else {
-                    return true;
+                    return !entry
+                        .tx
+                        .transaction
+                        .matches_authorized_inline_key(authorized_keys);
                 };
-                let inline_key_auth = entry
+                !entry
                     .tx
                     .transaction
-                    .inner()
-                    .as_aa()
-                    .is_some_and(|aa| aa.tx().key_authorization.is_some());
-                !(inline_key_auth && subject.matches_authorized(authorized_keys))
+                    .matches_authorized_inline_key(authorized_keys)
                     && !subject.matches_revoked(revoked_keys)
                     && !subject.matches_spending_limit_update(spending_limit_updates)
                     && !subject.matches_spending_limit_update(spending_limit_spends)

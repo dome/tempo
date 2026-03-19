@@ -41,6 +41,7 @@ use reth_ethereum::{chainspec::EthChainSpec as _, cli::Commands, evm::revm::prim
 use reth_ethereum_cli::Cli;
 use reth_node_builder::{NodeHandle, WithLaunchContext};
 use reth_rpc_server_types::DefaultRpcModuleValidator;
+use reth_storage_api::DatabaseProviderFactory as _;
 use std::{sync::Arc, thread};
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 use tempo_commonware_node::{feed as consensus_feed, run_consensus_stack};
@@ -467,6 +468,9 @@ fn main() -> eyre::Result<()> {
             .await
             .wrap_err("failed launching execution node")?;
 
+        // Keep a provider handle for the persistence barrier on shutdown.
+        let provider = node.provider.clone();
+
         let _ = args_and_node_handle_tx.send((node, args));
 
         // TODO: emit these inside a span
@@ -481,6 +485,14 @@ fn main() -> eyre::Result<()> {
                 tracing::info!("received shutdown signal");
             }
         }
+
+        // Acquire a RW transaction and immediately drop it. This blocks until
+        // any pending write transaction completes, ensuring all database writes
+        // are fully flushed before the process exits. Without this, a pending
+        // persistence write could still be in-flight (static files and RocksDB
+        // committed but MDBX not yet), leading to cross-backend inconsistencies
+        // on restart.
+        drop(provider.database_provider_rw());
 
         #[cfg(feature = "pyroscope")]
         if let Some(agent) = pyroscope_agent {

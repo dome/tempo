@@ -748,7 +748,10 @@ impl AA2dPool {
     ///
     /// This is used both for single-tx removal (demote_descendants) and batch removal
     /// where we want to demote once per seq_id starting from the minimum removed nonce.
-    fn demote_from_nonce(&self, seq_id: &AASequenceId, min_nonce: u64) {
+    ///
+    /// Also removes the `independent_transactions` entry if the independent tx was demoted,
+    /// to prevent an invariant violation where a non-pending tx is tracked as independent.
+    fn demote_from_nonce(&mut self, seq_id: &AASequenceId, min_nonce: u64) {
         let start_id = AA2dTransactionId::new(*seq_id, min_nonce);
         for (_, tx) in self
             .by_id
@@ -756,6 +759,13 @@ impl AA2dPool {
             .take_while(|(other, _)| *seq_id == other.seq_id)
         {
             tx.set_pending(false);
+        }
+
+        // Clean up independent entry if the independent tx was demoted
+        if let Some(independent) = self.independent_transactions.get(seq_id) {
+            if independent.transaction.nonce() > min_nonce {
+                self.independent_transactions.remove(seq_id);
+            }
         }
     }
 
@@ -5667,6 +5677,46 @@ mod tests {
             1,
             "rejected txs with new nonce keys should not grow seq_id_to_slot"
         );
+
+        pool.assert_invariants();
+    }
+
+    /// Regression: removing a lower-nonce tx must not leave the independent tx non-pending.
+    ///
+    /// `demote_from_nonce` used to mark all txs with nonce > removed as non-pending without
+    /// cleaning up `independent_transactions`. Found by cargo-fuzz `aa2d_state_machine`.
+    #[test]
+    fn remove_lower_nonce_preserves_independent_invariant() {
+        let mut pool = AA2dPool::default();
+        let sender = Address::with_last_byte(2);
+        let nk = U256::ZERO;
+
+        // Add tx at nonce 5 (queued — gap at 0-4)
+        let tx5 = TxBuilder::aa(sender).nonce_key(nk).nonce(5).build();
+        pool.add_transaction(
+            Arc::new(wrap_valid_tx(tx5, TransactionOrigin::External)),
+            0,
+            TempoHardfork::T1,
+        )
+        .unwrap();
+
+        // Advance on-chain nonce to 5 → nonce 5 becomes independent + pending
+        let mut changes = HashMap::default();
+        changes.insert(AASequenceId::new(sender, nk), 5);
+        pool.on_nonce_changes(changes);
+
+        // Add tx at nonce 2 (queued, lower nonce in same sequence)
+        let tx2 = TxBuilder::aa(sender).nonce_key(nk).nonce(2).build();
+        let tx2_hash = *tx2.hash();
+        pool.add_transaction(
+            Arc::new(wrap_valid_tx(tx2, TransactionOrigin::External)),
+            0,
+            TempoHardfork::T1,
+        )
+        .unwrap();
+
+        // Remove nonce 2 — must not leave independent tx at nonce 5 non-pending
+        pool.remove_transactions([&tx2_hash].into_iter());
 
         pool.assert_invariants();
     }

@@ -32,3 +32,8 @@ doc = false
 name = "aa2d_state_machine"
 path = "fuzz_targets/aa2d_state_machine.rs"
 doc = false
+
+[[bin]]
+name = "paused_fee_token_pool"
+path = "fuzz_targets/paused_fee_token_pool.rs"
+doc = false

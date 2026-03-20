@@ -16,7 +16,7 @@ use reth_basic_payload_builder::{
 };
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_consensus_common::validation::MAX_RLP_BLOCK_SIZE;
-use reth_engine_tree::tree::instrumented_state::InstrumentedStateProvider;
+use reth_engine_tree::tree::{SharedPreservedSparseTrie, instrumented_state::InstrumentedStateProvider};
 use reth_errors::{ConsensusError, ProviderError};
 use reth_evm::{
     ConfigureEvm, Database, Evm, NextBlockEnvAttributes,
@@ -90,6 +90,8 @@ pub struct TempoPayloadBuilder<Provider> {
     state_provider_metrics: bool,
     /// Whether to disable state cache.
     disable_state_cache: bool,
+    /// Engine sparse trie (Arc-backed, cheap to clone). Used for sparse trie-based state root.
+    sparse_trie: SharedPreservedSparseTrie,
 }
 
 impl<Provider> TempoPayloadBuilder<Provider> {
@@ -99,6 +101,7 @@ impl<Provider> TempoPayloadBuilder<Provider> {
         evm_config: TempoEvmConfig,
         state_provider_metrics: bool,
         disable_state_cache: bool,
+        sparse_trie: SharedPreservedSparseTrie,
     ) -> Self {
         Self {
             pool,
@@ -108,6 +111,7 @@ impl<Provider> TempoPayloadBuilder<Provider> {
             highest_invalid_subblock: Default::default(),
             state_provider_metrics,
             disable_state_cache,
+            sparse_trie,
         }
     }
 }
@@ -622,6 +626,7 @@ where
         let instrumented_provider = InstrumentedFinishProvider {
             inner: &*state_provider,
             metrics: self.metrics.clone(),
+            sparse_trie: self.sparse_trie.clone(),
         };
         let BlockBuilderOutcome {
             execution_result,

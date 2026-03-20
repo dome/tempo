@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: ./run-swarm.sh <fuzz-crate-dir> <target> [processes] [duration_secs]
-# Example: ./run-swarm.sh crates/transaction-pool/fuzz merge_best_ordering 8 1800
+# Usage: ./run-parallel.sh <fuzz-crate-dir> <target> [processes] [duration_secs]
+# Example: ./run-parallel.sh crates/transaction-pool/fuzz merge_best_ordering 8 1800
 
 FUZZ_DIR="${1:?Usage: $0 <fuzz-crate-dir> <target> [processes] [duration]}"
 TARGET="${2:?Usage: $0 <fuzz-crate-dir> <target> [processes] [duration]}"
@@ -15,7 +15,7 @@ LOG_DIR="$FUZZ_DIR/logs/$TARGET"
 
 mkdir -p "$LOG_DIR"
 
-echo "🐝 Swarm fuzzing: $TARGET"
+echo "🐝 Parallel fuzzing: $TARGET"
 echo "   Processes: $PROCS"
 echo "   Duration:  ${DURATION}s per process"
 echo "   Corpus:    $CORPUS_BASE"
@@ -24,21 +24,29 @@ echo ""
 
 PIDS=()
 
+cleanup() {
+    echo ""
+    echo "Caught interrupt, killing processes..."
+    for pid in "${PIDS[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    exit 1
+}
+trap cleanup INT TERM
+
 for i in $(seq 1 "$PROCS"); do
-    SEED=$((i * 31337 + $$))
-    CORPUS_DIR="$CORPUS_BASE/swarm_$i"
-    ARTIFACT_DIR="$ARTIFACT_BASE/swarm_$i/"
+    CORPUS_DIR="$CORPUS_BASE/process_$i"
+    ARTIFACT_DIR="$ARTIFACT_BASE/process_$i/"
 
     mkdir -p "$CORPUS_DIR" "$ARTIFACT_DIR"
 
-    echo "  Starting process $i (seed=$SEED)..."
+    echo "  Starting process $i..."
 
-    TEMPO_FUZZ_SWARM_SEED="$SEED" \
     cargo fuzz run "$TARGET" "$CORPUS_DIR" \
         --fuzz-dir "$FUZZ_DIR" \
         -- -max_total_time="$DURATION" \
            -artifact_prefix="$ARTIFACT_DIR" \
-        > "$LOG_DIR/swarm_${i}.log" 2>&1 &
+        > "$LOG_DIR/process_${i}.log" 2>&1 &
 
     PIDS+=($!)
 done
@@ -76,5 +84,5 @@ echo ""
 echo "Merging corpora..."
 MERGED_DIR="$CORPUS_BASE/merged"
 mkdir -p "$MERGED_DIR"
-cargo fuzz cmin "$TARGET" --fuzz-dir "$FUZZ_DIR" "$MERGED_DIR" $CORPUS_BASE/swarm_* 2>/dev/null || true
+cargo fuzz cmin "$TARGET" --fuzz-dir "$FUZZ_DIR" "$MERGED_DIR" $CORPUS_BASE/process_* 2>/dev/null || true
 echo "Done. Merged corpus: $MERGED_DIR"

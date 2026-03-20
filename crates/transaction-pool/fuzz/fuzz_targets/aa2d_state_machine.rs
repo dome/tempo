@@ -5,7 +5,10 @@ use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
 
 use alloy_primitives::{Address, TxHash, U256, map::HashMap};
-use reth_transaction_pool::{PoolTransaction, TransactionOrigin};
+use reth_transaction_pool::{
+    PoolTransaction, TransactionOrigin,
+    pool::AddedTransaction,
+};
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_transaction_pool::{
     AA2dPool, AA2dPoolConfig, AASequenceId,
@@ -87,12 +90,6 @@ fuzz_target!(|input: Aa2dInput| {
                 nonce_key,
                 nonce,
                 priority_fee,
-            }
-            | PoolOp::ReplaceTx {
-                sender_idx,
-                nonce_key,
-                nonce,
-                priority_fee,
             } => {
                 let sender = senders[(*sender_idx % NUM_SENDERS) as usize];
                 let nk = U256::from(*nonce_key % NUM_NONCE_KEYS);
@@ -111,6 +108,43 @@ fuzz_target!(|input: Aa2dInput| {
                     .add_transaction(Arc::new(valid), 0, TempoHardfork::T1)
                     .is_ok()
                 {
+                    tracked_hashes.push(hash);
+                }
+            }
+            PoolOp::ReplaceTx {
+                sender_idx,
+                nonce_key,
+                nonce,
+                priority_fee,
+            } => {
+                let sender = senders[(*sender_idx % NUM_SENDERS) as usize];
+                let nk = U256::from(*nonce_key % NUM_NONCE_KEYS);
+                let n = *nonce as u64;
+                let fee = (*priority_fee as u128).saturating_add(1);
+
+                let tx = TxBuilder::aa(sender)
+                    .nonce_key(nk)
+                    .nonce(n)
+                    .max_priority_fee(fee)
+                    .build();
+                let hash = *tx.hash();
+                let valid = wrap_valid_tx(tx, TransactionOrigin::External);
+
+                if let Ok(added) =
+                    pool.add_transaction(Arc::new(valid), 0, TempoHardfork::T1)
+                {
+                    // Remove the replaced tx hash from tracking
+                    let replaced = match &added {
+                        AddedTransaction::Pending(pending) => pending.replaced.as_ref(),
+                        AddedTransaction::Parked { replaced, .. } => replaced.as_ref(),
+                    };
+                    if let Some(old_tx) = replaced {
+                        if let Some(pos) =
+                            tracked_hashes.iter().position(|h| h == old_tx.hash())
+                        {
+                            tracked_hashes.swap_remove(pos);
+                        }
+                    }
                     tracked_hashes.push(hash);
                 }
             }

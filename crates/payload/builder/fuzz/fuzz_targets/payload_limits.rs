@@ -9,7 +9,7 @@ use alloy_consensus::{BlockBody, Signed, TxLegacy};
 use alloy_primitives::{Address, Bytes, Signature, B256, U256};
 use reth_payload_builder::PayloadId;
 use reth_primitives_traits::SealedBlock;
-use tempo_payload_builder::is_more_subblocks;
+use tempo_payload_builder::{has_expired_transactions, is_more_subblocks};
 use tempo_payload_types::TempoBuiltPayload;
 use tempo_primitives::{
     AASigned, Block, RecoveredSubBlock, SignedSubBlock, SubBlock, SubBlockMetadata,
@@ -51,13 +51,6 @@ fn make_subblock(valid_before: Option<u64>) -> RecoveredSubBlock {
         signature: Bytes::new(),
     };
     RecoveredSubBlock::new_unchecked(signed, vec![Address::ZERO], B256::ZERO)
-}
-
-fn has_expired_transactions(subblock: &RecoveredSubBlock, timestamp: u64) -> bool {
-    subblock.transactions.iter().any(|tx| {
-        tx.as_aa()
-            .is_some_and(|tx| tx.tx().valid_before.is_some_and(|valid| valid <= timestamp))
-    })
 }
 
 fn make_payload_with_metadata(count: usize) -> TempoBuiltPayload {

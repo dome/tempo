@@ -31,13 +31,7 @@ impl Iterator for MockBestTransactions {
     type Item = u16;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.index < self.items.len() {
-            let item = self.items[self.index].0;
-            self.index += 1;
-            Some(item)
-        } else {
-            None
-        }
+        self.next_tx_and_priority().map(|(item, _)| item)
     }
 }
 
@@ -80,6 +74,10 @@ fuzz_target!(|input: MergeInput| {
 
     let expected_len = left.len() + right.len();
 
+    // Build expected multiset for exact verification
+    let mut expected: Vec<u16> = left.iter().chain(right.iter()).copied().collect();
+    expected.sort_unstable_by(|a, b| b.cmp(a));
+
     let left_iter = MockBestTransactions::new(left);
     let right_iter = MockBestTransactions::new(right);
 
@@ -108,4 +106,10 @@ fuzz_target!(|input: MergeInput| {
             window[1]
         );
     }
+
+    // Invariant 3: Exact multiset match (catches dropped/duplicated items)
+    assert_eq!(
+        results, expected,
+        "Merged output does not match expected sorted multiset"
+    );
 });

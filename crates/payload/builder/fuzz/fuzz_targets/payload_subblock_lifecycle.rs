@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use alloy_primitives::{Address, Bytes, B256};
-use tempo_payload_builder::is_more_subblocks;
+use tempo_payload_builder::{has_expired_transactions, is_more_subblocks};
 use tempo_primitives::{
     AASigned, RecoveredSubBlock, SignedSubBlock, SubBlock, SubBlockVersion, TempoSignature,
     TempoTransaction, TempoTxEnvelope,
@@ -28,13 +28,6 @@ fn make_subblock_with(valid_before: Option<u64>, fee_recipient: Address) -> Reco
         signature: Bytes::new(),
     };
     RecoveredSubBlock::new_unchecked(signed, vec![Address::ZERO], B256::ZERO)
-}
-
-fn has_expired_transactions(subblock: &RecoveredSubBlock, timestamp: u64) -> bool {
-    subblock.transactions.iter().any(|tx| {
-        tx.as_aa()
-            .is_some_and(|tx| tx.tx().valid_before.is_some_and(|valid| valid <= timestamp))
-    })
 }
 
 /// Spec for a subblock in a fuzz scenario.

@@ -20,6 +20,7 @@ enum PausedOp {
         token_idx: u8,
         count: u8,
         valid_before_base: Option<u16>,
+        sender_seed: u8,
     },
     DrainToken {
         token_idx: u8,
@@ -58,6 +59,7 @@ fuzz_target!(|input: PausedInput| {
                 token_idx,
                 count,
                 valid_before_base,
+                sender_seed,
             } => {
                 let tidx = *token_idx % NUM_TOKENS;
                 let token = tokens[tidx as usize];
@@ -65,7 +67,7 @@ fuzz_target!(|input: PausedInput| {
 
                 let entries: Vec<PausedEntry> = (0..n)
                     .map(|i| {
-                        let sender = Address::random();
+                        let sender = Address::with_last_byte(sender_seed.wrapping_add(i as u8));
                         let tx = TxBuilder::aa(sender).build();
                         let hash = *tx.hash();
                         all_hashes.push(hash);

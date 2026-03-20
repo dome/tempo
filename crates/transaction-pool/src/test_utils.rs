@@ -64,8 +64,8 @@ pub struct TxBuilder {
 impl Default for TxBuilder {
     fn default() -> Self {
         Self {
-            kind: TxKind::Call(Address::random()),
-            sender: Address::random(),
+            kind: TxKind::Call(Address::ZERO),
+            sender: Address::ZERO,
             nonce_key: U256::ZERO,
             nonce: 0,
             gas_limit: 1_000_000,

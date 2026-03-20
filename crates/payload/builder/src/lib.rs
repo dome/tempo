@@ -224,6 +224,7 @@ where
     where
         Txs: BestTransactions<Item = Arc<ValidPoolTransaction<TempoPooledTransaction>>>,
     {
+        let build_span = Span::current();
         let BuildArguments {
             mut cached_reads,
             config,
@@ -628,14 +629,12 @@ where
             hashed_state,
             trie_updates,
         } = builder.finish(instrumented_provider)?;
-        let accounts_changed = hashed_state.accounts.len();
-        let storage_slots_changed: usize = hashed_state
-            .storages
-            .values()
-            .map(|s| s.storage.len())
-            .sum();
-        finish_span.record("accounts_changed", accounts_changed);
-        finish_span.record("storage_slots_changed", storage_slots_changed);
+        if tracing::enabled!(target: "payload_builder", Level::DEBUG) {
+            finish_span.record("accounts_changed", hashed_state.accounts.len());
+            let storage_slots_changed: usize =
+                hashed_state.storages.values().map(|s| s.storage.len()).sum();
+            finish_span.record("storage_slots_changed", storage_slots_changed);
+        }
         drop(finish_span);
         let builder_finish_elapsed = builder_finish_start.elapsed();
         self.metrics
@@ -693,9 +692,8 @@ where
             .rlp_block_size_bytes_last
             .set(rlp_length as f64);
 
-        let span = Span::current();
-        span.record("total_txs", total_transactions);
-        span.record("gas_used", gas_used);
+        build_span.record("total_txs", total_transactions);
+        build_span.record("gas_used", gas_used);
 
         info!(
             parent_hash = ?sealed_block.parent_hash(),

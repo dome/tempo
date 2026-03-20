@@ -1978,53 +1978,13 @@ def "main bench" [
             return
         }
 
+        # Load the saved config and run B-F-F-B passes
+        let bench_cfg = (open $config_path | from json)
         for run in $runs {
-            # bench-recover restores the entire schelk volume to the promoted
-            # virgin state. In dual-hardfork mode this resets both baseline-db
-            # and feature-db subdirs at once.
-            bench-recover $datadir
-            run-bench-single $run.tempo $baseline_bench_bin $run.genesis $run.datadir $run.label $results_dir $tps $duration $accounts $max_concurrent_requests $weights $preset $bench_args $loud $node_args $bloat $run.git_ref $benchmark_id $reference_epoch $samply $samply_args_list $tracy $tracy_filter $tracy_seconds $tracy_offset $tracing_otlp
+            do-bench-run $bench_cfg $run.label
         }
 
-        # Generate summary report
-        let baseline_label = if $dual_hardfork { $"($baseline) \(($baseline_hardfork | str upcase)\)" } else { $baseline }
-        let feature_label = if $dual_hardfork { $"($feature) \(($feature_hardfork | str upcase)\)" } else { $feature }
-        generate-summary $results_dir $baseline_label $feature_label $bloat $preset $tps $duration --benchmark-id $benchmark_id --reference-epoch $reference_epoch
-
-        # Cleanup worktrees (only those we created)
-        if $baseline != "local" or $feature != "local" {
-            print "Cleaning up worktrees..."
-        }
-        if $baseline != "local" { try { git worktree remove --force $baseline_wt } catch { } }
-        if $feature != "local" { try { git worktree remove --force $feature_wt } catch { } }
-
-        if not $no_infra {
-            docker compose -f $"($BENCH_DIR)/docker-compose.yml" down
-        }
-
-        # Upload samply profiles to Firefox Profiler
-        if $samply {
-            print "\nUploading samply profiles to Firefox Profiler..."
-            for run in $runs {
-                let profile = $"($results_dir)/profile-($run.label).json.gz"
-                let url = (upload-samply-profile $profile)
-                if $url != null {
-                    $url | save -f $"($results_dir)/profile-($run.label)-url.txt"
-                }
-            }
-        }
-
-        # Upload tracy profiles to R2
-        if $tracy != "off" {
-            print "\nUploading tracy profiles to R2..."
-            for run in $runs {
-                let profile = $"($results_dir)/tracy-profile-($run.label).tracy"
-                let viewer_url = (upload-tracy-profile $profile $run.label $run.git_ref)
-                if $viewer_url != null {
-                    $viewer_url | save -f $"($results_dir)/tracy-($run.label)-url.txt"
-                }
-            }
-        }
+        do-bench-finalize $bench_cfg
 
         restore-system-tuning $tuning_state
         print $"\nComparison complete! Results: ($results_dir)/"
@@ -2145,12 +2105,8 @@ def "main bench" [
     print "Done."
 }
 
-# Run a single benchmark pass (used by CI to split B-F-F-B into separate steps)
-def "main bench-run-single" [
-    --config: string                                # Path to bench-config.json from bench --setup-only
-    --label: string                                 # Run label: baseline-1, feature-1, feature-2, baseline-2
-] {
-    let cfg = (open $config | from json)
+# Run a single benchmark pass from a config record
+def do-bench-run [cfg: record, label: string] {
     let matched = ($cfg.runs | where label == $label)
     if ($matched | length) == 0 {
         print $"Error: unknown run label '($label)'. Valid: ($cfg.runs | get label | str join ', ')"
@@ -2162,12 +2118,8 @@ def "main bench-run-single" [
     run-bench-single $run.tempo $cfg.baseline_bench_bin $run.genesis $run.datadir $run.label $cfg.results_dir $cfg.tps $cfg.duration $cfg.accounts $cfg.max_concurrent_requests $cfg.weights $cfg.preset $cfg.bench_args $cfg.loud $cfg.node_args $cfg.bloat $run.git_ref $cfg.benchmark_id $cfg.reference_epoch $cfg.samply $cfg.samply_args $cfg.tracy $cfg.tracy_filter $cfg.tracy_seconds $cfg.tracy_offset $cfg.tracing_otlp
 }
 
-# Generate summary report after all bench runs complete
-def "main bench-finalize" [
-    --config: string                                # Path to bench-config.json from bench --setup-only
-] {
-    let cfg = (open $config | from json)
-
+# Finalize benchmark: generate summary, upload profiles, clean up worktrees
+def do-bench-finalize [cfg: record] {
     let baseline_label = if $cfg.dual_hardfork { $"($cfg.baseline) \(($cfg.baseline_hardfork | str upcase)\)" } else { $cfg.baseline }
     let feature_label = if $cfg.dual_hardfork { $"($cfg.feature) \(($cfg.feature_hardfork | str upcase)\)" } else { $cfg.feature }
     generate-summary $cfg.results_dir $baseline_label $feature_label $cfg.bloat $cfg.preset $cfg.tps $cfg.duration --benchmark-id $cfg.benchmark_id --reference-epoch $cfg.reference_epoch
@@ -2206,7 +2158,23 @@ def "main bench-finalize" [
             }
         }
     }
+}
 
+# Run a single benchmark pass (used by CI to split B-F-F-B into separate steps)
+def "main bench-run-single" [
+    --config: string                                # Path to bench-config.json from bench --setup-only
+    --label: string                                 # Run label: baseline-1, feature-1, feature-2, baseline-2
+] {
+    let cfg = (open $config | from json)
+    do-bench-run $cfg $label
+}
+
+# Generate summary report after all bench runs complete
+def "main bench-finalize" [
+    --config: string                                # Path to bench-config.json from bench --setup-only
+] {
+    let cfg = (open $config | from json)
+    do-bench-finalize $cfg
     print $"\nBenchmark finalized! Results: ($cfg.results_dir)/"
 }
 

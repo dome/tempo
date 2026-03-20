@@ -160,17 +160,13 @@ impl HashedPostStateProvider for InstrumentedFinishProvider<'_> {
         let span = debug_span!(target: "payload_builder", "hashed_post_state",
             accounts = tracing::field::Empty,
             storage_slots = tracing::field::Empty,
-        );
-        let result = {
-            let _guard = span.enter();
-            self.inner.hashed_post_state(bundle_state)
-        };
-        if !span.is_disabled() {
-            span.record("accounts", result.accounts.len());
-            let storage_slots: usize =
-                result.storages.values().map(|s| s.storage.len()).sum();
-            span.record("storage_slots", storage_slots);
-        }
+        )
+        .entered();
+        let result = self.inner.hashed_post_state(bundle_state);
+        span.record("accounts", result.accounts.len());
+        span.record("storage_slots",
+            result.storages.values().map(|s| s.storage.len()).sum::<usize>());
+        drop(span);
         self.metrics
             .hashed_post_state_duration_seconds
             .record(start.elapsed());
@@ -201,14 +197,13 @@ impl StateRootProvider for InstrumentedFinishProvider<'_> {
         let start = Instant::now();
         let span = debug_span!(target: "payload_builder", "state_root_with_updates",
             storage_tries = tracing::field::Empty,
-        );
-        let result = {
-            let _guard = span.enter();
-            self.inner.state_root_with_updates(hashed_state)
-        };
+        )
+        .entered();
+        let result = self.inner.state_root_with_updates(hashed_state);
         if let Ok((_, ref trie_updates)) = result {
             span.record("storage_tries", trie_updates.storage_tries_ref().len());
         }
+        drop(span);
         self.metrics
             .state_root_with_updates_duration_seconds
             .record(start.elapsed());

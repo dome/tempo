@@ -1,12 +1,13 @@
 [package]
 name = "tempo-contracts"
-description = "TODO:"
+description = "Tempo blockchain contract bindings"
+repository = "https://github.com/tempoxyz/tempo"
 
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-publish.workspace = true
+publish = true
 
 [lints]
 workspace = true

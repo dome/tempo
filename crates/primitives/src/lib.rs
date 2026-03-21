@@ -25,10 +25,8 @@ extern crate alloc;
 
 use once_cell as _;
 
-#[cfg(feature = "reth")]
 use alloy_primitives::Log;
-#[cfg(feature = "reth")]
-use reth_ethereum_primitives::EthereumReceipt;
+
 #[cfg(feature = "reth")]
 use reth_primitives_traits::NodePrimitives;
 
@@ -39,8 +37,7 @@ pub type Block = alloy_consensus::Block<TempoTxEnvelope, TempoHeader>;
 pub type BlockBody = alloy_consensus::BlockBody<TempoTxEnvelope, TempoHeader>;
 
 /// Tempo receipt.
-#[cfg(feature = "reth")]
-pub type TempoReceipt<L = Log> = EthereumReceipt<TempoTxType, L>;
+pub type TempoReceipt<L = Log> = alloy_consensus::EthereumReceipt<TempoTxType, L>;
 
 /// A [`NodePrimitives`] implementation for Tempo.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]

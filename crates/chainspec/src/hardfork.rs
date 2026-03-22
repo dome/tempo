@@ -193,24 +193,22 @@ impl TempoHardfork {
     /// - T1+: 20 billion attodollars per gas (targets ~0.1 cent per TIP-20 transfer)
     ///
     /// Economic conversion: ceil(basefee × gas_used / 10^12) = cost in microdollars (TIP-20 tokens)
-    pub const fn base_fee(&self) -> u64 {
-        match self {
-            Self::T1 | Self::T1A | Self::T1B | Self::T1C | Self::T2 => {
-                crate::spec::TEMPO_T1_BASE_FEE
-            }
-            Self::T0 | Self::Genesis => crate::spec::TEMPO_T0_BASE_FEE,
+    pub fn base_fee(&self) -> u64 {
+        if *self >= Self::T1 {
+            crate::spec::TEMPO_T1_BASE_FEE
+        } else {
+            crate::spec::TEMPO_T0_BASE_FEE
         }
     }
 
     /// Returns the fixed general gas limit for T1+, or None for pre-T1.
     /// - Pre-T1: None
     /// - T1+: 30M gas (fixed)
-    pub const fn general_gas_limit(&self) -> Option<u64> {
-        match self {
-            Self::T1 | Self::T1A | Self::T1B | Self::T1C | Self::T2 => {
-                Some(crate::spec::TEMPO_T1_GENERAL_GAS_LIMIT)
-            }
-            Self::T0 | Self::Genesis => None,
+    pub fn general_gas_limit(&self) -> Option<u64> {
+        if *self >= Self::T1 {
+            Some(crate::spec::TEMPO_T1_GENERAL_GAS_LIMIT)
+        } else {
+            None
         }
     }
 
@@ -219,32 +217,29 @@ impl TempoHardfork {
     /// - T1A+: 30M gas (allows maximum-sized contract deployments under [TIP-1000] state creation)
     ///
     /// [TIP-1000]: <https://docs.tempo.xyz/protocol/tips/tip-1000>
-    pub const fn tx_gas_limit_cap(&self) -> Option<u64> {
-        match self {
-            Self::T1A | Self::T1B | Self::T1C | Self::T2 => {
-                Some(crate::spec::TEMPO_T1_TX_GAS_LIMIT_CAP)
-            }
-            Self::T0 | Self::Genesis | Self::T1 => Some(MAX_TX_GAS_LIMIT_OSAKA),
+    pub fn tx_gas_limit_cap(&self) -> u64 {
+        if *self >= Self::T1A {
+            crate::spec::TEMPO_T1_TX_GAS_LIMIT_CAP
+        } else {
+            MAX_TX_GAS_LIMIT_OSAKA
         }
     }
 
     /// Gas cost for using an existing 2D nonce key
-    pub const fn gas_existing_nonce_key(&self) -> u64 {
-        match self {
-            Self::Genesis | Self::T0 | Self::T1 | Self::T1A | Self::T1B | Self::T1C => {
-                crate::spec::TEMPO_T1_EXISTING_NONCE_KEY_GAS
-            }
-            Self::T2 => crate::spec::TEMPO_T2_EXISTING_NONCE_KEY_GAS,
+    pub fn gas_existing_nonce_key(&self) -> u64 {
+        if *self >= Self::T2 {
+            crate::spec::TEMPO_T2_EXISTING_NONCE_KEY_GAS
+        } else {
+            crate::spec::TEMPO_T1_EXISTING_NONCE_KEY_GAS
         }
     }
 
     /// Gas cost for using a new 2D nonce key
-    pub const fn gas_new_nonce_key(&self) -> u64 {
-        match self {
-            Self::Genesis | Self::T0 | Self::T1 | Self::T1A | Self::T1B | Self::T1C => {
-                crate::spec::TEMPO_T1_NEW_NONCE_KEY_GAS
-            }
-            Self::T2 => crate::spec::TEMPO_T2_NEW_NONCE_KEY_GAS,
+    pub fn gas_new_nonce_key(&self) -> u64 {
+        if *self >= Self::T2 {
+            crate::spec::TEMPO_T2_NEW_NONCE_KEY_GAS
+        } else {
+            crate::spec::TEMPO_T1_NEW_NONCE_KEY_GAS
         }
     }
 }

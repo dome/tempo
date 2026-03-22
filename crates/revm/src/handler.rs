@@ -3356,8 +3356,6 @@ mod tests {
         const TEST_TARGET: Address = Address::new([0xAA; 20]);
         const TEST_NONCE_KEY: U256 = U256::from_limbs([42, 0, 0, 0]);
         const SPEC: TempoHardfork = TempoHardfork::T1;
-        const NEW_NONCE_KEY_GAS: u64 = SPEC.gas_new_nonce_key();
-        const EXISTING_NONCE_KEY_GAS: u64 = SPEC.gas_existing_nonce_key();
 
         // Create T1 config with TIP-1000 gas params
         let mut cfg = CfgEnv::<TempoHardfork>::default();
@@ -3416,7 +3414,7 @@ mod tests {
         // Delta-based assertion: the difference should be new_account_cost - EXISTING_NONCE_KEY_GAS
         // nonce=0 charges 250k (new account), nonce>0 charges 5k (existing key update)
         let gas_delta = gas_nonce_zero.initial_gas - gas_nonce_five.initial_gas;
-        let expected_delta = new_account_cost - EXISTING_NONCE_KEY_GAS;
+        let expected_delta = new_account_cost - SPEC.gas_existing_nonce_key();
         assert_eq!(
             gas_delta, expected_delta,
             "T1 gas difference between nonce=0 and nonce>0 should be {expected_delta} (new_account_cost - EXISTING_NONCE_KEY_GAS), got {gas_delta}"
@@ -3424,8 +3422,9 @@ mod tests {
 
         // Verify it's NOT using the pre-T1 NEW_NONCE_KEY_GAS (22,100)
         assert_ne!(
-            gas_delta, NEW_NONCE_KEY_GAS,
-            "T1 should NOT use pre-T1 NEW_NONCE_KEY_GAS ({NEW_NONCE_KEY_GAS}) for nonce=0 transactions"
+            gas_delta,
+            SPEC.gas_new_nonce_key(),
+            "T1 should NOT use pre-T1 NEW_NONCE_KEY_GAS for nonce=0 transactions"
         );
 
         // Case 3: nonce == 0 with regular nonce (nonce_key=0) -> same +250k charge
@@ -3459,7 +3458,6 @@ mod tests {
         const TEST_TARGET: Address = Address::new([0xBB; 20]);
         const TEST_NONCE_KEY: U256 = U256::from_limbs([99, 0, 0, 0]);
         const SPEC: TempoHardfork = TempoHardfork::T1;
-        const EXISTING_NONCE_KEY_GAS: u64 = SPEC.gas_existing_nonce_key();
 
         let mut cfg = CfgEnv::<TempoHardfork>::default();
         cfg.spec = SPEC;
@@ -3502,8 +3500,8 @@ mod tests {
 
         assert_eq!(
             gas_existing.initial_gas,
-            BASE_INTRINSIC_GAS + EXISTING_NONCE_KEY_GAS,
-            "T1 existing 2D nonce key (nonce>0) should charge BASE + EXISTING_NONCE_KEY_GAS ({EXISTING_NONCE_KEY_GAS})"
+            BASE_INTRINSIC_GAS + SPEC.gas_existing_nonce_key(),
+            "T1 existing 2D nonce key (nonce>0) should charge BASE + EXISTING_NONCE_KEY_GAS"
         );
 
         // Case 2: Regular nonce (nonce_key = 0) with nonce > 0 should NOT charge extra gas
@@ -3518,8 +3516,9 @@ mod tests {
         // Verify the delta between 2D and regular nonce is exactly EXISTING_NONCE_KEY_GAS
         let gas_delta = gas_existing.initial_gas - gas_regular.initial_gas;
         assert_eq!(
-            gas_delta, EXISTING_NONCE_KEY_GAS,
-            "Difference between existing 2D nonce and regular nonce should be EXISTING_NONCE_KEY_GAS ({EXISTING_NONCE_KEY_GAS})"
+            gas_delta,
+            SPEC.gas_existing_nonce_key(),
+            "Difference between existing 2D nonce and regular nonce should be EXISTING_NONCE_KEY_GAS"
         );
     }
 }

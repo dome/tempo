@@ -134,7 +134,7 @@ impl ConfigureEvm for TempoEvmConfig {
 
         // Apply TIP-1000 gas params for T1 hardfork.
         let mut cfg_env = cfg_env.with_spec_and_gas_params(spec, tempo_gas_params(spec));
-        cfg_env.tx_gas_limit_cap = spec.tx_gas_limit_cap();
+        cfg_env.tx_gas_limit_cap = Some(spec.tx_gas_limit_cap());
 
         Ok(EvmEnv {
             cfg_env,
@@ -171,7 +171,7 @@ impl ConfigureEvm for TempoEvmConfig {
 
         // Apply TIP-1000 gas params for T1 hardfork.
         let mut cfg_env = cfg_env.with_spec_and_gas_params(spec, tempo_gas_params(spec));
-        cfg_env.tx_gas_limit_cap = spec.tx_gas_limit_cap();
+        cfg_env.tx_gas_limit_cap = Some(spec.tx_gas_limit_cap());
 
         Ok(EvmEnv {
             cfg_env,

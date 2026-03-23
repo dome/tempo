@@ -12,7 +12,7 @@ use alloy::{
     primitives::Address,
     sol_types::{SolCall, SolInterface},
 };
-use revm::precompile::{PrecompileError, PrecompileFailure, PrecompileResult};
+use revm::precompile::{PrecompileError, PrecompileResult};
 use tempo_contracts::precompiles::{IRolesAuth::IRolesAuthCalls, ITIP20::ITIP20Calls, TIP20Error};
 
 /// Decoded call variant — either a TIP-20 token call or a role-management call.
@@ -38,7 +38,7 @@ impl Precompile for TIP20Token {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
         self.storage
             .deduct_gas(input_cost(calldata.len()))
-            .map_err(|_| PrecompileFailure::from(PrecompileError::OutOfGas))?;
+            .map_err(|_| PrecompileError::OutOfGas)?;
 
         // Ensure that the token is initialized (has bytecode)
         // Note that if the initialization check fails, this is treated as uninitialized

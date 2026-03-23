@@ -10,7 +10,7 @@ use crate::{
     view,
 };
 use alloy::{primitives::Address, sol_types::SolInterface};
-use revm::precompile::{PrecompileError, PrecompileFailure, PrecompileResult};
+use revm::precompile::{PrecompileError, PrecompileResult};
 use tempo_contracts::precompiles::{IFeeManager::IFeeManagerCalls, ITIPFeeAMM::ITIPFeeAMMCalls};
 
 /// Unified calldata discriminant for both `IFeeManager` and `ITIPFeeAMM` selectors.
@@ -36,7 +36,7 @@ impl Precompile for TipFeeManager {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
         self.storage
             .deduct_gas(input_cost(calldata.len()))
-            .map_err(|_| PrecompileFailure::from(PrecompileError::OutOfGas))?;
+            .map_err(|_| PrecompileError::OutOfGas)?;
 
         dispatch_call(calldata, TipFeeManagerCall::decode, |call| match call {
             // IFeeManager view functions

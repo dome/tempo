@@ -9,7 +9,7 @@ use alloy::{
     primitives::Address,
     sol_types::{SolCall, SolInterface},
 };
-use revm::precompile::{PrecompileError, PrecompileFailure, PrecompileResult};
+use revm::precompile::{PrecompileError, PrecompileResult};
 use tempo_contracts::precompiles::IValidatorConfig::{
     IValidatorConfigCalls, changeValidatorStatusByIndexCall,
 };
@@ -18,7 +18,7 @@ impl Precompile for ValidatorConfig {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
         self.storage
             .deduct_gas(input_cost(calldata.len()))
-            .map_err(|_| PrecompileFailure::from(PrecompileError::OutOfGas))?;
+            .map_err(|_| PrecompileError::OutOfGas)?;
 
         dispatch_call(
             calldata,

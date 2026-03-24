@@ -8,7 +8,7 @@
 
 use std::{
     fs::File,
-    io::{BufReader, Read},
+    io::{BufReader, Read as _},
     path::PathBuf,
 };
 
@@ -36,7 +36,7 @@ const MAGIC: &[u8; 8] = b"TEMPOSB\x00";
 const VERSION: u16 = 1;
 
 /// Default number of storage entries to process before committing.
-const DEFAULT_COMMIT_INTERVAL: u64 = 8_000_000;
+const DEFAULT_COMMIT_INTERVAL: u64 = 2_000_000;
 
 /// Number of entries to read per I/O chunk (256k entries × 64 bytes = 16 MiB).
 const ENTRY_READ_CHUNK: usize = 256 * 1024;
@@ -89,7 +89,10 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
         let mut reader = BufReader::with_capacity(64 * 1024 * 1024, file);
 
         let commit_interval = self.commit_interval;
-        ensure!(commit_interval > 0, "commit_interval must be greater than 0");
+        ensure!(
+            commit_interval > 0,
+            "commit_interval must be greater than 0"
+        );
         let mut total_entries = 0u64;
         let mut total_tokens = 0u64;
         let mut total_commits = 0u64;
@@ -98,25 +101,49 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
         // Track addresses for account hashing (small — only token addresses)
         let mut addresses_seen: HashSet<alloy_primitives::Address> = HashSet::default();
 
-        // Open cursors once per transaction
-        let tx = provider_rw.tx_ref();
-        let mut account_cursor = tx.cursor_write::<tables::PlainAccountState>()?;
-        let mut storage_cursor = tx.cursor_dup_write::<tables::PlainStorageState>()?;
-        let mut hashed_account_cursor = tx.cursor_write::<tables::HashedAccounts>()?;
-        let mut hashed_storage_cursor = tx.cursor_dup_write::<tables::HashedStorages>()?;
-
         // Reusable I/O buffer for chunked reads
         let mut io_buf: Vec<u8> = vec![0u8; ENTRY_READ_CHUNK * 64];
 
+        // Open cursors scoped to current transaction. Helper recreates them
+        // after each commit so we never hold cursors across tx boundaries.
+        macro_rules! open_cursors {
+            ($provider:expr) => {{
+                let tx = $provider.tx_ref();
+                let ac = tx.cursor_write::<tables::PlainAccountState>()?;
+                let sc = tx.cursor_dup_write::<tables::PlainStorageState>()?;
+                let hac = tx.cursor_write::<tables::HashedAccounts>()?;
+                let hsc = tx.cursor_dup_write::<tables::HashedStorages>()?;
+                (ac, sc, hac, hsc)
+            }};
+        }
+
+        let (
+            mut account_cursor,
+            mut storage_cursor,
+            mut hashed_account_cursor,
+            mut hashed_storage_cursor,
+        ) = open_cursors!(provider_rw);
+
         // Process blocks from binary file
         loop {
-            // Try to read header
+            // Try to read header — distinguish clean EOF (0 bytes) from truncation
             let mut header_buf = [0u8; 40];
-            match reader.read_exact(&mut header_buf) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e).wrap_err("failed to read block header"),
+            let mut header_filled = 0usize;
+            while header_filled < 40 {
+                match reader.read(&mut header_buf[header_filled..]) {
+                    Ok(0) => break,
+                    Ok(n) => header_filled += n,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e).wrap_err("failed to read block header"),
+                }
             }
+            if header_filled == 0 {
+                break; // clean EOF at block boundary
+            }
+            ensure!(
+                header_filled == 40,
+                "truncated block header: got {header_filled} bytes, expected 40"
+            );
 
             // Validate magic
             ensure!(
@@ -188,17 +215,19 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
                     storage_cursor.upsert(address, &entry)?;
 
                     // Write hashed storage directly
-                    let hashed_entry =
-                        StorageEntry { key: keccak256(slot), value };
+                    let hashed_entry = StorageEntry {
+                        key: keccak256(slot),
+                        value,
+                    };
                     hashed_storage_cursor.upsert(hashed_address, &hashed_entry)?;
 
                     total_entries += 1;
                     entries_since_commit += 1;
                     processed += 1;
 
-                    // Commit periodically
+                    // Commit periodically — drop all cursors so the tx borrow
+                    // is released before calling commit().
                     if entries_since_commit >= commit_interval {
-                        // Drop cursors before commit
                         drop(account_cursor);
                         drop(storage_cursor);
                         drop(hashed_account_cursor);
@@ -209,16 +238,12 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
                         total_commits += 1;
                         entries_since_commit = 0;
 
-                        // Reopen cursors
-                        let tx = provider_rw.tx_ref();
-                        account_cursor =
-                            tx.cursor_write::<tables::PlainAccountState>()?;
-                        storage_cursor =
-                            tx.cursor_dup_write::<tables::PlainStorageState>()?;
-                        hashed_account_cursor =
-                            tx.cursor_write::<tables::HashedAccounts>()?;
-                        hashed_storage_cursor =
-                            tx.cursor_dup_write::<tables::HashedStorages>()?;
+                        (
+                            account_cursor,
+                            storage_cursor,
+                            hashed_account_cursor,
+                            hashed_storage_cursor,
+                        ) = open_cursors!(provider_rw);
                     }
 
                     // Log progress periodically
@@ -266,23 +291,16 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
         drop(hashed_account_cursor);
         drop(hashed_storage_cursor);
 
+        // Final commit
+        provider_rw.commit()?;
+        total_commits += 1;
+
         info!(
             target: "tempo::cli",
             total_tokens,
             total_entries,
             total_commits,
             addresses = addresses_seen.len(),
-            "All storage and hashed state written"
-        );
-
-        // Final commit
-        provider_rw.commit()?;
-
-        info!(
-            target: "tempo::cli",
-            total_tokens,
-            total_entries,
-            total_commits = total_commits + 1,
             "Binary state dump loaded successfully"
         );
 

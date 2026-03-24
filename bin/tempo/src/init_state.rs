@@ -82,7 +82,7 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
         let mut reader = BufReader::with_capacity(64 * 1024 * 1024, file);
 
         let mut total_entries = 0u64;
-        let mut total_tokens = 0u64;
+        let mut total_blocks = 0u64;
         let mut total_commits = 0u64;
 
         // Track addresses for account hashing (small — only token addresses)
@@ -136,17 +136,15 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
             if batch_address.is_some() && batch_address != Some(address) && !batch.is_empty() {
                 let flush_addr = batch_address.unwrap();
                 provider_rw
-                    .insert_storage_for_hashing([(flush_addr, batch.drain(..).into_iter())])?;
+                    .insert_storage_for_hashing([(flush_addr, batch.drain(..))])?;
                 provider_rw.commit()?;
                 provider_rw = provider_factory.database_provider_rw()?;
                 total_commits += 1;
             }
             batch_address = Some(address);
 
-            addresses_seen.insert(address);
-
-            // Ensure account exists in plain state
-            {
+            // Ensure account exists in plain state (only on first encounter)
+            if addresses_seen.insert(address) {
                 let tx = provider_rw.tx_ref();
                 let mut account_cursor = tx.cursor_write::<tables::PlainAccountState>()?;
                 if account_cursor.seek_exact(address)?.is_none() {
@@ -154,10 +152,13 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
                 }
             }
 
-            // Read and insert entries
+            // Read and insert entries — cursor is hoisted per block to avoid per-entry overhead
             let mut entry_buf = [0u8; 64];
             let start = std::time::Instant::now();
             let mut last_log = start;
+
+            let tx = provider_rw.tx_ref();
+            let mut storage_cursor = tx.cursor_dup_write::<tables::PlainStorageState>()?;
 
             for i in 0..pair_count {
                 reader
@@ -175,11 +176,7 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
                 let entry = StorageEntry { key: slot, value };
 
                 // Insert into plain storage state
-                {
-                    let tx = provider_rw.tx_ref();
-                    let mut storage_cursor = tx.cursor_dup_write::<tables::PlainStorageState>()?;
-                    storage_cursor.upsert(address, &entry)?;
-                }
+                storage_cursor.upsert(address, &entry)?;
 
                 // Collect for hashed storage
                 batch.push(entry);
@@ -187,18 +184,18 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
 
                 // Flush batch when it reaches the threshold
                 if batch.len() >= HASHING_BATCH_SIZE {
+                    // Drop cursor before commit
+                    drop(storage_cursor);
+
                     provider_rw
-                        .insert_storage_for_hashing([(address, batch.drain(..).into_iter())])?;
+                        .insert_storage_for_hashing([(address, batch.drain(..))])?;
                     provider_rw.commit()?;
                     provider_rw = provider_factory.database_provider_rw()?;
                     total_commits += 1;
 
-                    // Re-ensure account exists after reopen (idempotent)
+                    // Reopen cursor on new transaction
                     let tx = provider_rw.tx_ref();
-                    let mut account_cursor = tx.cursor_write::<tables::PlainAccountState>()?;
-                    if account_cursor.seek_exact(address)?.is_none() {
-                        account_cursor.upsert(address, &Account::default())?;
-                    }
+                    storage_cursor = tx.cursor_dup_write::<tables::PlainStorageState>()?;
                 }
 
                 let now = std::time::Instant::now();
@@ -220,19 +217,23 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
                 }
             }
 
-            total_tokens += 1;
+            // Drop cursor before potential flush at top of next iteration
+            drop(storage_cursor);
+
+            total_blocks += 1;
         }
 
         // Flush any remaining batch entries
         if let Some(addr) = batch_address {
             if !batch.is_empty() {
-                provider_rw.insert_storage_for_hashing([(addr, batch.drain(..).into_iter())])?;
+                provider_rw.insert_storage_for_hashing([(addr, batch.drain(..))])?;
             }
         }
 
         info!(
             target: "tempo::cli",
-            total_tokens,
+            total_blocks,
+            unique_tokens = addresses_seen.len(),
             total_entries,
             total_commits,
             "Plain and hashed storage written, writing hashed accounts..."
@@ -257,7 +258,8 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
 
         info!(
             target: "tempo::cli",
-            total_tokens,
+            total_blocks,
+            unique_tokens = addresses_seen.len(),
             total_entries,
             total_commits = total_commits + 1,
             "Binary state dump loaded successfully"

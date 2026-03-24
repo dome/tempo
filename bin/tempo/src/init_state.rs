@@ -12,7 +12,7 @@ use std::{
     path::PathBuf,
 };
 
-use alloy_primitives::{B256, U256, map::HashSet};
+use alloy_primitives::{B256, U256, map::{HashMap, HashSet}};
 use clap::Parser;
 use eyre::{Context as _, ensure};
 use reth_chainspec::EthereumHardforks;
@@ -36,7 +36,7 @@ const MAGIC: &[u8; 8] = b"TEMPOSB\x00";
 const VERSION: u16 = 1;
 
 /// Number of storage entries to batch before flushing hashed storage and committing.
-const HASHING_BATCH_SIZE: usize = 1_000_000;
+const HASHING_BATCH_SIZE: usize = 8_000_000;
 
 /// Initialize state from a binary dump file.
 #[derive(Debug, Parser)]
@@ -88,9 +88,9 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
         // Track addresses for account hashing (small — only token addresses)
         let mut addresses_seen: HashSet<alloy_primitives::Address> = HashSet::default();
 
-        // Batch buffer for hashed storage inserts
-        let mut batch: Vec<StorageEntry> = Vec::with_capacity(HASHING_BATCH_SIZE);
-        let mut batch_address: Option<alloy_primitives::Address> = None;
+        // Batch buffer for hashed storage inserts (multi-address)
+        let mut batch: HashMap<alloy_primitives::Address, Vec<StorageEntry>> = HashMap::default();
+        let mut batch_total: usize = 0;
 
         // Process blocks from binary file
         loop {
@@ -132,17 +132,6 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
                 "Processing token storage block"
             );
 
-            // Flush batch if we're switching to a different address
-            if batch_address.is_some() && batch_address != Some(address) && !batch.is_empty() {
-                let flush_addr = batch_address.unwrap();
-                provider_rw
-                    .insert_storage_for_hashing([(flush_addr, batch.drain(..))])?;
-                provider_rw.commit()?;
-                provider_rw = provider_factory.database_provider_rw()?;
-                total_commits += 1;
-            }
-            batch_address = Some(address);
-
             // Ensure account exists in plain state (only on first encounter)
             if addresses_seen.insert(address) {
                 let tx = provider_rw.tx_ref();
@@ -179,16 +168,18 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
                 storage_cursor.upsert(address, &entry)?;
 
                 // Collect for hashed storage
-                batch.push(entry);
+                batch.entry(address).or_default().push(entry);
+                batch_total += 1;
                 total_entries += 1;
 
                 // Flush batch when it reaches the threshold
-                if batch.len() >= HASHING_BATCH_SIZE {
+                if batch_total >= HASHING_BATCH_SIZE {
                     // Drop cursor before commit
                     drop(storage_cursor);
 
                     provider_rw
-                        .insert_storage_for_hashing([(address, batch.drain(..))])?;
+                        .insert_storage_for_hashing(batch.drain())?;
+                    batch_total = 0;
                     provider_rw.commit()?;
                     provider_rw = provider_factory.database_provider_rw()?;
                     total_commits += 1;
@@ -224,10 +215,8 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
         }
 
         // Flush any remaining batch entries
-        if let Some(addr) = batch_address {
-            if !batch.is_empty() {
-                provider_rw.insert_storage_for_hashing([(addr, batch.drain(..))])?;
-            }
+        if !batch.is_empty() {
+            provider_rw.insert_storage_for_hashing(batch.drain())?;
         }
 
         info!(

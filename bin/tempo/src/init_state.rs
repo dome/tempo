@@ -229,7 +229,7 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
             "Hashed accounts written"
         );
 
-        // Final commit
+        // Commit the transaction
         provider_rw.commit()?;
 
         info!(

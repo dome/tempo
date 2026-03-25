@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 pub use IAccountKeychain::{
     IAccountKeychainErrors as AccountKeychainError, IAccountKeychainEvents as AccountKeychainEvent,
 };

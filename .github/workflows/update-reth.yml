@@ -224,7 +224,11 @@ jobs:
             fi
 
             echo "::group::Amp attempt $attempt"
+            set +e
             amp-run --dangerously-allow-all -x "$AMP_PROMPT"
+            amp_exit=$?
+            set -e
+            echo "amp-run exit code: $amp_exit"
             echo "::endgroup::"
 
             echo "::group::Verify cargo clippy"
@@ -288,7 +292,11 @@ jobs:
             fi
 
             echo "::group::Amp attempt $attempt"
+            set +e
             amp-run --dangerously-allow-all -x "$AMP_PROMPT"
+            amp_exit=$?
+            set -e
+            echo "amp-run exit code: $amp_exit"
             echo "::endgroup::"
 
             echo "::group::Verify test compilation"

@@ -198,7 +198,7 @@ impl GenerateStateBloat {
                     writer.write_all(&total_supply_bytes)?;
                 }
 
-                // Write balance entries
+                // Write balance entries in chunks
                 chunk_buf.clear();
                 for slot in &slot_bytes {
                     chunk_buf.extend_from_slice(slot);

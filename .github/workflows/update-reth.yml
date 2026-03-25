@@ -1,7 +1,7 @@
 # Nightly workflow to update reth dependencies from upstream main branch.
 #
-# If `reth-auto-bump` exists, rebases it onto main (preserving source fixes)
-# and bumps to the latest reth rev. Opens a PR targeting `main`.
+# If `reth-auto-bump` exists, merges main into it (preserving source fixes
+# and PR history). Bumps to the latest reth rev. Opens a PR targeting `main`.
 
 name: Update reth deps
 
@@ -63,31 +63,29 @@ jobs:
           fi
 
           if git rev-parse --verify origin/reth-auto-bump >/dev/null 2>&1; then
-            echo "Continuing on existing reth-auto-bump branch, rebasing onto main"
+            echo "Continuing on existing reth-auto-bump branch, merging main"
             git checkout reth-auto-bump
-            if ! git rebase origin/main; then
-              echo "Rebase conflicts detected, resolving..."
+            if ! git merge origin/main --no-edit; then
+              echo "Merge conflicts detected, resolving..."
               # Conflicts are expected in Cargo.toml/Cargo.lock from old rev bumps.
-              # Accept main's version for those since we're about to bump to a new
-              # rev anyway. Keep source fixes from our side.
-              while [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; do
-                CONFLICTED=$(git diff --name-only --diff-filter=U)
-                for f in $CONFLICTED; do
-                  case "$f" in
-                    Cargo.toml|Cargo.lock)
-                      echo "  Accepting main version for $f"
-                      git checkout --theirs "$f"
-                      ;;
-                    *)
-                      echo "  Accepting our version for $f"
-                      git checkout --ours "$f"
-                      ;;
-                  esac
-                  git add "$f"
-                done
-                GIT_EDITOR=true git rebase --continue || true
+              # Accept main's version (--theirs in merge = main) since we're about
+              # to bump to a new rev anyway. Keep source fixes from our side.
+              CONFLICTED=$(git diff --name-only --diff-filter=U)
+              for f in $CONFLICTED; do
+                case "$f" in
+                  Cargo.toml|Cargo.lock)
+                    echo "  Accepting main version for $f"
+                    git checkout --theirs "$f"
+                    ;;
+                  *)
+                    echo "  Accepting our version for $f"
+                    git checkout --ours "$f"
+                    ;;
+                esac
+                git add "$f"
               done
-              echo "Rebase completed with conflict resolution"
+              git commit --no-edit
+              echo "Merge completed with conflict resolution"
             fi
           else
             echo "Creating reth-auto-bump from main"

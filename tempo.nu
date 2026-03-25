@@ -1894,7 +1894,6 @@ def "main bench" [
 
         if $init_only {
             print "State initialization complete (--init-only). Skipping benchmark runs."
-            restore-system-tuning $tuning_state
             return
         }
 

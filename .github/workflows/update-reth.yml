@@ -109,17 +109,32 @@ jobs:
       # ── amp helper ────────────────────────────────────────────
       - name: Create amp wrapper
         run: |
-          # Wrapper that runs amp with --stream-json, streams all output
-          # live to stderr (visible in CI logs), and captures it for parsing.
+          # Wrapper that runs amp with --stream-json, captures stdout and
+          # stderr separately, and dumps both to CI logs for full visibility.
           cat > /usr/local/bin/amp-run <<'WRAPPER'
           #!/usr/bin/env bash
           set -uo pipefail
           TMPOUT=$(mktemp)
-          trap 'rm -f "$TMPOUT"' EXIT
+          TMPERR=$(mktemp)
+          trap 'rm -f "$TMPOUT" "$TMPERR"' EXIT
 
-          # Run amp, tee all output to stderr (live CI logs) and capture to file
+          # Run amp, capture stdout and stderr to separate files
           AMP_EXIT=0
-          amp "$@" --stream-json 2>&1 | tee >(cat >&2) > "$TMPOUT" || AMP_EXIT=$?
+          amp "$@" --stream-json >"$TMPOUT" 2>"$TMPERR" || AMP_EXIT=$?
+
+          # Always dump full stderr
+          if [ -s "$TMPERR" ]; then
+            echo "=== amp stderr ===" >&2
+            cat "$TMPERR" >&2
+            echo "=== end amp stderr ===" >&2
+          fi
+
+          # Always dump full stdout
+          if [ -s "$TMPOUT" ]; then
+            echo "=== amp stdout ===" >&2
+            cat "$TMPOUT" >&2
+            echo "=== end amp stdout ===" >&2
+          fi
 
           # Extract thread URL
           THREAD_ID=$(head -1 "$TMPOUT" | jq -r '.session_id // empty' 2>/dev/null || true)

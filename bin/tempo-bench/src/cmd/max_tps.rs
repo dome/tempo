@@ -315,6 +315,12 @@ impl MaxTpsArgs {
         // Grab first provider to call some RPC methods
         let provider = signer_providers[0].1.clone();
 
+        // Wait for block timestamp to catch up to wall clock (within 30s).
+        // After large state bloat loading, the node's block timestamp can lag
+        // behind wall clock by minutes, causing expiring nonce validation to
+        // reject faucet transactions.
+        wait_for_block_timestamp_sync(&provider).await?;
+
         // Fund accounts from faucet if requested
         if self.faucet {
             let faucet_provider: DynProvider<TempoNetwork> =
@@ -855,6 +861,49 @@ fn generate_transactions<F: TxFiller<TempoNetwork> + 'static>(
             eyre::Ok(unsigned.into_envelope(sig).encoded_2718())
         }
     })
+}
+
+/// Waits until the latest block timestamp is within 30s of wall clock time.
+///
+/// After large state bloat loading, the node's first blocks can have timestamps
+/// minutes behind wall clock. The faucet's expiring nonce filler uses
+/// `SystemTime::now()` to set `valid_before`, which then gets rejected because
+/// it's "too far in the future" relative to the block timestamp.
+async fn wait_for_block_timestamp_sync(provider: &DynProvider<TempoNetwork>) -> eyre::Result<()> {
+    let max_drift_secs = 30u64;
+    let poll_interval = Duration::from_secs(2);
+    let max_wait = Duration::from_secs(600);
+    let start = std::time::Instant::now();
+
+    loop {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        if let Some(block) = provider.get_block(alloy::eips::BlockId::latest()).await? {
+            let block_ts = block.header.timestamp();
+            let drift = now_secs.saturating_sub(block_ts);
+            if drift <= max_drift_secs {
+                info!(block_ts, now_secs, drift, "Block timestamp synced with wall clock");
+                return Ok(());
+            }
+            info!(
+                block_ts,
+                now_secs,
+                drift,
+                "Waiting for block timestamp to catch up ({drift}s behind)"
+            );
+        }
+
+        if start.elapsed() > max_wait {
+            eyre::bail!(
+                "Block timestamp did not sync within {}s",
+                max_wait.as_secs()
+            );
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
 }
 
 /// Funds accounts from the faucet using `temp_fundAddress` RPC.

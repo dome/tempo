@@ -11805,6 +11805,7 @@ dependencies = [
  "commonware-utils",
  "eyre",
  "futures",
+ "itertools 0.14.0",
  "jiff",
  "pyroscope",
  "pyroscope_pprofrs",

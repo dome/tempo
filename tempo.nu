@@ -1866,11 +1866,11 @@ def "main bench" [
                 }
 
                 print $"Initializing database at ($datadir)..."
-                run-external $baseline_tempo "init" "--chain" $genesis_path_std "--datadir" $datadir
+                run-external $feature_tempo "init" "--chain" $genesis_path_std "--datadir" $datadir
 
                 if $bloat > 0 {
                     print $"Loading state bloat into ($datadir)..."
-                    run-external $baseline_tempo "init-from-binary-dump" "--chain" $genesis_path_std "--datadir" $datadir $bloat_file | complete
+                    run-external $feature_tempo "init-from-binary-dump" "--chain" $genesis_path_std "--datadir" $datadir $bloat_file | complete
                 }
 
                 mkdir $meta_dir

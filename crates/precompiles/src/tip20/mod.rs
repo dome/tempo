@@ -1445,7 +1445,9 @@ pub(crate) mod tests {
                     limits: vec![TokenLimit {
                         token: token_address,
                         amount: spending_limit,
+                        period: 0,
                     }],
+                    allowedCalls: vec![],
                 },
             )?;
 
@@ -1513,7 +1515,9 @@ pub(crate) mod tests {
                     limits: vec![TokenLimit {
                         token: token_address,
                         amount: spending_limit,
+                        period: 0,
                     }],
+                    allowedCalls: vec![],
                 },
             )?;
 

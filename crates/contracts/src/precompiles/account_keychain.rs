@@ -25,6 +25,21 @@ crate::sol! {
         struct TokenLimit {
             address token;
             uint256 amount;
+            uint64 period;
+        }
+
+        /// Selector-level recipient rule.
+        struct SelectorRule {
+            bytes4 selector;
+            bool allowAllRecipients;
+            address[] recipients;
+        }
+
+        /// Per-target call scope.
+        struct CallScope {
+            address target;
+            bool allowAllSelectors;
+            SelectorRule[] selectorRules;
         }
 
         /// Key information structure
@@ -44,18 +59,29 @@ crate::sol! {
         /// Emitted when a spending limit is updated
         event SpendingLimitUpdated(address indexed account, address indexed publicKey, address indexed token, uint256 newLimit);
 
+        /// Emitted when an access key spends against a token limit.
+        event AccessKeySpend(
+            address indexed account,
+            address indexed publicKey,
+            address indexed token,
+            uint256 amount,
+            uint256 remainingLimit
+        );
+
         /// Authorize a new key for the caller's account
         /// @param keyId The key identifier (address derived from public key)
         /// @param signatureType 0: secp256k1, 1: P256, 2: WebAuthn
         /// @param expiry Block timestamp when the key expires (u64::MAX for never expires)
         /// @param enforceLimits Whether to enforce spending limits for this key
         /// @param limits Initial spending limits for tokens (only used if enforceLimits is true)
+        /// @param allowedCalls Initial call scopes for this key
         function authorizeKey(
             address keyId,
             SignatureType signatureType,
             uint64 expiry,
             bool enforceLimits,
-            TokenLimit[] calldata limits
+            TokenLimit[] calldata limits,
+            CallScope[] calldata allowedCalls
         ) external;
 
         /// Revoke an authorized key
@@ -72,6 +98,14 @@ crate::sol! {
             uint256 newLimit
         ) external;
 
+        /// Set or replace allowed calls for a key+target pair.
+        function setAllowedCalls(
+            address keyId,
+            address target,
+            bool allowAllSelectors,
+            SelectorRule[] calldata selectorRules
+        ) external;
+
         /// Get key information
         /// @param account The account address
         /// @param publicKey The public key
@@ -82,12 +116,16 @@ crate::sol! {
         /// @param account The account address
         /// @param publicKey The public key
         /// @param token The token address
-        /// @return Remaining spending amount
+        /// @return remaining Remaining spending amount
+        /// @return periodEnd Period end timestamp for periodic limits (0 for one-time)
         function getRemainingLimit(
             address account,
             address keyId,
             address token
-        ) external view returns (uint256);
+        ) external view returns (uint256 remaining, uint64 periodEnd);
+
+        /// Returns configured call scopes for an account key.
+        function getAllowedCalls(address account, address keyId) external view returns (CallScope[] memory);
 
         /// Get the key used in the current transaction
         /// @return The keyId used in the current transaction
@@ -104,6 +142,11 @@ crate::sol! {
         error ExpiryInPast();
         error KeyAlreadyRevoked();
         error SignatureTypeMismatch(uint8 expected, uint8 actual);
+        error CallNotAllowed();
+        error InvalidCallScope();
+        error ScopeLimitExceeded();
+        error SelectorLimitExceeded();
+        error RecipientLimitExceeded();
     }
 }
 
@@ -158,5 +201,30 @@ impl AccountKeychainError {
     /// This prevents replay attacks where a revoked key's authorization is reused.
     pub const fn key_already_revoked() -> Self {
         Self::KeyAlreadyRevoked(IAccountKeychain::KeyAlreadyRevoked {})
+    }
+
+    /// Creates an error for disallowed call attempts by scoped access keys.
+    pub const fn call_not_allowed() -> Self {
+        Self::CallNotAllowed(IAccountKeychain::CallNotAllowed {})
+    }
+
+    /// Creates an error for invalid scope configuration.
+    pub const fn invalid_call_scope() -> Self {
+        Self::InvalidCallScope(IAccountKeychain::InvalidCallScope {})
+    }
+
+    /// Creates an error for scope count limit violations.
+    pub const fn scope_limit_exceeded() -> Self {
+        Self::ScopeLimitExceeded(IAccountKeychain::ScopeLimitExceeded {})
+    }
+
+    /// Creates an error for selector count limit violations.
+    pub const fn selector_limit_exceeded() -> Self {
+        Self::SelectorLimitExceeded(IAccountKeychain::SelectorLimitExceeded {})
+    }
+
+    /// Creates an error for recipient count limit violations.
+    pub const fn recipient_limit_exceeded() -> Self {
+        Self::RecipientLimitExceeded(IAccountKeychain::RecipientLimitExceeded {})
     }
 }

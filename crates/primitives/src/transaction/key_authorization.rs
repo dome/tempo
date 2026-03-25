@@ -3,13 +3,13 @@ use crate::transaction::PrimitiveSignature;
 use alloc::vec::Vec;
 use alloy_consensus::crypto::RecoveryError;
 use alloy_primitives::{Address, B256, U256, keccak256};
-use alloy_rlp::Encodable;
+use alloy_rlp::{Buf, Encodable};
 
 /// Token spending limit for access keys
 ///
 /// Defines a per-token spending limit for an access key provisioned via key_authorization.
 /// This limit is enforced by the AccountKeychain precompile when the key is used.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, alloy_rlp::RlpEncodable, alloy_rlp::RlpDecodable)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, alloy_rlp::RlpEncodable)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 #[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
@@ -21,6 +21,83 @@ pub struct TokenLimit {
 
     /// Maximum spending amount for this token (enforced over the key's lifetime)
     pub limit: U256,
+
+    /// Period duration in seconds.
+    ///
+    /// `0` means one-time limit. `>0` means the limit resets periodically.
+    pub period: u64,
+}
+
+impl alloy_rlp::Decodable for TokenLimit {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        let header = alloy_rlp::Header::decode(buf)?;
+        if !header.list {
+            return Err(alloy_rlp::Error::UnexpectedString);
+        }
+
+        let remaining = buf.len();
+        if header.payload_length > remaining {
+            return Err(alloy_rlp::Error::InputTooShort);
+        }
+
+        let mut fields = &buf[..header.payload_length];
+
+        let token = alloy_rlp::Decodable::decode(&mut fields)?;
+        let limit = alloy_rlp::Decodable::decode(&mut fields)?;
+        // Backward-compatible decode: legacy payloads omit period and map to one-time limits.
+        let period = if fields.is_empty() {
+            0
+        } else {
+            alloy_rlp::Decodable::decode(&mut fields)?
+        };
+
+        if !fields.is_empty() {
+            return Err(alloy_rlp::Error::UnexpectedLength);
+        }
+
+        buf.advance(header.payload_length);
+
+        Ok(Self {
+            token,
+            limit,
+            period,
+        })
+    }
+}
+
+/// Per-target call scope for an access key.
+///
+/// `selector_rules` uses tri-state semantics:
+/// - `None` => allow any selector for this target
+/// - `Some([])` => deny all selectors for this target
+/// - `Some([..])` => allow exactly the listed selector rules
+#[derive(Clone, Debug, PartialEq, Eq, Hash, alloy_rlp::RlpEncodable, alloy_rlp::RlpDecodable)]
+#[rlp(trailing)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
+pub struct CallScope {
+    /// Target contract address.
+    pub target: Address,
+    /// Optional selector rules for this target.
+    pub selector_rules: Option<Vec<SelectorRule>>,
+}
+
+/// Selector-level rule within a [`CallScope`].
+///
+/// `recipients` semantics:
+/// - `None` => no recipient constraint
+/// - `Some([..])` => first ABI address argument must be in this list
+#[derive(Clone, Debug, PartialEq, Eq, Hash, alloy_rlp::RlpEncodable, alloy_rlp::RlpDecodable)]
+#[rlp(trailing)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
+pub struct SelectorRule {
+    /// 4-byte function selector.
+    pub selector: [u8; 4],
+    /// Optional recipient allowlist.
+    pub recipients: Option<Vec<Address>>,
 }
 
 /// Key authorization for provisioning access keys
@@ -28,10 +105,11 @@ pub struct TokenLimit {
 /// Used in TempoTransaction to add a new key to the AccountKeychain precompile.
 /// The transaction must be signed by the root key to authorize adding this access key.
 ///
-/// RLP encoding: `[key_type, key_id, expiry?, limits?]`
+/// RLP encoding: `[chain_id, key_type, key_id, expiry?, limits?, allowed_calls?]`
 /// - Non-optional fields come first, followed by optional (trailing) fields
 /// - `expiry`: `None` (omitted or 0x80) = key never expires, `Some(timestamp)` = expires at timestamp
 /// - `limits`: `None` (omitted or 0x80) = unlimited spending, `Some([])` = no spending, `Some([...])` = specific limits
+/// - `allowed_calls`: `None` = unrestricted, `Some([])` = deny-all, `Some([...])` = scoped calls
 #[derive(Clone, Debug, PartialEq, Eq, Hash, alloy_rlp::RlpEncodable, alloy_rlp::RlpDecodable)]
 #[rlp(trailing)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -60,6 +138,12 @@ pub struct KeyAuthorization {
     /// - `Some([])` = no spending allowed (enforce_limits=true but no tokens allowed)
     /// - `Some([TokenLimit{...}])` = specific limits enforced
     pub limits: Option<Vec<TokenLimit>>,
+
+    /// Optional call scopes for this key.
+    /// - `None` (RLP 0x80) = unrestricted calls
+    /// - `Some([])` = scoped mode with no allowed calls (deny-all)
+    /// - `Some([CallScope{...}])` = explicit target/selector scope list
+    pub allowed_calls: Option<Vec<CallScope>>,
 }
 
 impl KeyAuthorization {
@@ -120,6 +204,31 @@ impl KeyAuthorization {
                 .limits
                 .as_ref()
                 .map_or(0, |limits| limits.capacity() * size_of::<TokenLimit>())
+            + self.allowed_calls.as_ref().map_or(0, |scopes| {
+                scopes.capacity() * size_of::<CallScope>()
+                    + scopes
+                        .iter()
+                        .map(|scope| {
+                            size_of::<CallScope>()
+                                + scope.selector_rules.as_ref().map_or(0, |rules| {
+                                    rules.capacity() * size_of::<SelectorRule>()
+                                        + rules
+                                            .iter()
+                                            .map(|rule| {
+                                                size_of::<SelectorRule>()
+                                                    + rule.recipients.as_ref().map_or(
+                                                        0,
+                                                        |recipients| {
+                                                            recipients.capacity()
+                                                                * size_of::<Address>()
+                                                        },
+                                                    )
+                                            })
+                                            .sum::<usize>()
+                                })
+                        })
+                        .sum::<usize>()
+            })
     }
 }
 
@@ -199,6 +308,7 @@ impl<'a> arbitrary::Arbitrary<'a> for KeyAuthorization {
             // Ensure that Some(0) is not generated as it's becoming `None` after RLP roundtrip.
             expiry: u.arbitrary::<Option<u64>>()?.filter(|v| *v != 0),
             limits: u.arbitrary()?,
+            allowed_calls: u.arbitrary()?,
         })
     }
 }
@@ -218,6 +328,7 @@ mod tests {
             key_id: Address::random(),
             expiry,
             limits,
+            allowed_calls: None,
         }
     }
 
@@ -273,6 +384,7 @@ mod tests {
                 Some(vec![TokenLimit {
                     token: Address::ZERO,
                     limit: U256::from(100),
+                    period: 0,
                 }])
             )
             .has_unlimited_spending()
@@ -291,7 +403,30 @@ mod tests {
             key_id: Address::random(),
             expiry: None,
             limits: None,
+            allowed_calls: None,
         }
+    }
+
+    #[test]
+    fn test_token_limit_legacy_decode_defaults_period_to_zero() {
+        let token = Address::random();
+        let limit = U256::from(42);
+
+        // Legacy pre-T3 payloads encode TokenLimit as [token, limit].
+        let mut encoded = Vec::new();
+        alloy_rlp::Header {
+            list: true,
+            payload_length: token.length() + limit.length(),
+        }
+        .encode(&mut encoded);
+        token.encode(&mut encoded);
+        limit.encode(&mut encoded);
+
+        let decoded: TokenLimit = alloy_rlp::Decodable::decode(&mut encoded.as_slice())
+            .expect("decode legacy token limit");
+        assert_eq!(decoded.token, token);
+        assert_eq!(decoded.limit, limit);
+        assert_eq!(decoded.period, 0);
     }
 
     #[test]

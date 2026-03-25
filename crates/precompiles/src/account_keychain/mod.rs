@@ -8,6 +8,8 @@
 
 pub mod dispatch;
 
+use std::collections::HashSet;
+
 use __packing_authorized_key::{
     ENFORCE_LIMITS_LOC, EXPIRY_LOC, IS_REVOKED_LOC, SIGNATURE_TYPE_LOC,
 };
@@ -15,18 +17,93 @@ use tempo_contracts::precompiles::{AccountKeychainError, AccountKeychainEvent};
 pub use tempo_contracts::precompiles::{
     IAccountKeychain,
     IAccountKeychain::{
-        KeyInfo, SignatureType, TokenLimit, authorizeKeyCall, getKeyCall, getRemainingLimitCall,
-        getTransactionKeyCall, revokeKeyCall, updateSpendingLimitCall,
+        CallScope, KeyInfo, SelectorRule, SignatureType, TokenLimit, authorizeKeyCall,
+        getAllowedCallsCall, getKeyCall, getRemainingLimitCall, getRemainingLimitReturn,
+        getTransactionKeyCall, revokeKeyCall, setAllowedCallsCall, updateSpendingLimitCall,
     },
 };
 
 use crate::{
     ACCOUNT_KEYCHAIN_ADDRESS,
     error::Result,
-    storage::{Handler, Mapping, packing::insert_into_word},
+    storage::{Handler, Mapping, Set, packing::insert_into_word},
+    tip20::is_tip20_prefix,
 };
-use alloy::primitives::{Address, B256, U256};
+use alloy::primitives::{Address, B256, TxKind, U256};
 use tempo_precompiles_macros::{Storable, contract};
+
+/// Maximum number of call scopes per account key.
+pub const MAX_CALL_SCOPES: u8 = 8;
+/// Maximum number of selector rules per call scope.
+pub const MAX_SELECTOR_RULES_PER_SCOPE: u8 = 16;
+/// Maximum number of recipients per selector rule.
+pub const MAX_RECIPIENTS_PER_SELECTOR: u8 = 16;
+
+/// Allowed TIP-20 selectors for recipient-constrained rules.
+const TIP20_TRANSFER_SELECTOR: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
+const TIP20_APPROVE_SELECTOR: [u8; 4] = [0x09, 0x5e, 0xa7, 0xb3];
+const TIP20_TRANSFER_WITH_MEMO_SELECTOR: [u8; 4] = [0x95, 0x77, 0x7d, 0x59];
+const TIP20_APPROVE_WITH_MEMO_SELECTOR: [u8; 4] = [0xc2, 0xda, 0x9a, 0xed];
+
+/// Internal token limit configuration used by handler-side key authorization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenLimitConfig {
+    pub token: Address,
+    pub limit: U256,
+    pub period: u64,
+}
+
+/// Internal selector rule configuration used by handler-side key authorization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectorRuleConfig {
+    pub selector: [u8; 4],
+    pub recipients: Option<Vec<Address>>,
+}
+
+/// Internal call scope configuration used by handler-side key authorization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallScopeConfig {
+    pub target: Address,
+    pub selector_rules: Option<Vec<SelectorRuleConfig>>,
+}
+
+/// Selector-level scope for one selector under one target.
+///
+/// mode:
+/// - 0 => unset/disabled
+/// - 1 => selector allowed for any recipient
+/// - 2 => selector allowed only for recipients in the set
+#[derive(Debug, Clone, Storable, Default)]
+pub struct SelectorScope {
+    pub mode: u8,
+    pub recipients: Set<Address>,
+}
+
+/// Target-level scope for one target under one account key.
+///
+/// mode:
+/// - 0 => unset/disabled
+/// - 1 => all selectors allowed
+/// - 2 => only selectors in the set are allowed
+#[derive(Debug, Clone, Storable, Default)]
+pub struct TargetScope {
+    pub mode: u8,
+    pub selectors: Set<u32>,
+    pub selector_scopes: Mapping<u32, SelectorScope>,
+}
+
+/// Key-level call scope.
+///
+/// mode:
+/// - 0 => unrestricted
+/// - 1 => scoped
+/// - 2 => deny-all
+#[derive(Debug, Clone, Storable, Default)]
+pub struct KeyScope {
+    pub mode: u8,
+    pub targets: Set<Address>,
+    pub target_scopes: Mapping<Address, TargetScope>,
+}
 
 /// Key information stored in the precompile
 ///
@@ -111,6 +188,15 @@ pub struct AccountKeychain {
     // spendingLimits[(account, keyId)][token] -> amount
     // Using a hash of account and keyId as the key to avoid triple nesting
     spending_limits: Mapping<B256, Mapping<Address, U256>>,
+    // spendingLimitMax[(account, keyId)][token] -> max amount per period
+    spending_limit_max: Mapping<B256, Mapping<Address, U256>>,
+    // spendingLimitPeriod[(account, keyId)][token] -> period duration in seconds
+    spending_limit_period: Mapping<B256, Mapping<Address, u64>>,
+    // spendingLimitPeriodEnd[(account, keyId)][token] -> current period end timestamp
+    spending_limit_period_end: Mapping<B256, Mapping<Address, u64>>,
+
+    // key_scopes[(account, keyId)] -> call scoping configuration.
+    key_scopes: Mapping<B256, KeyScope>,
 
     // WARNING(rusowsky): transient storage slots must always be placed at the very end until the `contract`
     // macro is refactored and has 2 independent layouts (persistent and transient).
@@ -132,6 +218,33 @@ impl AccountKeychain {
         data[..20].copy_from_slice(account.as_slice());
         data[20..].copy_from_slice(key_id.as_slice());
         keccak256(data)
+    }
+
+    /// Key for account-scoped permission/storage rows.
+    #[inline]
+    pub fn account_key(account: Address, key_id: Address) -> B256 {
+        Self::spending_limit_key(account, key_id)
+    }
+
+    #[inline]
+    fn selector_key(selector: [u8; 4]) -> u32 {
+        u32::from_be_bytes(selector)
+    }
+
+    #[inline]
+    fn selector_from_u32(selector: u32) -> [u8; 4] {
+        selector.to_be_bytes()
+    }
+
+    #[inline]
+    fn is_constrained_tip20_selector(selector: [u8; 4]) -> bool {
+        matches!(
+            selector,
+            TIP20_TRANSFER_SELECTOR
+                | TIP20_APPROVE_SELECTOR
+                | TIP20_TRANSFER_WITH_MEMO_SELECTOR
+                | TIP20_APPROVE_WITH_MEMO_SELECTOR
+        )
     }
 
     /// Initializes the account keychain precompile.
@@ -198,8 +311,47 @@ impl AccountKeychain {
         // Set initial spending limits (only if enforce_limits is true)
         if call.enforceLimits {
             let limit_key = Self::spending_limit_key(msg_sender, call.keyId);
-            for limit in call.limits {
+            for limit in &call.limits {
                 self.spending_limits[limit_key][limit.token].write(limit.amount)?;
+            }
+        }
+
+        // TIP-1011 fields are hardfork-gated at T3.
+        if self.storage.spec().is_t3() {
+            let limit_configs = call
+                .limits
+                .iter()
+                .map(|limit| TokenLimitConfig {
+                    token: limit.token,
+                    limit: limit.amount,
+                    period: limit.period,
+                })
+                .collect::<Vec<_>>();
+
+            let allowed_call_configs = if call.allowedCalls.is_empty() {
+                None
+            } else {
+                Some(
+                    call.allowedCalls
+                        .iter()
+                        .map(Self::abi_call_scope_to_config)
+                        .collect::<Result<Vec<_>>>()?,
+                )
+            };
+
+            self.apply_key_authorization_t3(
+                msg_sender,
+                call.keyId,
+                &limit_configs,
+                allowed_call_configs.as_deref(),
+            )?;
+        } else {
+            if call.limits.iter().any(|limit| limit.period != 0) {
+                return Err(AccountKeychainError::invalid_call_scope().into());
+            }
+
+            if !call.allowedCalls.is_empty() {
+                return Err(AccountKeychainError::invalid_call_scope().into());
             }
         }
 
@@ -284,6 +436,11 @@ impl AccountKeychain {
         // Update the spending limit
         let limit_key = Self::spending_limit_key(msg_sender, call.keyId);
         self.spending_limits[limit_key][call.token].write(call.newLimit)?;
+        if self.storage.spec().is_t3() {
+            // T3: newLimit updates both the configured cap and current remaining amount,
+            // while preserving period + period_end.
+            self.spending_limit_max[limit_key][call.token].write(call.newLimit)?;
+        }
 
         // Emit event
         self.emit_event(AccountKeychainEvent::SpendingLimitUpdated(
@@ -331,16 +488,187 @@ impl AccountKeychain {
     /// Returns the remaining spending limit for a key-token pair, or a blank entry if inexistent
     /// or revoked (T2+).
     pub fn get_remaining_limit(&self, call: getRemainingLimitCall) -> Result<U256> {
+        self.get_remaining_limit_with_period(call)
+            .map(|ret| ret.remaining)
+    }
+
+    /// Returns the remaining spending limit together with the active period end timestamp.
+    pub fn get_remaining_limit_with_period(
+        &self,
+        call: getRemainingLimitCall,
+    ) -> Result<getRemainingLimitReturn> {
         // T2+: return zero if key doesn't exist or has been revoked
         if self.storage.spec().is_t2() {
             let key = self.keys[call.account][call.keyId].read()?;
             if key.expiry == 0 || key.is_revoked {
-                return Ok(U256::ZERO);
+                return Ok(getRemainingLimitReturn {
+                    remaining: U256::ZERO,
+                    periodEnd: 0,
+                });
             }
         }
 
+        if self.storage.spec().is_t3() {
+            let (remaining, period_end) = self.effective_limit_state(
+                call.account,
+                call.keyId,
+                call.token,
+                self.storage.timestamp().saturating_to::<u64>(),
+            )?;
+
+            return Ok(getRemainingLimitReturn {
+                remaining,
+                periodEnd: period_end,
+            });
+        }
+
         let limit_key = Self::spending_limit_key(call.account, call.keyId);
-        self.spending_limits[limit_key][call.token].read()
+        let remaining = self.spending_limits[limit_key][call.token].read()?;
+        Ok(getRemainingLimitReturn {
+            remaining,
+            periodEnd: 0,
+        })
+    }
+
+    /// Root-only create-or-replace update for one target call scope.
+    pub fn set_allowed_calls(
+        &mut self,
+        msg_sender: Address,
+        call: setAllowedCallsCall,
+    ) -> Result<()> {
+        if !self.storage.spec().is_t3() {
+            return Err(AccountKeychainError::invalid_call_scope().into());
+        }
+
+        self.ensure_admin_caller(msg_sender)?;
+
+        let key = self.load_active_key(msg_sender, call.keyId)?;
+        let current_timestamp = self.storage.timestamp().saturating_to::<u64>();
+        if current_timestamp >= key.expiry {
+            return Err(AccountKeychainError::key_expired().into());
+        }
+
+        let account_key = Self::account_key(msg_sender, call.keyId);
+
+        // Any explicit target update implies restricted mode.
+        self.key_scopes[account_key].mode.write(1)?;
+
+        if call.allowAllSelectors {
+            // `allowAllSelectors=true` means selector rules are ignored for matching, but
+            // recipient-constrained selector rules are rejected to keep ABI inputs canonical.
+            for rule in &call.selectorRules {
+                if !rule.allowAllRecipients || !rule.recipients.is_empty() {
+                    return Err(AccountKeychainError::invalid_call_scope().into());
+                }
+            }
+            self.upsert_target_scope(account_key, call.target, None)
+        } else {
+            let mut selector_rules = Vec::new();
+            for rule in call.selectorRules {
+                if rule.allowAllRecipients {
+                    if !rule.recipients.is_empty() {
+                        return Err(AccountKeychainError::invalid_call_scope().into());
+                    }
+                    selector_rules.push(SelectorRuleConfig {
+                        selector: *rule.selector,
+                        recipients: None,
+                    });
+                } else {
+                    if rule.recipients.is_empty() {
+                        return Err(AccountKeychainError::invalid_call_scope().into());
+                    }
+                    selector_rules.push(SelectorRuleConfig {
+                        selector: *rule.selector,
+                        recipients: Some(rule.recipients),
+                    });
+                }
+            }
+            self.upsert_target_scope(account_key, call.target, Some(selector_rules))
+        }
+    }
+
+    /// Returns call scopes configured for an account key.
+    ///
+    /// When the key is in explicit deny-all mode (`allowed_calls = Some([])`), returns a
+    /// sentinel entry `{target: address(0), allowAllSelectors: false, selectorRules: []}` so
+    /// callers can distinguish it from unrestricted mode (`[]`).
+    pub fn get_allowed_calls(&self, call: getAllowedCallsCall) -> Result<Vec<CallScope>> {
+        if !self.storage.spec().is_t3() {
+            return Ok(Vec::new());
+        }
+
+        let account_key = Self::account_key(call.account, call.keyId);
+        let mode = self.key_scopes[account_key].mode.read()?;
+        if mode == 0 {
+            return Ok(Vec::new());
+        }
+        if mode == 2 {
+            // Explicit deny-all marker to preserve round-tripping for `allowed_calls = Some([])`.
+            return Ok(vec![CallScope {
+                target: Address::ZERO,
+                allowAllSelectors: false,
+                selectorRules: Vec::new(),
+            }]);
+        }
+
+        let mut scopes = Vec::new();
+        let targets = self.key_scopes[account_key].targets.read()?;
+        for target in targets {
+            let target_mode = self.key_scopes[account_key].target_scopes[target]
+                .mode
+                .read()?;
+
+            let scope = match target_mode {
+                1 => CallScope {
+                    target,
+                    allowAllSelectors: true,
+                    selectorRules: Vec::new(),
+                },
+                2 => {
+                    let mut rules = Vec::new();
+                    let selectors = self.key_scopes[account_key].target_scopes[target]
+                        .selectors
+                        .read()?;
+                    for selector_u32 in selectors {
+                        let selector_mode = self.key_scopes[account_key].target_scopes[target]
+                            .selector_scopes[selector_u32]
+                            .mode
+                            .read()?;
+
+                        let (allow_all_recipients, recipients) = if selector_mode == 2 {
+                            let recipients: Vec<Address> = self.key_scopes[account_key]
+                                .target_scopes[target]
+                                .selector_scopes[selector_u32]
+                                .recipients
+                                .read()?
+                                .into();
+                            (false, recipients)
+                        } else if selector_mode == 1 {
+                            (true, Vec::new())
+                        } else {
+                            continue;
+                        };
+
+                        rules.push(SelectorRule {
+                            selector: Self::selector_from_u32(selector_u32).into(),
+                            allowAllRecipients: allow_all_recipients,
+                            recipients,
+                        });
+                    }
+
+                    CallScope {
+                        target,
+                        allowAllSelectors: false,
+                        selectorRules: rules,
+                    }
+                }
+                _ => continue,
+            };
+
+            scopes.push(scope);
+        }
+
+        Ok(scopes)
     }
 
     /// Returns the access key used to authorize the current transaction (`Address::ZERO` = root key).
@@ -372,6 +700,365 @@ impl AccountKeychain {
     /// Uses transient storage, so it's automatically cleared after the transaction.
     pub fn set_tx_origin(&mut self, origin: Address) -> Result<()> {
         self.tx_origin.t_write(origin)
+    }
+
+    /// Applies T3 key-authorization extensions: periodic token limits and call scopes.
+    pub fn apply_key_authorization_t3(
+        &mut self,
+        account: Address,
+        key_id: Address,
+        limits: &[TokenLimitConfig],
+        allowed_calls: Option<&[CallScopeConfig]>,
+    ) -> Result<()> {
+        if !self.storage.spec().is_t3() {
+            return Ok(());
+        }
+
+        let limit_key = Self::spending_limit_key(account, key_id);
+        let now = self.storage.timestamp().saturating_to::<u64>();
+
+        let mut seen_tokens = HashSet::new();
+        for limit in limits {
+            if !seen_tokens.insert(limit.token) {
+                return Err(AccountKeychainError::invalid_call_scope().into());
+            }
+
+            let period_end = if limit.period == 0 {
+                0
+            } else {
+                now.saturating_add(limit.period)
+            };
+
+            self.spending_limits[limit_key][limit.token].write(limit.limit)?;
+            self.spending_limit_max[limit_key][limit.token].write(limit.limit)?;
+            self.spending_limit_period[limit_key][limit.token].write(limit.period)?;
+            self.spending_limit_period_end[limit_key][limit.token].write(period_end)?;
+        }
+
+        let account_key = Self::account_key(account, key_id);
+        self.replace_allowed_calls(account_key, allowed_calls)
+    }
+
+    /// Validates a top-level call against scoped permissions for this key.
+    pub fn validate_call_scope_for_transaction(
+        &self,
+        account: Address,
+        key_id: Address,
+        to: &TxKind,
+        input: &[u8],
+    ) -> Result<()> {
+        if key_id == Address::ZERO || !self.storage.spec().is_t3() {
+            return Ok(());
+        }
+
+        if to.is_create() {
+            return Err(AccountKeychainError::call_not_allowed().into());
+        }
+
+        let account_key = Self::account_key(account, key_id);
+        let mode = self.key_scopes[account_key].mode.read()?;
+
+        // Unrestricted mode.
+        if mode == 0 {
+            return Ok(());
+        }
+        if mode == 2 {
+            return Err(AccountKeychainError::call_not_allowed().into());
+        }
+
+        let target = match to {
+            TxKind::Call(target) => *target,
+            TxKind::Create => return Err(AccountKeychainError::call_not_allowed().into()),
+        };
+
+        let target_mode = self.key_scopes[account_key].target_scopes[target]
+            .mode
+            .read()?;
+        if target_mode == 1 {
+            return Ok(());
+        }
+
+        if target_mode != 2 {
+            return Err(AccountKeychainError::call_not_allowed().into());
+        }
+
+        if input.len() < 4 {
+            return Err(AccountKeychainError::call_not_allowed().into());
+        }
+
+        let selector = u32::from_be_bytes([input[0], input[1], input[2], input[3]]);
+        if !self.key_scopes[account_key].target_scopes[target]
+            .selectors
+            .contains(&selector)?
+        {
+            return Err(AccountKeychainError::call_not_allowed().into());
+        }
+
+        let selector_mode = self.key_scopes[account_key].target_scopes[target].selector_scopes
+            [selector]
+            .mode
+            .read()?;
+        if selector_mode == 1 {
+            return Ok(());
+        }
+        if selector_mode != 2 {
+            return Err(AccountKeychainError::call_not_allowed().into());
+        }
+
+        if input.len() < 36 {
+            return Err(AccountKeychainError::call_not_allowed().into());
+        }
+
+        let recipient_word = &input[4..36];
+        if recipient_word[..12].iter().any(|byte| *byte != 0) {
+            return Err(AccountKeychainError::call_not_allowed().into());
+        }
+
+        let recipient = Address::from_slice(&recipient_word[12..]);
+        if self.key_scopes[account_key].target_scopes[target].selector_scopes[selector]
+            .recipients
+            .contains(&recipient)?
+        {
+            Ok(())
+        } else {
+            Err(AccountKeychainError::call_not_allowed().into())
+        }
+    }
+
+    fn replace_allowed_calls(
+        &mut self,
+        account_key: B256,
+        allowed_calls: Option<&[CallScopeConfig]>,
+    ) -> Result<()> {
+        self.clear_all_target_scopes(account_key)?;
+
+        match allowed_calls {
+            None => {
+                self.key_scopes[account_key].mode.write(0)?;
+                Ok(())
+            }
+            Some(scopes) => {
+                if scopes.is_empty() {
+                    // Canonical deny-all state for `allowed_calls = Some([])`.
+                    self.key_scopes[account_key].mode.write(2)?;
+                    return Ok(());
+                }
+
+                if scopes.len() > MAX_CALL_SCOPES as usize {
+                    return Err(AccountKeychainError::scope_limit_exceeded().into());
+                }
+
+                let mut seen_targets = HashSet::new();
+                for scope in scopes {
+                    if !seen_targets.insert(scope.target) {
+                        return Err(AccountKeychainError::invalid_call_scope().into());
+                    }
+                }
+
+                self.key_scopes[account_key].mode.write(1)?;
+                for scope in scopes {
+                    self.upsert_target_scope(
+                        account_key,
+                        scope.target,
+                        scope.selector_rules.clone(),
+                    )?;
+                }
+
+                Ok(())
+            }
+        }
+    }
+
+    fn clear_all_target_scopes(&mut self, account_key: B256) -> Result<()> {
+        let targets = self.key_scopes[account_key].targets.read()?;
+        for target in targets {
+            self.remove_target_scope(account_key, target)?;
+        }
+
+        Ok(())
+    }
+
+    fn remove_target_scope(&mut self, account_key: B256, target: Address) -> Result<()> {
+        if !self.key_scopes[account_key].targets.remove(&target)? {
+            return Ok(());
+        }
+
+        self.clear_target_selectors(account_key, target)?;
+        self.key_scopes[account_key].target_scopes[target]
+            .mode
+            .write(0)
+    }
+
+    fn clear_target_selectors(&mut self, account_key: B256, target: Address) -> Result<()> {
+        let selectors = self.key_scopes[account_key].target_scopes[target]
+            .selectors
+            .read()?;
+        for selector in selectors {
+            self.key_scopes[account_key].target_scopes[target].selector_scopes[selector]
+                .recipients
+                .delete()?;
+            self.key_scopes[account_key].target_scopes[target].selector_scopes[selector]
+                .mode
+                .write(0)?;
+        }
+
+        self.key_scopes[account_key].target_scopes[target]
+            .selectors
+            .delete()
+    }
+
+    fn upsert_target_scope(
+        &mut self,
+        account_key: B256,
+        target: Address,
+        selector_rules: Option<Vec<SelectorRuleConfig>>,
+    ) -> Result<()> {
+        if let Some(rules) = selector_rules.as_ref() {
+            if rules.is_empty() {
+                return self.remove_target_scope(account_key, target);
+            }
+            self.validate_selector_rules(target, rules)?;
+        }
+
+        if !self.key_scopes[account_key].targets.contains(&target)? {
+            let count = self.key_scopes[account_key].targets.len()?;
+            if count >= MAX_CALL_SCOPES as usize {
+                return Err(AccountKeychainError::scope_limit_exceeded().into());
+            }
+
+            self.key_scopes[account_key].targets.insert(target)?;
+        }
+
+        self.clear_target_selectors(account_key, target)?;
+
+        match selector_rules {
+            None => {
+                self.key_scopes[account_key].target_scopes[target]
+                    .mode
+                    .write(1)?;
+            }
+            Some(rules) => {
+                self.key_scopes[account_key].target_scopes[target]
+                    .mode
+                    .write(2)?;
+
+                for rule in rules {
+                    let selector = Self::selector_key(rule.selector);
+                    self.key_scopes[account_key].target_scopes[target]
+                        .selectors
+                        .insert(selector)?;
+
+                    match rule.recipients {
+                        None => {
+                            self.key_scopes[account_key].target_scopes[target].selector_scopes
+                                [selector]
+                                .mode
+                                .write(1)?;
+                            self.key_scopes[account_key].target_scopes[target].selector_scopes
+                                [selector]
+                                .recipients
+                                .delete()?;
+                        }
+                        Some(recipients) => {
+                            self.key_scopes[account_key].target_scopes[target].selector_scopes
+                                [selector]
+                                .mode
+                                .write(2)?;
+                            self.key_scopes[account_key].target_scopes[target].selector_scopes
+                                [selector]
+                                .recipients
+                                .write(Set::from(recipients))?;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_selector_rules(&self, target: Address, rules: &[SelectorRuleConfig]) -> Result<()> {
+        if rules.len() > MAX_SELECTOR_RULES_PER_SCOPE as usize {
+            return Err(AccountKeychainError::selector_limit_exceeded().into());
+        }
+
+        let mut selectors = HashSet::new();
+        for rule in rules {
+            if !selectors.insert(rule.selector) {
+                return Err(AccountKeychainError::invalid_call_scope().into());
+            }
+
+            let Some(recipients) = &rule.recipients else {
+                continue;
+            };
+
+            if recipients.is_empty() {
+                return Err(AccountKeychainError::invalid_call_scope().into());
+            }
+
+            if recipients.len() > MAX_RECIPIENTS_PER_SELECTOR as usize {
+                return Err(AccountKeychainError::recipient_limit_exceeded().into());
+            }
+
+            if !is_tip20_prefix(target) || !Self::is_constrained_tip20_selector(rule.selector) {
+                return Err(AccountKeychainError::invalid_call_scope().into());
+            }
+
+            let mut unique_recipients = HashSet::new();
+            for recipient in recipients {
+                if recipient.is_zero() || !unique_recipients.insert(*recipient) {
+                    return Err(AccountKeychainError::invalid_call_scope().into());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn abi_call_scope_to_config(scope: &CallScope) -> Result<CallScopeConfig> {
+        if scope.allowAllSelectors {
+            for rule in &scope.selectorRules {
+                if !rule.allowAllRecipients || !rule.recipients.is_empty() {
+                    return Err(AccountKeychainError::invalid_call_scope().into());
+                }
+            }
+
+            Ok(CallScopeConfig {
+                target: scope.target,
+                selector_rules: None,
+            })
+        } else {
+            let selector_rules = scope
+                .selectorRules
+                .iter()
+                .map(|rule| {
+                    if rule.allowAllRecipients {
+                        if !rule.recipients.is_empty() {
+                            return Err(AccountKeychainError::invalid_call_scope().into());
+                        }
+
+                        Ok(SelectorRuleConfig {
+                            selector: *rule.selector,
+                            recipients: None,
+                        })
+                    } else {
+                        if rule.recipients.is_empty() {
+                            return Err(AccountKeychainError::invalid_call_scope().into());
+                        }
+
+                        Ok(SelectorRuleConfig {
+                            selector: *rule.selector,
+                            recipients: Some(rule.recipients.clone()),
+                        })
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            Ok(CallScopeConfig {
+                target: scope.target,
+                selector_rules: Some(selector_rules),
+            })
+        }
     }
 
     /// Ensures admin operations are authorized for this caller.
@@ -469,6 +1156,53 @@ impl AccountKeychain {
         Ok(())
     }
 
+    /// Computes the effective remaining limit at `current_timestamp` without mutating storage.
+    pub fn effective_remaining_limit(
+        &self,
+        account: Address,
+        key_id: Address,
+        token: Address,
+        current_timestamp: u64,
+    ) -> Result<U256> {
+        self.effective_limit_state(account, key_id, token, current_timestamp)
+            .map(|(remaining, _)| remaining)
+    }
+
+    /// Computes the effective remaining limit and period end at `current_timestamp`
+    /// without mutating storage.
+    fn effective_limit_state(
+        &self,
+        account: Address,
+        key_id: Address,
+        token: Address,
+        current_timestamp: u64,
+    ) -> Result<(U256, u64)> {
+        let limit_key = Self::spending_limit_key(account, key_id);
+        let remaining = self.spending_limits[limit_key][token].read()?;
+
+        if !self.storage.spec().is_t3() {
+            return Ok((remaining, 0));
+        }
+
+        let period = self.spending_limit_period[limit_key][token].read()?;
+        if period == 0 {
+            return Ok((remaining, 0));
+        }
+
+        let period_end = self.spending_limit_period_end[limit_key][token].read()?;
+        if current_timestamp < period_end {
+            return Ok((remaining, period_end));
+        }
+
+        let max = self.spending_limit_max[limit_key][token].read()?;
+        let elapsed = current_timestamp.saturating_sub(period_end);
+        let periods_elapsed = elapsed / period + 1;
+        let advance = period.saturating_mul(periods_elapsed);
+        let next_end = period_end.saturating_add(advance);
+
+        Ok((max, next_end))
+    }
+
     /// Deducts `amount` from the key's remaining spending limit for `token`, failing if exceeded.
     ///
     /// # Errors
@@ -497,14 +1231,48 @@ impl AccountKeychain {
 
         // Check and update spending limit
         let limit_key = Self::spending_limit_key(account, key_id);
-        let remaining = self.spending_limits[limit_key][token].read()?;
+        let mut remaining = self.spending_limits[limit_key][token].read()?;
+
+        if self.storage.spec().is_t3() {
+            let period = self.spending_limit_period[limit_key][token].read()?;
+            if period > 0 {
+                let period_end = self.spending_limit_period_end[limit_key][token].read()?;
+                let now = self.storage.timestamp().saturating_to::<u64>();
+                if now >= period_end {
+                    let max = self.spending_limit_max[limit_key][token].read()?;
+                    let elapsed = now.saturating_sub(period_end);
+                    let periods_elapsed = elapsed / period + 1;
+                    let advance = period.saturating_mul(periods_elapsed);
+                    let next_end = period_end.saturating_add(advance);
+
+                    remaining = max;
+                    self.spending_limits[limit_key][token].write(max)?;
+                    self.spending_limit_period_end[limit_key][token].write(next_end)?;
+                }
+            }
+        }
 
         if amount > remaining {
             return Err(AccountKeychainError::spending_limit_exceeded().into());
         }
 
         // Update remaining limit
-        self.spending_limits[limit_key][token].write(remaining - amount)
+        let new_remaining = remaining - amount;
+        self.spending_limits[limit_key][token].write(new_remaining)?;
+
+        if self.storage.spec().is_t3() {
+            self.emit_event(AccountKeychainEvent::AccessKeySpend(
+                IAccountKeychain::AccessKeySpend {
+                    account,
+                    publicKey: key_id,
+                    token,
+                    amount,
+                    remainingLimit: new_remaining,
+                },
+            ))?;
+        }
+
+        Ok(())
     }
 
     /// Refund spending limit after a fee refund.
@@ -635,10 +1403,10 @@ mod tests {
         error::TempoPrecompileError,
         storage::{StorageCtx, hashmap::HashMapStorageProvider},
     };
-    use alloy::primitives::{Address, U256};
+    use alloy::primitives::{Address, TxKind, U256};
     use revm::state::Bytecode;
     use tempo_chainspec::hardfork::TempoHardfork;
-    use tempo_contracts::precompiles::IAccountKeychain::SignatureType;
+    use tempo_contracts::precompiles::{DEFAULT_FEE_TOKEN, IAccountKeychain::SignatureType};
 
     // Helper function to assert unauthorized error
     fn assert_unauthorized_error(error: TempoPrecompileError) {
@@ -647,6 +1415,18 @@ mod tests {
                 assert!(
                     matches!(e, AccountKeychainError::UnauthorizedCaller(_)),
                     "Expected UnauthorizedCaller error, got: {e:?}"
+                );
+            }
+            _ => panic!("Expected AccountKeychainError, got: {error:?}"),
+        }
+    }
+
+    fn assert_call_not_allowed(error: TempoPrecompileError) {
+        match error {
+            TempoPrecompileError::AccountKeychainError(e) => {
+                assert!(
+                    matches!(e, AccountKeychainError::CallNotAllowed(_)),
+                    "Expected CallNotAllowed error, got: {e:?}"
                 );
             }
             _ => panic!("Expected AccountKeychainError, got: {error:?}"),
@@ -717,6 +1497,7 @@ mod tests {
                 expiry: u64::MAX,
                 enforceLimits: true,
                 limits: vec![],
+                allowedCalls: vec![],
             };
             keychain.authorize_key(msg_sender, setup_call)?;
 
@@ -730,6 +1511,7 @@ mod tests {
                 expiry: u64::MAX,
                 enforceLimits: true,
                 limits: vec![],
+                allowedCalls: vec![],
             };
             let auth_result = keychain.authorize_key(msg_sender, auth_call);
             assert!(
@@ -795,6 +1577,7 @@ mod tests {
                     expiry: u64::MAX,
                     enforceLimits: true,
                     limits: vec![],
+                    allowedCalls: vec![],
                 },
             )?;
 
@@ -809,6 +1592,7 @@ mod tests {
                     expiry: u64::MAX,
                     enforceLimits: true,
                     limits: vec![],
+                    allowedCalls: vec![],
                 },
             );
             assert!(auth_result.is_err());
@@ -868,7 +1652,9 @@ mod tests {
                     limits: vec![TokenLimit {
                         token,
                         amount: U256::from(100),
+                        period: 0,
                     }],
+                    allowedCalls: vec![],
                 },
             )?;
 
@@ -928,7 +1714,9 @@ mod tests {
                     limits: vec![TokenLimit {
                         token,
                         amount: U256::from(100),
+                        period: 0,
                     }],
+                    allowedCalls: vec![],
                 },
             )?;
 
@@ -978,7 +1766,9 @@ mod tests {
                     limits: vec![TokenLimit {
                         token,
                         amount: U256::from(100),
+                        period: 0,
                     }],
+                    allowedCalls: vec![],
                 },
             )?;
 
@@ -1027,7 +1817,9 @@ mod tests {
                     limits: vec![TokenLimit {
                         token,
                         amount: U256::from(100),
+                        period: 0,
                     }],
+                    allowedCalls: vec![],
                 },
             )?;
 
@@ -1044,6 +1836,7 @@ mod tests {
                     expiry: u64::MAX,
                     enforceLimits: false,
                     limits: vec![],
+                    allowedCalls: vec![],
                 },
             );
             assert!(
@@ -1102,7 +1895,9 @@ mod tests {
                 limits: vec![TokenLimit {
                     token,
                     amount: U256::from(100),
+                    period: 0,
                 }],
+                allowedCalls: vec![],
             };
             keychain.authorize_key(account, auth_call.clone())?;
 
@@ -1184,6 +1979,7 @@ mod tests {
                 expiry: 0, // Zero expiry is in the past - should fail
                 enforceLimits: false,
                 limits: vec![],
+                allowedCalls: vec![],
             };
             let result = keychain.authorize_key(account, auth_call);
             assert!(
@@ -1209,6 +2005,7 @@ mod tests {
                 expiry: 1, // Very old timestamp - should fail
                 enforceLimits: false,
                 limits: vec![],
+                allowedCalls: vec![],
             };
             let result_past = keychain.authorize_key(account, auth_call_past);
             assert!(
@@ -1245,6 +2042,7 @@ mod tests {
                 expiry: u64::MAX,
                 enforceLimits: false,
                 limits: vec![],
+                allowedCalls: vec![],
             };
             keychain.authorize_key(account, auth_call_1)?;
 
@@ -1258,6 +2056,7 @@ mod tests {
                 expiry: u64::MAX,
                 enforceLimits: true,
                 limits: vec![],
+                allowedCalls: vec![],
             };
             keychain.authorize_key(account, auth_call_2)?;
 
@@ -1298,7 +2097,9 @@ mod tests {
                 limits: vec![TokenLimit {
                     token,
                     amount: U256::from(100),
+                    period: 0,
                 }],
+                allowedCalls: vec![],
             };
             keychain.authorize_key(eoa, auth_call)?;
 
@@ -1410,7 +2211,9 @@ mod tests {
                 limits: vec![TokenLimit {
                     token,
                     amount: U256::from(100),
+                    period: 0,
                 }],
+                allowedCalls: vec![],
             };
             keychain.authorize_key(eoa_alice, auth_call)?;
 
@@ -1540,6 +2343,7 @@ mod tests {
                 expiry: 1, // Minimal positive expiry
                 enforceLimits: false,
                 limits: vec![],
+                allowedCalls: vec![],
             };
             keychain.authorize_key(account, auth_call.clone())?;
 
@@ -1625,6 +2429,7 @@ mod tests {
                 expiry: u64::MAX,
                 enforceLimits: false,
                 limits: vec![],
+                allowedCalls: vec![],
             };
 
             // This would fail if initialize didn't set up storage properly
@@ -1658,6 +2463,7 @@ mod tests {
                 expiry: u64::MAX,
                 enforceLimits: false,
                 limits: vec![],
+                allowedCalls: vec![],
             };
             keychain.authorize_key(account, auth_call)?;
 
@@ -1707,7 +2513,9 @@ mod tests {
                 limits: vec![TokenLimit {
                     token,
                     amount: U256::from(100),
+                    period: 0,
                 }],
+                allowedCalls: vec![],
             };
             keychain.authorize_key(account, auth_call)?;
 
@@ -1753,6 +2561,7 @@ mod tests {
                 expiry: u64::MAX,
                 enforceLimits: false, // Initially no limits
                 limits: vec![],
+                allowedCalls: vec![],
             };
             keychain.authorize_key(account, auth_call)?;
 
@@ -1815,6 +2624,7 @@ mod tests {
                 expiry: u64::MAX,
                 enforceLimits: false,
                 limits: vec![],
+                allowedCalls: vec![],
             };
             keychain.authorize_key(account, auth_call)?;
             keychain.revoke_key(
@@ -1831,6 +2641,7 @@ mod tests {
                 expiry: u64::MAX,
                 enforceLimits: false,
                 limits: vec![],
+                allowedCalls: vec![],
             };
             keychain.authorize_key(account, auth_valid)?;
 
@@ -1905,6 +2716,7 @@ mod tests {
                     expiry: u64::MAX,
                     enforceLimits: false,
                     limits: vec![],
+                    allowedCalls: vec![],
                 },
             )?;
 
@@ -1916,6 +2728,7 @@ mod tests {
                     expiry: u64::MAX,
                     enforceLimits: false,
                     limits: vec![],
+                    allowedCalls: vec![],
                 },
             )?;
 
@@ -1927,6 +2740,7 @@ mod tests {
                     expiry: u64::MAX,
                     enforceLimits: false,
                     limits: vec![],
+                    allowedCalls: vec![],
                 },
             )?;
 
@@ -1989,6 +2803,7 @@ mod tests {
                 expiry: u64::MAX,
                 enforceLimits: false,
                 limits: vec![],
+                allowedCalls: vec![],
             };
             keychain.authorize_key(account, auth_call)?;
 
@@ -2056,7 +2871,9 @@ mod tests {
                 limits: vec![TokenLimit {
                     token,
                     amount: U256::from(100),
+                    period: 0,
                 }],
+                allowedCalls: vec![],
             };
             keychain.authorize_key(eoa, auth_call)?;
 
@@ -2126,7 +2943,9 @@ mod tests {
                 limits: vec![TokenLimit {
                     token,
                     amount: U256::from(100),
+                    period: 0,
                 }],
+                allowedCalls: vec![],
             };
             keychain.authorize_key(eoa, auth_call)?;
 
@@ -2187,7 +3006,9 @@ mod tests {
                 limits: vec![TokenLimit {
                     token,
                     amount: original_limit,
+                    period: 0,
                 }],
+                allowedCalls: vec![],
             };
             keychain.authorize_key(eoa, auth_call)?;
 
@@ -2215,6 +3036,307 @@ mod tests {
                 U256::from(140),
                 "saturating_add should allow refund beyond original limit without overflow"
             );
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_t3_periodic_limit_rollover() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T3);
+        storage.set_timestamp(U256::from(1_000u64));
+
+        let account = Address::random();
+        let key_id = Address::random();
+        let token = Address::random();
+
+        StorageCtx::enter(&mut storage, || {
+            let mut keychain = AccountKeychain::new();
+            keychain.initialize()?;
+            keychain.set_transaction_key(Address::ZERO)?;
+            keychain.set_tx_origin(account)?;
+
+            keychain.authorize_key(
+                account,
+                authorizeKeyCall {
+                    keyId: key_id,
+                    signatureType: SignatureType::Secp256k1,
+                    expiry: u64::MAX,
+                    enforceLimits: true,
+                    limits: vec![TokenLimit {
+                        token,
+                        amount: U256::from(100),
+                        period: 0,
+                    }],
+                    allowedCalls: vec![],
+                },
+            )?;
+
+            keychain.apply_key_authorization_t3(
+                account,
+                key_id,
+                &[TokenLimitConfig {
+                    token,
+                    limit: U256::from(100),
+                    period: 60,
+                }],
+                None,
+            )?;
+
+            keychain.set_transaction_key(key_id)?;
+            keychain.authorize_transfer(account, token, U256::from(80))?;
+
+            let remaining = keychain.get_remaining_limit(getRemainingLimitCall {
+                account,
+                keyId: key_id,
+                token,
+            })?;
+            assert_eq!(remaining, U256::from(20));
+
+            Ok::<_, eyre::Report>(())
+        })?;
+
+        storage.set_timestamp(U256::from(1_070u64));
+        StorageCtx::enter(&mut storage, || {
+            let mut keychain = AccountKeychain::new();
+            keychain.set_transaction_key(key_id)?;
+            keychain.set_tx_origin(account)?;
+
+            keychain.authorize_transfer(account, token, U256::from(10))?;
+
+            let remaining = keychain.get_remaining_limit(getRemainingLimitCall {
+                account,
+                keyId: key_id,
+                token,
+            })?;
+            assert_eq!(remaining, U256::from(90));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_t3_get_allowed_calls_returns_deny_all_sentinel() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T3);
+        let account = Address::random();
+        let key_id = Address::random();
+
+        StorageCtx::enter(&mut storage, || {
+            let mut keychain = AccountKeychain::new();
+            keychain.initialize()?;
+            keychain.set_transaction_key(Address::ZERO)?;
+            keychain.set_tx_origin(account)?;
+
+            keychain.authorize_key(
+                account,
+                authorizeKeyCall {
+                    keyId: key_id,
+                    signatureType: SignatureType::Secp256k1,
+                    expiry: u64::MAX,
+                    enforceLimits: false,
+                    limits: vec![],
+                    allowedCalls: vec![],
+                },
+            )?;
+
+            keychain.apply_key_authorization_t3(account, key_id, &[], Some(&[]))?;
+
+            let scopes = keychain.get_allowed_calls(getAllowedCallsCall {
+                account,
+                keyId: key_id,
+            })?;
+            assert_eq!(scopes.len(), 1);
+            assert_eq!(scopes[0].target, Address::ZERO);
+            assert!(!scopes[0].allowAllSelectors);
+            assert!(scopes[0].selectorRules.is_empty());
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_t3_set_allowed_calls_roundtrip_and_remove_target_scope() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T3);
+        let account = Address::random();
+        let key_id = Address::random();
+        let target = DEFAULT_FEE_TOKEN;
+        let recipient = Address::repeat_byte(0x44);
+
+        StorageCtx::enter(&mut storage, || {
+            let mut keychain = AccountKeychain::new();
+            keychain.initialize()?;
+            keychain.set_transaction_key(Address::ZERO)?;
+            keychain.set_tx_origin(account)?;
+
+            keychain.authorize_key(
+                account,
+                authorizeKeyCall {
+                    keyId: key_id,
+                    signatureType: SignatureType::Secp256k1,
+                    expiry: u64::MAX,
+                    enforceLimits: false,
+                    limits: vec![],
+                    allowedCalls: vec![],
+                },
+            )?;
+
+            keychain.set_allowed_calls(
+                account,
+                setAllowedCallsCall {
+                    keyId: key_id,
+                    target,
+                    allowAllSelectors: false,
+                    selectorRules: vec![SelectorRule {
+                        selector: TIP20_TRANSFER_SELECTOR.into(),
+                        allowAllRecipients: false,
+                        recipients: vec![recipient],
+                    }],
+                },
+            )?;
+
+            let scopes = keychain.get_allowed_calls(getAllowedCallsCall {
+                account,
+                keyId: key_id,
+            })?;
+            assert_eq!(scopes.len(), 1);
+            assert_eq!(scopes[0].target, target);
+            assert!(!scopes[0].allowAllSelectors);
+            assert_eq!(scopes[0].selectorRules.len(), 1);
+            assert_eq!(
+                *scopes[0].selectorRules[0].selector,
+                TIP20_TRANSFER_SELECTOR
+            );
+            assert!(!scopes[0].selectorRules[0].allowAllRecipients);
+            assert_eq!(scopes[0].selectorRules[0].recipients, vec![recipient]);
+
+            keychain.set_allowed_calls(
+                account,
+                setAllowedCallsCall {
+                    keyId: key_id,
+                    target,
+                    allowAllSelectors: false,
+                    selectorRules: vec![],
+                },
+            )?;
+
+            let removed = keychain.get_allowed_calls(getAllowedCallsCall {
+                account,
+                keyId: key_id,
+            })?;
+            assert!(removed.is_empty());
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_t3_call_scope_selector_and_recipient_checks() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T3);
+        let account = Address::random();
+        let key_id = Address::random();
+        let target = DEFAULT_FEE_TOKEN;
+        let allowed_recipient = Address::repeat_byte(0x22);
+        let denied_recipient = Address::repeat_byte(0x33);
+
+        StorageCtx::enter(&mut storage, || {
+            let mut keychain = AccountKeychain::new();
+            keychain.initialize()?;
+            keychain.set_transaction_key(Address::ZERO)?;
+            keychain.set_tx_origin(account)?;
+
+            keychain.authorize_key(
+                account,
+                authorizeKeyCall {
+                    keyId: key_id,
+                    signatureType: SignatureType::Secp256k1,
+                    expiry: u64::MAX,
+                    enforceLimits: false,
+                    limits: vec![],
+                    allowedCalls: vec![],
+                },
+            )?;
+
+            keychain.apply_key_authorization_t3(
+                account,
+                key_id,
+                &[],
+                Some(&[CallScopeConfig {
+                    target,
+                    selector_rules: Some(vec![SelectorRuleConfig {
+                        selector: TIP20_TRANSFER_SELECTOR,
+                        recipients: Some(vec![allowed_recipient]),
+                    }]),
+                }]),
+            )?;
+
+            let make_calldata = |selector: [u8; 4], recipient: Address| {
+                let mut data = selector.to_vec();
+                let mut recipient_word = [0u8; 32];
+                recipient_word[12..].copy_from_slice(recipient.as_slice());
+                data.extend_from_slice(&recipient_word);
+                data.extend_from_slice(&[0u8; 32]);
+                data
+            };
+
+            let allow = keychain.validate_call_scope_for_transaction(
+                account,
+                key_id,
+                &TxKind::Call(target),
+                &make_calldata(TIP20_TRANSFER_SELECTOR, allowed_recipient),
+            );
+            assert!(allow.is_ok());
+
+            let denied = keychain
+                .validate_call_scope_for_transaction(
+                    account,
+                    key_id,
+                    &TxKind::Call(target),
+                    &make_calldata(TIP20_TRANSFER_SELECTOR, denied_recipient),
+                )
+                .expect_err("unexpected success for denied recipient");
+            assert_call_not_allowed(denied);
+
+            let wrong_selector = keychain
+                .validate_call_scope_for_transaction(
+                    account,
+                    key_id,
+                    &TxKind::Call(target),
+                    &make_calldata([0xde, 0xad, 0xbe, 0xef], allowed_recipient),
+                )
+                .expect_err("unexpected success for wrong selector");
+            assert_call_not_allowed(wrong_selector);
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_t3_contract_creation_rejected_for_access_key() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T3);
+        let account = Address::random();
+        let key_id = Address::random();
+
+        StorageCtx::enter(&mut storage, || {
+            let mut keychain = AccountKeychain::new();
+            keychain.initialize()?;
+            keychain.set_transaction_key(Address::ZERO)?;
+            keychain.set_tx_origin(account)?;
+
+            keychain.authorize_key(
+                account,
+                authorizeKeyCall {
+                    keyId: key_id,
+                    signatureType: SignatureType::Secp256k1,
+                    expiry: u64::MAX,
+                    enforceLimits: false,
+                    limits: vec![],
+                    allowedCalls: vec![],
+                },
+            )?;
+
+            let err = keychain
+                .validate_call_scope_for_transaction(account, key_id, &TxKind::Create, &[])
+                .expect_err("unexpected success for CREATE");
+            assert_call_not_allowed(err);
 
             Ok(())
         })

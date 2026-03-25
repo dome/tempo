@@ -126,6 +126,35 @@ fn tempo_signature_verification_gas(signature: &TempoSignature) -> u64 {
     }
 }
 
+#[inline]
+fn key_authorization_scope_slots(
+    key_auth: &tempo_primitives::transaction::SignedKeyAuthorization,
+) -> u64 {
+    match key_auth.authorization.allowed_calls.as_ref() {
+        None => 0,
+        Some(scopes) if scopes.is_empty() => 1,
+        Some(scopes) => {
+            let mut selectors = 0u64;
+            let mut constrained_selectors = 0u64;
+            let mut recipients = 0u64;
+
+            for scope in scopes {
+                if let Some(rules) = scope.selector_rules.as_ref() {
+                    selectors += rules.len() as u64;
+                    for rule in rules {
+                        if let Some(rule_recipients) = rule.recipients.as_ref() {
+                            constrained_selectors += 1;
+                            recipients += rule_recipients.len() as u64;
+                        }
+                    }
+                }
+            }
+
+            1 + scopes.len() as u64 + selectors + constrained_selectors + recipients
+        }
+    }
+}
+
 /// Calculates the intrinsic gas cost for a KeyAuthorization.
 ///
 /// This is charged before execution as part of transaction validation.
@@ -163,7 +192,16 @@ fn calculate_key_authorization_gas(
         let sload_cost =
             gas_params.warm_storage_read_cost() + gas_params.cold_storage_additional_cost();
 
-        sig_gas + sload_cost + sstore_cost * (1 + num_limits) + BUFFER
+        let mut total = sig_gas + sload_cost + sstore_cost * (1 + num_limits) + BUFFER;
+
+        // T3+: include scoped-call storage rows in intrinsic gas.
+        if spec.is_t3() {
+            total = total.saturating_add(
+                sstore_cost.saturating_mul(key_authorization_scope_slots(key_auth)),
+            );
+        }
+
+        total
     } else {
         // Pre-T1B: Original heuristic constants
         KEY_AUTH_BASE_GAS + sig_gas + num_limits * KEY_AUTH_PER_LIMIT_GAS
@@ -927,6 +965,28 @@ where
                 .validate_chain_id(cfg.chain_id(), spec.is_t1c())
                 .map_err(TempoInvalidTransaction::from)?;
 
+            // T3 gates all TIP-1011 fields. Before activation, transaction semantics must stay
+            // unchanged, so periodic limits and call scopes are rejected.
+            if !spec.is_t3() {
+                if key_auth
+                    .limits
+                    .as_ref()
+                    .is_some_and(|limits| limits.iter().any(|limit| limit.period != 0))
+                {
+                    return Err(TempoInvalidTransaction::KeychainValidationFailed {
+                        reason: "periodic token limits are not active before T3".to_string(),
+                    }
+                    .into());
+                }
+
+                if key_auth.allowed_calls.is_some() {
+                    return Err(TempoInvalidTransaction::KeychainValidationFailed {
+                        reason: "call scopes are not active before T3".to_string(),
+                    }
+                    .into());
+                }
+            }
+
             let keychain_checkpoint = if spec.is_t1() {
                 Some(journal.checkpoint())
             } else {
@@ -1008,6 +1068,40 @@ where
                             .map(|limit| TokenLimit {
                                 token: limit.token,
                                 amount: limit.limit,
+                                period: limit.period,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let precompile_allowed_calls = key_auth
+                    .allowed_calls
+                    .as_ref()
+                    .map(|scopes| {
+                        scopes
+                            .iter()
+                            .map(|scope| tempo_precompiles::account_keychain::CallScope {
+                                target: scope.target,
+                                allowAllSelectors: scope.selector_rules.is_none(),
+                                selectorRules: scope
+                                    .selector_rules
+                                    .as_ref()
+                                    .map(|rules| {
+                                        rules
+                                            .iter()
+                                            .map(|rule| {
+                                                tempo_precompiles::account_keychain::SelectorRule {
+                                                    selector: rule.selector.into(),
+                                                    allowAllRecipients: rule.recipients.is_none(),
+                                                    recipients: rule
+                                                        .recipients
+                                                        .clone()
+                                                        .unwrap_or_default(),
+                                                }
+                                            })
+                                            .collect()
+                                    })
+                                    .unwrap_or_default(),
                             })
                             .collect()
                     })
@@ -1020,6 +1114,7 @@ where
                     expiry,
                     enforceLimits: enforce_limits,
                     limits: precompile_limits,
+                    allowedCalls: precompile_allowed_calls,
                 };
 
                 // Call precompile to authorize the key (same phase as nonce increment)
@@ -1128,9 +1223,29 @@ where
                     // Set the transaction key in the keychain precompile
                     // This marks that the current transaction is using an access key
                     // The TIP20 precompile will read this during execution to enforce spending limits
-                    keychain
-                        .set_transaction_key(access_key_addr)
-                        .map_err(|e| EVMError::Custom(e.to_string()))
+                    keychain.set_transaction_key(access_key_addr).map_err(|e| {
+                        TempoInvalidTransaction::KeychainValidationFailed {
+                            reason: e.to_string(),
+                        }
+                    })?;
+
+                    if spec.is_t3() {
+                        let user_address = keychain_sig.user_address;
+                        for (to, input) in tx.calls() {
+                            keychain
+                                .validate_call_scope_for_transaction(
+                                    user_address,
+                                    access_key_addr,
+                                    to,
+                                    input,
+                                )
+                                .map_err(|e| TempoInvalidTransaction::KeychainValidationFailed {
+                                    reason: format!("{e:?}"),
+                                })?;
+                        }
+                    }
+
+                    Ok::<(), EVMError<DB::Error, TempoInvalidTransaction>>(())
                 },
             )?;
         }
@@ -2303,10 +2418,12 @@ mod tests {
             TokenLimit {
                 token: Address::random(),
                 limit: U256::from(100),
+                period: 0,
             },
             TokenLimit {
                 token: Address::random(),
                 limit: U256::from(200),
+                period: 0,
             },
         ];
 
@@ -2317,6 +2434,7 @@ mod tests {
             key_id,
             expiry: Some(expiry),
             limits: Some(limits.clone()),
+            allowed_calls: None,
         }
         .signature_hash();
 
@@ -2327,6 +2445,7 @@ mod tests {
             key_id,
             expiry: Some(expiry),
             limits: Some(limits.clone()),
+            allowed_calls: None,
         }
         .signature_hash();
 
@@ -2339,6 +2458,7 @@ mod tests {
             key_id,
             expiry: Some(expiry),
             limits: Some(limits),
+            allowed_calls: None,
         }
         .signature_hash();
         assert_ne!(
@@ -2439,6 +2559,7 @@ mod tests {
                         .map(|_| TokenLimit {
                             token: Address::random(),
                             limit: U256::from(1000),
+                            period: 0,
                         })
                         .collect(),
                 )
@@ -2451,6 +2572,7 @@ mod tests {
                     key_id: Address::random(),
                     expiry: None,
                     limits,
+                    allowed_calls: None,
                 },
                 signature: PrimitiveSignature::Secp256k1(
                     alloy_primitives::Signature::test_signature(),
@@ -2554,12 +2676,15 @@ mod tests {
                     TokenLimit {
                         token: Address::random(),
                         limit: U256::from(1000),
+                        period: 0,
                     },
                     TokenLimit {
                         token: Address::random(),
                         limit: U256::from(2000),
+                        period: 0,
                     },
                 ]),
+                allowed_calls: None,
             },
             signature: PrimitiveSignature::Secp256k1(alloy_primitives::Signature::test_signature()),
         };
@@ -3247,6 +3372,7 @@ mod tests {
                     Some((0..num_limits).map(|i| PrimTokenLimit {
                         token: Address::with_last_byte(i as u8),
                         limit: U256::from(1000),
+                        period: 0,
                     }).collect())
                 };
 
@@ -3257,6 +3383,7 @@ mod tests {
                         key_id: Address::ZERO,
                         expiry: None,
                         limits,
+                        allowed_calls: None,
                     },
                     signature: PrimitiveSignature::Secp256k1(alloy_primitives::Signature::test_signature()),
                 }
@@ -3315,8 +3442,10 @@ mod tests {
                         Some((0..num_limits).map(|i| PrimTokenLimit {
                             token: Address::with_last_byte(i as u8),
                             limit: U256::from(1000),
+                            period: 0,
                         }).collect())
                     },
+                    allowed_calls: None,
                 },
                 signature,
             };

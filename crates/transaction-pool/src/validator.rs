@@ -2,6 +2,8 @@ use crate::{
     amm::AmmLiquidityCache,
     transaction::{TempoPoolTransactionError, TempoPooledTransaction},
 };
+use std::collections::HashSet;
+
 use alloy_consensus::Transaction;
 
 use alloy_primitives::{Address, U256};
@@ -23,9 +25,12 @@ use tempo_evm::TempoEvmConfig;
 #[cfg(test)]
 use tempo_precompiles::{ACCOUNT_KEYCHAIN_ADDRESS, account_keychain::AuthorizedKey};
 use tempo_precompiles::{
-    account_keychain::AccountKeychain,
+    account_keychain::{
+        AccountKeychain, MAX_CALL_SCOPES, MAX_RECIPIENTS_PER_SELECTOR, MAX_SELECTOR_RULES_PER_SCOPE,
+    },
     nonce::{INonce, NonceManager},
     storage::Handler,
+    tip20::is_tip20_prefix,
 };
 use tempo_primitives::{
     Block,
@@ -154,6 +159,105 @@ where
         Ok(())
     }
 
+    fn is_constrained_tip20_selector(selector: [u8; 4]) -> bool {
+        matches!(
+            selector,
+            [0xa9, 0x05, 0x9c, 0xbb] // transfer(address,uint256)
+                | [0x09, 0x5e, 0xa7, 0xb3] // approve(address,uint256)
+                | [0x95, 0x77, 0x7d, 0x59] // transferWithMemo(address,uint256,bytes32)
+                | [0xc2, 0xda, 0x9a, 0xed] // approveWithMemo(address,uint256,bytes32)
+        )
+    }
+
+    fn validate_t3_key_authorization_shape(
+        &self,
+        auth: &tempo_primitives::transaction::SignedKeyAuthorization,
+    ) -> Result<(), TempoPoolTransactionError> {
+        if let Some(limits) = auth.limits.as_ref() {
+            let mut seen_tokens = HashSet::with_capacity(limits.len());
+            for limit in limits {
+                if !seen_tokens.insert(limit.token) {
+                    return Err(TempoPoolTransactionError::Keychain(
+                        "duplicate token limits are not allowed",
+                    ));
+                }
+            }
+        }
+
+        let Some(scopes) = auth.allowed_calls.as_ref() else {
+            return Ok(());
+        };
+
+        if scopes.len() > MAX_CALL_SCOPES as usize {
+            return Err(TempoPoolTransactionError::Keychain(
+                "too many call scopes in key authorization",
+            ));
+        }
+
+        let mut seen_targets = HashSet::with_capacity(scopes.len());
+        for scope in scopes {
+            if !seen_targets.insert(scope.target) {
+                return Err(TempoPoolTransactionError::Keychain(
+                    "duplicate call scope targets are not allowed",
+                ));
+            }
+
+            let Some(selector_rules) = scope.selector_rules.as_ref() else {
+                continue;
+            };
+
+            if selector_rules.len() > MAX_SELECTOR_RULES_PER_SCOPE as usize {
+                return Err(TempoPoolTransactionError::Keychain(
+                    "too many selector rules in call scope",
+                ));
+            }
+
+            let mut seen_selectors = HashSet::with_capacity(selector_rules.len());
+            for rule in selector_rules {
+                if !seen_selectors.insert(rule.selector) {
+                    return Err(TempoPoolTransactionError::Keychain(
+                        "duplicate selector rules are not allowed",
+                    ));
+                }
+
+                let Some(recipients) = rule.recipients.as_ref() else {
+                    continue;
+                };
+
+                if recipients.is_empty() {
+                    return Err(TempoPoolTransactionError::Keychain(
+                        "recipient-constrained selector rule requires non-empty recipients",
+                    ));
+                }
+
+                if recipients.len() > MAX_RECIPIENTS_PER_SELECTOR as usize {
+                    return Err(TempoPoolTransactionError::Keychain(
+                        "too many recipients in selector rule",
+                    ));
+                }
+
+                if !is_tip20_prefix(scope.target)
+                    || !Self::is_constrained_tip20_selector(rule.selector)
+                {
+                    return Err(TempoPoolTransactionError::Keychain(
+                        "recipient-constrained selector rules require TIP-20 target and constrained selector",
+                    ));
+                }
+
+                let mut seen_recipients = HashSet::with_capacity(recipients.len());
+                for recipient in recipients {
+                    if recipient.is_zero() || !seen_recipients.insert(*recipient) {
+                        return Err(TempoPoolTransactionError::Keychain(
+                            "selector rule recipients must be non-zero and unique",
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Validates AA transactions against the keychain: signature recovery, key authorization,
     /// on-chain key existence/revocation/expiry, and spending limits.
     ///
@@ -197,6 +301,27 @@ where
                 return Ok(Err(TempoPoolTransactionError::Keychain(
                     "KeyAuthorization chain_id does not match current chain",
                 )));
+            }
+
+            // TIP-1011 fields are T3-gated. Keep pre-T3 admission semantics unchanged.
+            if !spec.is_t3() {
+                if auth
+                    .limits
+                    .as_ref()
+                    .is_some_and(|limits| limits.iter().any(|limit| limit.period != 0))
+                {
+                    return Ok(Err(TempoPoolTransactionError::Keychain(
+                        "periodic token limits are not active before T3",
+                    )));
+                }
+
+                if auth.allowed_calls.is_some() {
+                    return Ok(Err(TempoPoolTransactionError::Keychain(
+                        "call scopes are not active before T3",
+                    )));
+                }
+            } else if let Err(err) = self.validate_t3_key_authorization_shape(auth) {
+                return Ok(Err(err));
             }
 
             // Validate KeyAuthorization expiry, reject if expiring within the propagation
@@ -318,11 +443,14 @@ where
         // Check spending limit for fee token if enforce_limits is enabled.
         // This prevents transactions that would exceed the spending limit from entering the pool.
         if fee_payer == transaction.sender() && authorized_key.enforce_limits {
-            // Compute the storage slot for the spending limit
-            let limit_key = AccountKeychain::spending_limit_key(transaction.sender(), key_id);
             let remaining_limit = state_provider
                 .with_read_only_storage_ctx(spec, || {
-                    AccountKeychain::new().spending_limits[limit_key][fee_token].read()
+                    AccountKeychain::new().effective_remaining_limit(
+                        transaction.sender(),
+                        key_id,
+                        fee_token,
+                        current_time,
+                    )
                 })
                 .map_err(ProviderError::other)?;
 
@@ -2737,6 +2865,7 @@ mod tests {
                 key_id: access_key_address,
                 expiry: None, // never expires
                 limits: None, // unlimited
+                allowed_calls: None,
             };
 
             let auth_sig_hash = key_auth.signature_hash();
@@ -2784,6 +2913,7 @@ mod tests {
                 key_id: access_key_address,
                 expiry: None,
                 limits: None,
+                allowed_calls: None,
             };
 
             let auth_sig_hash = key_auth.signature_hash();
@@ -2845,7 +2975,9 @@ mod tests {
                 limits: Some(vec![TokenLimit {
                     token: fee_token,
                     limit: U256::ZERO,
+                    period: 0,
                 }]),
+                allowed_calls: None,
             };
 
             let auth_sig_hash = key_auth.signature_hash();
@@ -2899,6 +3031,7 @@ mod tests {
                 key_id: access_key_address,
                 expiry: None,
                 limits: Some(vec![]),
+                allowed_calls: None,
             };
 
             let auth_sig_hash = key_auth.signature_hash();
@@ -2956,7 +3089,9 @@ mod tests {
                 limits: Some(vec![TokenLimit {
                     token: non_fee_token,
                     limit: U256::MAX,
+                    period: 0,
                 }]),
+                allowed_calls: None,
             };
 
             let auth_sig_hash = key_auth.signature_hash();
@@ -3019,12 +3154,15 @@ mod tests {
                     TokenLimit {
                         token: fee_token,
                         limit: U256::ZERO,
+                        period: 0,
                     },
                     TokenLimit {
                         token: fee_token,
                         limit: fee_cost + U256::from(100),
+                        period: 0,
                     },
                 ]),
+                allowed_calls: None,
             };
 
             let auth_sig_hash = key_auth.signature_hash();
@@ -3075,7 +3213,9 @@ mod tests {
                 limits: Some(vec![TokenLimit {
                     token: resolved_fee_token,
                     limit: U256::MAX,
+                    period: 0,
                 }]),
+                allowed_calls: None,
             };
 
             let auth_sig_hash = key_auth.signature_hash();
@@ -3127,7 +3267,9 @@ mod tests {
                 limits: Some(vec![TokenLimit {
                     token: fee_token,
                     limit: U256::ZERO,
+                    period: 0,
                 }]),
+                allowed_calls: None,
             };
 
             let auth_sig_hash = key_auth.signature_hash();
@@ -3219,6 +3361,7 @@ mod tests {
                 key_id: access_key_address,
                 expiry: None,
                 limits: None,
+                allowed_calls: None,
             };
             let auth_sig_hash = key_auth.signature_hash();
             let auth_signature = user_signer
@@ -3417,6 +3560,7 @@ mod tests {
                 key_id: different_key_id, // Different from access_key_address
                 expiry: None,
                 limits: None,
+                allowed_calls: None,
             };
 
             let auth_sig_hash = key_auth.signature_hash();
@@ -3470,6 +3614,7 @@ mod tests {
                 key_id: access_key_address,
                 expiry: None,
                 limits: None,
+                allowed_calls: None,
             };
 
             let auth_sig_hash = key_auth.signature_hash();
@@ -3791,6 +3936,7 @@ mod tests {
                 key_id: access_key_address,
                 expiry: Some(current_time - 1), // Expired
                 limits: None,
+                allowed_calls: None,
             };
 
             let auth_sig_hash = key_auth.signature_hash();
@@ -3843,6 +3989,7 @@ mod tests {
                 key_id: access_key_address,
                 expiry: Some(current_time), // Expired at exactly current time
                 limits: None,
+                allowed_calls: None,
             };
 
             let auth_sig_hash = key_auth.signature_hash();
@@ -3894,6 +4041,7 @@ mod tests {
                 key_id: access_key_address,
                 expiry: Some(current_time + 100), // Valid (in the future)
                 limits: None,
+                allowed_calls: None,
             };
 
             let auth_sig_hash = key_auth.signature_hash();
@@ -3944,6 +4092,7 @@ mod tests {
                 key_id: access_key_address,
                 expiry: Some(expiry),
                 limits: None,
+                allowed_calls: None,
             };
 
             let auth_sig_hash = key_auth.signature_hash();
@@ -3995,6 +4144,7 @@ mod tests {
                 key_id: access_key_address,
                 expiry: None, // Never expires
                 limits: None,
+                allowed_calls: None,
             };
 
             let auth_sig_hash = key_auth.signature_hash();

@@ -14,8 +14,8 @@ use alloy::{
 };
 use coins_bip32::prelude::*;
 use eyre::{Context as _, ensure};
-use itertools::Itertools;
 use indicatif::{ProgressBar, ProgressStyle};
+use itertools::Itertools;
 use rayon::prelude::*;
 use std::{
     fs::File,

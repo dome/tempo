@@ -292,17 +292,38 @@ impl RecommendedFillers for TempoNetwork {
     }
 }
 
-impl NetworkWallet<TempoNetwork> for EthereumWallet {
+/// Tempo wallet wrapper around [`EthereumWallet`].
+///
+/// This local wrapper avoids coherence conflicts if upstream alloy adds broader
+/// `NetworkWallet` blanket impls for `EthereumWallet`.
+#[derive(Debug, Clone)]
+pub struct TempoWallet {
+    inner: EthereumWallet,
+}
+
+impl From<EthereumWallet> for TempoWallet {
+    fn from(inner: EthereumWallet) -> Self {
+        Self { inner }
+    }
+}
+
+impl From<PrivateKeySigner> for TempoWallet {
+    fn from(signer: PrivateKeySigner) -> Self {
+        EthereumWallet::from(signer).into()
+    }
+}
+
+impl NetworkWallet<TempoNetwork> for TempoWallet {
     fn default_signer_address(&self) -> Address {
-        NetworkWallet::<Ethereum>::default_signer_address(self)
+        NetworkWallet::<Ethereum>::default_signer_address(&self.inner)
     }
 
     fn has_signer_for(&self, address: &Address) -> bool {
-        NetworkWallet::<Ethereum>::has_signer_for(self, address)
+        NetworkWallet::<Ethereum>::has_signer_for(&self.inner, address)
     }
 
     fn signer_addresses(&self) -> impl Iterator<Item = Address> {
-        NetworkWallet::<Ethereum>::signer_addresses(self)
+        NetworkWallet::<Ethereum>::signer_addresses(&self.inner)
     }
 
     #[doc(alias = "sign_tx_from")]
@@ -311,7 +332,7 @@ impl NetworkWallet<TempoNetwork> for EthereumWallet {
         sender: Address,
         mut tx: TempoTypedTransaction,
     ) -> alloy_signer::Result<TempoTxEnvelope> {
-        let signer = self.signer_by_address(sender).ok_or_else(|| {
+        let signer = self.inner.signer_by_address(sender).ok_or_else(|| {
             alloy_signer::Error::other(format!("Missing signing credential for {sender}"))
         })?;
         let sig = signer.sign_transaction(tx.as_dyn_signable_mut()).await?;
@@ -320,7 +341,7 @@ impl NetworkWallet<TempoNetwork> for EthereumWallet {
 }
 
 impl IntoWallet<TempoNetwork> for PrivateKeySigner {
-    type NetworkWallet = EthereumWallet;
+    type NetworkWallet = TempoWallet;
 
     fn into_wallet(self) -> Self::NetworkWallet {
         self.into()

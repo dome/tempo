@@ -1201,12 +1201,22 @@ impl AccountKeychain {
             return Ok((remaining, period_state.period_end));
         }
 
-        let elapsed = current_timestamp.saturating_sub(period_state.period_end);
-        let periods_elapsed = elapsed / period_state.period + 1;
-        let advance = period_state.period.saturating_mul(periods_elapsed);
-        let next_end = period_state.period_end.saturating_add(advance);
+        let next_end = Self::compute_next_period_end(
+            period_state.period_end,
+            period_state.period,
+            current_timestamp,
+        );
 
         Ok((period_state.max, next_end))
+    }
+
+    /// Computes the period end for the current rollover window, saturating on
+    /// all intermediate operations to avoid overflow in extreme timestamps.
+    fn compute_next_period_end(period_end: u64, period: u64, current_timestamp: u64) -> u64 {
+        let elapsed = current_timestamp.saturating_sub(period_end);
+        let periods_elapsed = (elapsed / period).saturating_add(1);
+        let advance = period.saturating_mul(periods_elapsed);
+        period_end.saturating_add(advance)
     }
 
     /// Deducts `amount` from the key's remaining spending limit for `token`, failing if exceeded.
@@ -1244,10 +1254,11 @@ impl AccountKeychain {
             if period_state.period > 0 {
                 let now = self.storage.timestamp().saturating_to::<u64>();
                 if now >= period_state.period_end {
-                    let elapsed = now.saturating_sub(period_state.period_end);
-                    let periods_elapsed = elapsed / period_state.period + 1;
-                    let advance = period_state.period.saturating_mul(periods_elapsed);
-                    let next_end = period_state.period_end.saturating_add(advance);
+                    let next_end = Self::compute_next_period_end(
+                        period_state.period_end,
+                        period_state.period,
+                        now,
+                    );
 
                     remaining = period_state.max;
                     self.spending_limits[limit_key][token].write(period_state.max)?;

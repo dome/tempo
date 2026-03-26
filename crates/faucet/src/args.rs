@@ -5,7 +5,7 @@ use alloy::{
     signers::local::PrivateKeySigner,
 };
 use clap::Args;
-use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderBuilderExt};
+use tempo_alloy::TempoNetwork;
 
 /// Faucet-specific CLI arguments
 #[derive(Debug, Clone, Default, Args, PartialEq, Eq)]
@@ -68,8 +68,10 @@ impl FaucetArgs {
     }
 
     pub fn provider(&self) -> DynProvider<TempoNetwork> {
-        ProviderBuilder::new_with_network::<TempoNetwork>()
-            .with_expiring_nonces()
+        // Use standard sequential nonces for the faucet — it's a privileged internal tool
+        // and doesn't need expiring nonces (TIP-1009), which can fail when the node's block
+        // timestamps lag behind wall-clock time at startup.
+        ProviderBuilder::default()
             .wallet(self.wallet())
             .connect_http(
                 self.node_address

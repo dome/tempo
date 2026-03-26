@@ -264,6 +264,18 @@ impl KeyAuthorization {
         keccak256(&buf)
     }
 
+    /// Returns whether any token limit uses periodic reset semantics.
+    pub fn has_periodic_limits(&self) -> bool {
+        self.limits
+            .as_ref()
+            .is_some_and(|limits| limits.iter().any(|limit| limit.period != 0))
+    }
+
+    /// Returns whether this authorization carries explicit call-scope restrictions.
+    pub fn has_call_scopes(&self) -> bool {
+        self.allowed_calls.is_some()
+    }
+
     /// Returns whether this key has unlimited spending (limits is None)
     pub fn has_unlimited_spending(&self) -> bool {
         self.limits.is_none()
@@ -305,6 +317,42 @@ impl KeyAuthorization {
             });
         }
         Ok(())
+    }
+
+    /// Returns the number of storage rows written for scoped-call state.
+    ///
+    /// This mirrors the writes performed by `authorize_key -> replace_allowed_calls ->
+    /// upsert_target_scope` in the account keychain precompile.
+    pub fn call_scope_storage_slots(&self) -> u64 {
+        match self.allowed_calls.as_ref() {
+            None => 0,
+            Some(scopes) if scopes.is_empty() => 1,
+            Some(scopes) => {
+                let mut selectors = 0u64;
+                let mut constrained_selectors = 0u64;
+                let mut recipients = 0u64;
+
+                for scope in scopes {
+                    if let Some(rules) = scope.selector_rules.as_ref() {
+                        selectors += rules.len() as u64;
+                        for rule in rules {
+                            if let Some(rule_recipients) = rule.recipients.as_ref() {
+                                constrained_selectors += 1;
+                                recipients += rule_recipients.len() as u64;
+                            }
+                        }
+                    }
+                }
+
+                // Storage write accounting:
+                // - account mode write: 1
+                // - each target insertion + target mode write: 3 + 1
+                // - each selector insertion + selector mode write: 3 + 1
+                // - recipient-constrained selectors also write recipient set length: +1 per selector
+                // - recipient set values+positions: +2 per recipient
+                1 + scopes.len() as u64 * 4 + selectors * 4 + constrained_selectors + recipients * 2
+            }
+        }
     }
 
     /// Calculates a heuristic for the in-memory size of the key authorization

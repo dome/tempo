@@ -266,31 +266,10 @@ impl MaxTpsArgs {
             // Default: Use expiring nonces (TIP-1009)
             // Use the default 25-second expiry window (protocol max is 30s).
             let expiry_secs = ExpiringNonceFiller::DEFAULT_EXPIRY_SECS;
-
-            // Compute clock offset between wall clock and node block timestamps.
-            // Local bench nodes can lag behind wall clock after startup, causing
-            // valid_before to be rejected as "too far in the future".
-            let probe: DynProvider<TempoNetwork> = ProviderBuilder::default()
-                .connect_http(self.target_urls[0].clone())
-                .erased();
-            let block_timestamp = probe
-                .get_block_by_number(alloy::eips::BlockNumberOrTag::Latest)
-                .await?
-                .ok_or_else(|| eyre::eyre!("failed to fetch latest block for clock calibration"))?
-                .header
-                .timestamp();
-            let wall_clock = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock before UNIX_EPOCH")
-                .as_secs();
-            let clock_offset_secs = block_timestamp as i64 - wall_clock as i64;
             info!(
                 accounts = self.accounts,
-                expiry_secs,
-                clock_offset_secs,
-                "Creating signers (with expiring nonces - TIP-1009)"
+                expiry_secs, "Creating signers (with expiring nonces - TIP-1009)"
             );
-
             let signer_provider_manager = SignerProviderManager::new(
                 self.mnemonic.resolve(),
                 self.from_mnemonic_index,
@@ -298,10 +277,7 @@ impl MaxTpsArgs {
                 self.target_urls.clone(),
                 Box::new(move |target_url, _cached_nonce_manager| {
                     ProviderBuilder::default()
-                        .filler(
-                            ExpiringNonceFiller::with_expiry_secs(expiry_secs)
-                                .with_clock_offset_secs(clock_offset_secs),
-                        )
+                        .filler(ExpiringNonceFiller::with_expiry_secs(expiry_secs))
                         .with_gas_estimation()
                         .fetch_chain_id()
                         .connect_http(target_url)

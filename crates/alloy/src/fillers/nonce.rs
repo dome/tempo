@@ -85,16 +85,12 @@ impl<N: Network<TransactionRequest = TempoTransactionRequest>> TxFiller<N> for R
 pub struct ExpiringNonceFiller {
     /// Expiry window in seconds from current time.
     expiry_secs: u64,
-    /// Fixed offset (in seconds) to adjust wall-clock time toward the node's block timestamp.
-    /// Computed as `block_timestamp - wall_clock_timestamp`. Negative when the node lags behind.
-    clock_offset_secs: i64,
 }
 
 impl Default for ExpiringNonceFiller {
     fn default() -> Self {
         Self {
             expiry_secs: Self::DEFAULT_EXPIRY_SECS,
-            clock_offset_secs: 0,
         }
     }
 }
@@ -110,18 +106,7 @@ impl ExpiringNonceFiller {
     /// For benchmarking purposes, use a large value (e.g., 3600 for 1 hour) to avoid
     /// transactions expiring before they're sent.
     pub fn with_expiry_secs(expiry_secs: u64) -> Self {
-        Self {
-            expiry_secs,
-            clock_offset_secs: 0,
-        }
-    }
-
-    /// Sets a fixed clock offset to correct for drift between wall-clock time and the node's
-    /// block timestamps. The offset is `block_timestamp - wall_clock_timestamp` and is applied
-    /// when computing `valid_before`.
-    pub fn with_clock_offset_secs(mut self, offset_secs: i64) -> Self {
-        self.clock_offset_secs = offset_secs;
-        self
+        Self { expiry_secs }
     }
 
     /// Returns `true` if all expiring nonce fields are properly set:
@@ -134,17 +119,16 @@ impl ExpiringNonceFiller {
             && tx.valid_before.is_some()
     }
 
-    /// Returns the current unix timestamp adjusted by the clock offset, saturating to 0 if
-    /// system time is before UNIX_EPOCH (which can occur due to NTP adjustments or VM clock drift).
-    fn current_timestamp(&self) -> u64 {
-        let now = SystemTime::now()
+    /// Returns the current unix timestamp, saturating to 0 if system time is before UNIX_EPOCH
+    /// (which can occur due to NTP adjustments or VM clock drift).
+    fn current_timestamp() -> u64 {
+        SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or_else(|_| {
                 tracing::warn!("system clock before UNIX_EPOCH, using 0");
                 0
-            });
-        now.saturating_add_signed(self.clock_offset_secs)
+            })
     }
 }
 
@@ -167,7 +151,7 @@ impl<N: Network<TransactionRequest = TempoTransactionRequest>> TxFiller<N> for E
             // Nonce must be 0 for expiring nonce transactions
             builder.set_nonce(0);
             // Set valid_before to current time + expiry window
-            builder.set_valid_before(self.current_timestamp() + self.expiry_secs);
+            builder.set_valid_before(Self::current_timestamp() + self.expiry_secs);
         }
     }
 

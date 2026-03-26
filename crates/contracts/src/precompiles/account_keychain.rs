@@ -154,6 +154,41 @@ crate::sol! {
     }
 }
 
+crate::sol! {
+    /// Legacy Account Keychain interface exposed for pre-T3 networks.
+    ///
+    /// Current nodes before T3 still accept the original 5-argument `authorizeKey`
+    /// selector and return a single `uint256` from `getRemainingLimit`.
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(abi)]
+    interface IAccountKeychainLegacy {
+        enum SignatureType {
+            Secp256k1,
+            P256,
+            WebAuthn,
+        }
+
+        struct TokenLimit {
+            address token;
+            uint256 amount;
+        }
+
+        function authorizeKey(
+            address keyId,
+            SignatureType signatureType,
+            uint64 expiry,
+            bool enforceLimits,
+            TokenLimit[] calldata limits
+        ) external;
+
+        function getRemainingLimit(
+            address account,
+            address keyId,
+            address token
+        ) external view returns (uint256 remaining);
+    }
+}
+
 impl AccountKeychainError {
     /// Creates an error for signature type mismatch.
     pub const fn signature_type_mismatch(expected: u8, actual: u8) -> Self {

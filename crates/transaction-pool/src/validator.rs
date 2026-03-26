@@ -296,6 +296,10 @@ where
         to: &alloy_primitives::TxKind,
         input: &[u8],
     ) -> bool {
+        if to.is_create() {
+            return false;
+        }
+
         let Some(scopes) = scopes else {
             return true;
         };
@@ -343,6 +347,12 @@ where
         auth: &tempo_primitives::transaction::SignedKeyAuthorization,
     ) -> Result<(), TempoPoolTransactionError> {
         for call in &tx.calls {
+            if call.to.is_create() {
+                return Err(TempoPoolTransactionError::Keychain(
+                    "contract creation not allowed with access keys",
+                ));
+            }
+
             if !Self::call_scope_allows_call(auth.allowed_calls.as_deref(), &call.to, &call.input) {
                 return Err(TempoPoolTransactionError::Keychain(
                     "call not allowed by key scope",
@@ -468,6 +478,12 @@ where
             if auth.key_id != key_id {
                 return Ok(Err(TempoPoolTransactionError::Keychain(
                     "KeyAuthorization key_id does not match Keychain signature key_id",
+                )));
+            }
+
+            if spec.is_t1() && auth.key_type != sig.signature.signature_type() {
+                return Ok(Err(TempoPoolTransactionError::Keychain(
+                    "key authorization key_type does not match the keychain signature type",
                 )));
             }
 
@@ -2603,6 +2619,7 @@ mod tests {
         use alloy_signer::SignerSync;
         use alloy_signer_local::PrivateKeySigner;
         use reth_chainspec::ForkCondition;
+        use reth_primitives_traits::Recovered;
         use reth_transaction_pool::error::PoolTransactionError;
         use tempo_chainspec::hardfork::TempoHardfork;
         use tempo_primitives::transaction::{
@@ -3633,6 +3650,97 @@ mod tests {
         }
 
         #[test]
+        fn test_key_authorization_t3_rejects_inline_contract_creation() {
+            let (access_key_signer, access_key_address) = generate_keypair();
+            let (user_signer, user_address) = generate_keypair();
+
+            let key_auth = KeyAuthorization {
+                chain_id: 42431,
+                key_type: SignatureType::Secp256k1,
+                key_id: access_key_address,
+                expiry: None,
+                limits: None,
+                allowed_calls: None,
+            };
+
+            let auth_sig_hash = key_auth.signature_hash();
+            let auth_signature = user_signer
+                .sign_hash_sync(&auth_sig_hash)
+                .expect("signing failed");
+            let signed_key_auth =
+                key_auth.into_signed(PrimitiveSignature::Secp256k1(auth_signature));
+
+            let tx_aa = TempoTransaction {
+                chain_id: 42431,
+                max_priority_fee_per_gas: 1_000_000_000,
+                max_fee_per_gas: 20_000_000_000,
+                gas_limit: 1_000_000,
+                calls: vec![Call {
+                    to: TxKind::Create,
+                    value: U256::ZERO,
+                    input: alloy_primitives::Bytes::new(),
+                }],
+                nonce_key: U256::ZERO,
+                nonce: 0,
+                fee_token: Some(address!("0000000000000000000000000000000000000002")),
+                fee_payer_signature: None,
+                valid_after: None,
+                valid_before: None,
+                access_list: Default::default(),
+                tempo_authorization_list: vec![],
+                key_authorization: Some(signed_key_auth),
+            };
+
+            let unsigned = AASigned::new_unhashed(
+                tx_aa.clone(),
+                TempoSignature::Primitive(PrimitiveSignature::Secp256k1(
+                    Signature::test_signature(),
+                )),
+            );
+            let sig_hash = KeychainSignature::signing_hash(unsigned.signature_hash(), user_address);
+            let signature = access_key_signer
+                .sign_hash_sync(&sig_hash)
+                .expect("signing failed");
+            let signed = AASigned::new_unhashed(
+                tx_aa,
+                TempoSignature::Keychain(KeychainSignature::new(
+                    user_address,
+                    PrimitiveSignature::Secp256k1(signature),
+                )),
+            );
+            let transaction = TempoPooledTransaction::new(Recovered::new_unchecked(
+                tempo_primitives::TempoTxEnvelope::AA(signed),
+                user_address,
+            ));
+
+            let validator = setup_validator_with_keychain_storage_spec(
+                &transaction,
+                user_address,
+                access_key_address,
+                None,
+                moderato_with_t3(),
+            );
+            let mut state_provider = validator.inner.client().latest().unwrap();
+
+            let result = validate_against_keychain_default_fee_context(
+                &validator,
+                &transaction,
+                &mut state_provider,
+            )
+            .expect("should not be a provider error");
+
+            assert!(
+                matches!(
+                    result,
+                    Err(TempoPoolTransactionError::Keychain(
+                        "contract creation not allowed with access keys"
+                    ))
+                ),
+                "Expected create-call rejection, got: {result:?}"
+            );
+        }
+
+        #[test]
         fn test_key_authorization_t3_accepts_inline_allowed_call_scope() {
             let (access_key_signer, access_key_address) = generate_keypair();
             let (user_signer, user_address) = generate_keypair();
@@ -4094,6 +4202,59 @@ mod tests {
                     ))
                 ),
                 "Invalid KeyAuthorization signature should be rejected"
+            );
+        }
+
+        #[test]
+        fn test_key_authorization_same_tx_key_type_mismatch_rejected() {
+            let (access_key_signer, access_key_address) = generate_keypair();
+            let (user_signer, user_address) = generate_keypair();
+
+            let key_auth = KeyAuthorization {
+                chain_id: 1337,
+                key_type: SignatureType::P256,
+                key_id: access_key_address,
+                expiry: None,
+                limits: None,
+                allowed_calls: None,
+            };
+
+            let auth_sig_hash = key_auth.signature_hash();
+            let auth_signature = user_signer
+                .sign_hash_sync(&auth_sig_hash)
+                .expect("signing failed");
+            let signed_key_auth =
+                key_auth.into_signed(PrimitiveSignature::Secp256k1(auth_signature));
+
+            let transaction = create_aa_with_keychain_signature(
+                user_address,
+                &access_key_signer,
+                Some(signed_key_auth),
+            );
+
+            let validator = setup_validator_with_keychain_storage_t1c(
+                &transaction,
+                user_address,
+                access_key_address,
+                None,
+            );
+            let mut state_provider = validator.inner.client().latest().unwrap();
+
+            let result = validate_against_keychain_default_fee_context(
+                &validator,
+                &transaction,
+                &mut state_provider,
+            )
+            .expect("should not be a provider error");
+
+            assert!(
+                matches!(
+                    result,
+                    Err(TempoPoolTransactionError::Keychain(
+                        "key authorization key_type does not match the keychain signature type"
+                    ))
+                ),
+                "Expected key-type mismatch rejection, got: {result:?}"
             );
         }
 

@@ -1,3 +1,4 @@
+use alloy::sol_types::SolCall;
 use alloy_contract::Result as ContractResult;
 use alloy_primitives::{Address, U256};
 use alloy_provider::{
@@ -6,7 +7,12 @@ use alloy_provider::{
 };
 use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS,
-    IAccountKeychain::{IAccountKeychainInstance, KeyInfo},
+    IAccountKeychain::{
+        IAccountKeychainInstance, KeyInfo, getRemainingLimitCall, getRemainingLimitReturn,
+    },
+    IAccountKeychainLegacy::{
+        IAccountKeychainLegacyInstance, getRemainingLimitCall as legacyGetRemainingLimitCall,
+    },
 };
 
 use crate::{
@@ -24,6 +30,14 @@ pub trait TempoProviderExt: Provider<TempoNetwork> {
         Self: Sized,
     {
         IAccountKeychainInstance::new(ACCOUNT_KEYCHAIN_ADDRESS, self)
+    }
+
+    /// Returns a typed legacy Account Keychain instance for pre-T3 networks.
+    fn account_keychain_legacy(&self) -> IAccountKeychainLegacyInstance<&Self, TempoNetwork>
+    where
+        Self: Sized,
+    {
+        IAccountKeychainLegacyInstance::new(ACCOUNT_KEYCHAIN_ADDRESS, self)
     }
 
     /// Returns information about a key authorized for an account.
@@ -44,13 +58,22 @@ pub trait TempoProviderExt: Provider<TempoNetwork> {
     where
         Self: Sized,
     {
-        let ret = self
+        let raw = self
             .account_keychain()
             .getRemainingLimit(account, key_id, token)
+            .clear_decoder()
             .call()
             .await?;
 
-        Ok((ret.remaining, ret.periodEnd))
+        match getRemainingLimitCall::abi_decode_returns(&raw) {
+            Ok(getRemainingLimitReturn {
+                remaining,
+                periodEnd,
+            }) => Ok((remaining, periodEnd)),
+            Err(_) => legacyGetRemainingLimitCall::abi_decode_returns(&raw)
+                .map(|remaining| (remaining, 0))
+                .map_err(Into::into),
+        }
     }
 
     /// Returns the key ID used in the current transaction context.
@@ -147,6 +170,7 @@ mod tests {
         KeyInfo, SignatureType, getKeyCall, getRemainingLimitCall, getRemainingLimitReturn,
         getTransactionKeyCall,
     };
+    use tempo_contracts::precompiles::IAccountKeychainLegacy::getRemainingLimitCall as legacyGetRemainingLimitCall;
 
     use crate::{
         TempoFillers, TempoNetwork,
@@ -222,6 +246,26 @@ mod tests {
             .expect("remaining limit call succeeds");
 
         assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn test_get_keychain_remaining_limit_falls_back_to_legacy_decode() {
+        let asserter = Asserter::new();
+        let provider = mock_provider(asserter.clone());
+        let account = Address::repeat_byte(0x11);
+        let key_id = Address::repeat_byte(0x22);
+        let token = Address::repeat_byte(0x33);
+
+        asserter.push_success(&Bytes::from(
+            legacyGetRemainingLimitCall::abi_encode_returns(&U256::from(42_u64)),
+        ));
+
+        let actual = provider
+            .get_keychain_remaining_limit(account, key_id, token)
+            .await
+            .expect("legacy remaining limit call succeeds");
+
+        assert_eq!(actual, (U256::from(42_u64), 0));
     }
 
     #[tokio::test]

@@ -565,12 +565,9 @@ impl AccountKeychain {
 
         let account_key = Self::account_key(msg_sender, call.keyId);
 
-        // Any explicit target update implies restricted mode.
-        self.key_scopes[account_key].mode.write(1)?;
-
         if call.allowAllSelectors {
             // TIP-1011 precedence: allow-all selectors ignores selectorRules entirely.
-            self.upsert_target_scope(account_key, call.target, None)
+            self.upsert_target_scope(account_key, call.target, None)?;
         } else {
             let mut selector_rules = Vec::new();
             for rule in call.selectorRules {
@@ -592,8 +589,15 @@ impl AccountKeychain {
                     });
                 }
             }
-            self.upsert_target_scope(account_key, call.target, Some(selector_rules))
+            self.upsert_target_scope(account_key, call.target, Some(selector_rules))?;
         }
+
+        let mode = if self.key_scopes[account_key].targets.is_empty()? {
+            2
+        } else {
+            1
+        };
+        self.key_scopes[account_key].mode.write(mode)
     }
 
     /// Returns call scopes configured for an account key.
@@ -620,8 +624,16 @@ impl AccountKeychain {
             }]);
         }
 
-        let mut scopes = Vec::new();
         let targets = self.key_scopes[account_key].targets.read()?;
+        if targets.is_empty() {
+            return Ok(vec![CallScope {
+                target: Address::ZERO,
+                allowAllSelectors: false,
+                selectorRules: Vec::new(),
+            }]);
+        }
+
+        let mut scopes = Vec::new();
         for target in targets {
             let target_mode = self.key_scopes[account_key].target_scopes[target]
                 .mode
@@ -3324,8 +3336,7 @@ mod tests {
         let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T3);
         let account = Address::random();
         let key_id = Address::random();
-        let target = DEFAULT_FEE_TOKEN;
-        let recipient = Address::repeat_byte(0x44);
+        let target = Address::random();
 
         StorageCtx::enter(&mut storage, || {
             let mut keychain = AccountKeychain::new();
@@ -3354,8 +3365,8 @@ mod tests {
                     allowAllSelectors: false,
                     selectorRules: vec![SelectorRule {
                         selector: TIP20_TRANSFER_SELECTOR.into(),
-                        allowAllRecipients: false,
-                        recipients: vec![recipient],
+                        allowAllRecipients: true,
+                        recipients: vec![],
                     }],
                 },
             )?;
@@ -3372,8 +3383,8 @@ mod tests {
                 *scopes[0].selectorRules[0].selector,
                 TIP20_TRANSFER_SELECTOR
             );
-            assert!(!scopes[0].selectorRules[0].allowAllRecipients);
-            assert_eq!(scopes[0].selectorRules[0].recipients, vec![recipient]);
+            assert!(scopes[0].selectorRules[0].allowAllRecipients);
+            assert!(scopes[0].selectorRules[0].recipients.is_empty());
 
             keychain.set_allowed_calls(
                 account,
@@ -3389,7 +3400,10 @@ mod tests {
                 account,
                 keyId: key_id,
             })?;
-            assert!(removed.is_empty());
+            assert_eq!(removed.len(), 1);
+            assert_eq!(removed[0].target, Address::ZERO);
+            assert!(!removed[0].allowAllSelectors);
+            assert!(removed[0].selectorRules.is_empty());
 
             Ok(())
         })

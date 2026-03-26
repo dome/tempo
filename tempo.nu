@@ -1415,12 +1415,12 @@ def "main bench-init" [
         cp $bloat_file $"($meta_dir)/state_bloat.bin"
     }
 
+    # Write marker before promote so it's included in the virgin snapshot
+    write-bench-marker $bloat $genesis_accounts $datadir
+
     # Promote and remount
     bench-promote $datadir
     bench-mount
-
-    # Write marker
-    write-bench-marker $bloat $genesis_accounts $datadir
 
     print $"Virgin snapshot initialized and promoted."
 }
@@ -1789,11 +1789,7 @@ def "main bench" [
                     cp $bloat_file $"($meta_dir)/state_bloat.bin"
                 }
 
-                # Promote entire volume (snapshots both baseline-db and feature-db)
-                bench-promote $datadir
-                bench-mount
-
-                # Write marker with hardfork info
+                # Write marker before promote so it's included in the virgin snapshot
                 mkdir $meta_dir
                 let marker_path = $"($meta_dir)/marker.json"
                 {
@@ -1805,6 +1801,10 @@ def "main bench" [
                     initialized_at: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
                 } | to json | save -f $marker_path
                 print $"Bench marker written to ($marker_path)"
+
+                # Promote entire volume (snapshots both baseline-db and feature-db)
+                bench-promote $datadir
+                bench-mount
 
                 print "Dual-hardfork databases initialized and promoted."
             }
@@ -1879,10 +1879,11 @@ def "main bench" [
                     cp $bloat_file $"($meta_dir)/state_bloat.bin"
                 }
 
+                # Write marker before promote so it's included in the virgin snapshot
+                write-bench-marker $bloat $genesis_accounts $datadir
+
                 bench-promote $datadir
                 bench-mount
-
-                write-bench-marker $bloat $genesis_accounts $datadir
 
                 print "Database initialized and promoted to virgin baseline."
             }

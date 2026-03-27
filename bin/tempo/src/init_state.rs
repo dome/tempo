@@ -121,9 +121,13 @@ impl StorageLoader {
         }
     }
 
-    /// Ensure the address has an entry in `PlainAccountState`, reading the
-    /// existing genesis account (preserving its bytecode hash) or inserting a
-    /// default. No-ops on subsequent calls for the same address.
+    /// Ensure the address has an entry in `PlainAccountState`.
+    /// Repeated encounters are expected for chunked binary dumps: the same token
+    /// address can appear across multiple blocks, so this is vacant only on the
+    /// first encounter. Preserving the genesis account is critical because TIP20
+    /// tokens have bytecode (0xEF) set during genesis, and overwriting with
+    /// `Account::default()` would clear the code hash and make the token appear
+    /// uninitialized.
     fn ensure_account<P>(
         &mut self,
         provider: &P,
@@ -156,8 +160,7 @@ impl StorageLoader {
         slot: B256,
         value: U256,
     ) -> eyre::Result<()> {
-        // Zero values mean deletion, so both direct generation and binary loading
-        // must skip them to preserve the historical loader semantics.
+        // Skip zero values (they represent deletion)
         if value.is_zero() {
             return Ok(());
         }

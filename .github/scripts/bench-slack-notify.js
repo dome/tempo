@@ -113,13 +113,13 @@ function buildMetricRows(summary) {
   const f = summary.results.feature;
   const d = summary.results.deltas;
   return [
-    { label: 'Mean Latency', baseline: fmtMs(b.latency_mean), feature: fmtMs(f.latency_mean), change: fmtDelta(d.latency_mean) },
-    { label: 'StdDev',       baseline: fmtMs(b.latency_stddev), feature: fmtMs(f.latency_stddev), change: fmtDelta(d.latency_stddev) },
-    { label: 'P50',          baseline: fmtMs(b.latency_p50), feature: fmtMs(f.latency_p50), change: fmtDelta(d.latency_p50) },
-    { label: 'P90',          baseline: fmtMs(b.latency_p90), feature: fmtMs(f.latency_p90), change: fmtDelta(d.latency_p90) },
-    { label: 'P99',          baseline: fmtMs(b.latency_p99), feature: fmtMs(f.latency_p99), change: fmtDelta(d.latency_p99) },
-    { label: 'TPS',          baseline: fmtVal(b.tps),        feature: fmtVal(f.tps),        change: fmtDeltaInverse(d.tps) },
-    { label: 'Mgas/s',       baseline: fmtVal(b.mgas_s),     feature: fmtVal(f.mgas_s),     change: fmtDeltaInverse(d.mgas_s) },
+    { label: 'TPS',               baseline: fmtVal(b.tps),            feature: fmtVal(f.tps),            change: fmtDeltaInverse(d.tps) },
+    { label: 'Gas/s (Mgas)',      baseline: fmtVal(b.mgas_s),         feature: fmtVal(f.mgas_s),         change: fmtDeltaInverse(d.mgas_s) },
+    { label: 'Block Time (mean)', baseline: fmtMs(b.latency_mean),    feature: fmtMs(f.latency_mean),    change: fmtDelta(d.latency_mean) },
+    { label: 'Block Time (σ)',    baseline: fmtMs(b.latency_stddev),  feature: fmtMs(f.latency_stddev),  change: fmtDelta(d.latency_stddev) },
+    { label: 'Block Time (p50)',  baseline: fmtMs(b.latency_p50),     feature: fmtMs(f.latency_p50),     change: fmtDelta(d.latency_p50) },
+    { label: 'Block Time (p90)',  baseline: fmtMs(b.latency_p90),     feature: fmtMs(f.latency_p90),     change: fmtDelta(d.latency_p90) },
+    { label: 'Block Time (p99)',  baseline: fmtMs(b.latency_p99),     feature: fmtMs(f.latency_p99),     change: fmtDelta(d.latency_p99) },
   ];
 }
 
@@ -137,9 +137,12 @@ function buildSuccessBlocks({ summary, prNumber, actor, actorSlackId, jobUrl, re
   metaParts.push(`triggered by ${actorSlackId ? `<@${actorSlackId}>` : `@${actor}`}`);
 
   const config = summary.config;
+  const f = summary.results.feature;
 
   const sectionText = [
     metaParts.join(' | '),
+    '',
+    `*TPS:* ${fmtVal(f.tps)} · *Gas/s:* ${fmtVal(f.mgas_s)} Mgas · *Block Time (p50):* ${fmtMs(f.latency_p50)}`,
     '',
     `*Baseline:* ${baselineLink}`,
     `*Feature:* ${featureLink}`,

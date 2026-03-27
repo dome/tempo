@@ -70,8 +70,22 @@ type AccessKeyFillers = JoinFill<
     WalletFiller<TempoWallet>,
 >;
 
+#[allow(unnameable_types)]
+mod sealed {
+    pub trait Sealed {}
+
+    impl Sealed for alloy_provider::ProviderBuilder<
+        alloy_provider::Identity,
+        alloy_provider::fillers::JoinFill<
+            alloy_provider::Identity,
+            <crate::TempoNetwork as alloy_provider::fillers::RecommendedFillers>::RecommendedFillers,
+        >,
+        crate::TempoNetwork,
+    > {}
+}
+
 /// Extension trait for [`ProviderBuilder`] with Tempo-specific functionality.
-pub trait TempoProviderBuilderExt {
+pub trait TempoProviderBuilderExt: sealed::Sealed {
     /// Returns a provider builder with the recommended Tempo fillers and the random 2D nonce filler.
     ///
     /// See [`Random2DNonceFiller`] for more information on random 2D nonces.

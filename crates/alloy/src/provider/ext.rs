@@ -147,10 +147,13 @@ mod tests {
     use alloy::sol_types::SolCall;
     use alloy_primitives::{Address, Bytes, U256};
     use alloy_provider::{Identity, ProviderBuilder, fillers::JoinFill, mock::Asserter};
-    use tempo_contracts::precompiles::IAccountKeychain::{
-        KeyInfo, SignatureType, getKeyCall, getRemainingLimitWithPeriodCall, getTransactionKeyCall,
+    use tempo_contracts::precompiles::{
+        IAccountKeychain::{
+            KeyInfo, SignatureType, getKeyCall, getRemainingLimitWithPeriodCall,
+            getTransactionKeyCall,
+        },
+        getRemainingLimitReturn,
     };
-    use tempo_contracts::precompiles::getRemainingLimitReturn;
 
     use crate::{
         TempoFillers, TempoNetwork,

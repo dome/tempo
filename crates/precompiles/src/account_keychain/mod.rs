@@ -16,13 +16,13 @@ use __packing_authorized_key::{
 use alloy::sol_types::SolCall;
 use tempo_contracts::precompiles::{AccountKeychainError, AccountKeychainEvent, ITIP20};
 pub use tempo_contracts::precompiles::{
-    authorizeKeyCall, getRemainingLimitReturn,
     IAccountKeychain,
     IAccountKeychain::{
         CallScope, KeyInfo, SelectorRule, SignatureType, TokenLimit, getAllowedCallsCall,
         getKeyCall, getRemainingLimitCall, getRemainingLimitWithPeriodCall, getTransactionKeyCall,
         revokeKeyCall, setAllowedCallsCall, updateSpendingLimitCall,
     },
+    authorizeKeyCall, getRemainingLimitReturn,
 };
 
 use crate::{

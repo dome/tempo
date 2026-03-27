@@ -195,7 +195,8 @@ mod tests {
 
             let calldata = authorizeKeyCall {
                 keyId: Address::random(),
-                signatureType: tempo_contracts::precompiles::IAccountKeychain::SignatureType::Secp256k1,
+                signatureType:
+                    tempo_contracts::precompiles::IAccountKeychain::SignatureType::Secp256k1,
                 expiry: u64::MAX,
                 enforceLimits: true,
                 limits: vec![TokenLimit {

@@ -26,7 +26,8 @@ use tempo_evm::TempoEvmConfig;
 use tempo_precompiles::{ACCOUNT_KEYCHAIN_ADDRESS, account_keychain::AuthorizedKey};
 use tempo_precompiles::{
     account_keychain::{
-        AccountKeychain, MAX_CALL_SCOPES, MAX_RECIPIENTS_PER_SELECTOR, MAX_SELECTOR_RULES_PER_SCOPE,
+        AccountKeychain, MAX_CALL_SCOPES, MAX_RECIPIENTS_PER_SELECTOR,
+        MAX_SELECTOR_RULES_PER_SCOPE, is_constrained_tip20_selector,
     },
     nonce::{INonce, NonceManager},
     storage::Handler,
@@ -159,16 +160,6 @@ where
         Ok(())
     }
 
-    fn is_constrained_tip20_selector(selector: [u8; 4]) -> bool {
-        matches!(
-            selector,
-            [0xa9, 0x05, 0x9c, 0xbb] // transfer(address,uint256)
-                | [0x09, 0x5e, 0xa7, 0xb3] // approve(address,uint256)
-                | [0x95, 0x77, 0x7d, 0x59] // transferWithMemo(address,uint256,bytes32)
-                | [0xc2, 0xda, 0x9a, 0xed] // approveWithMemo(address,uint256,bytes32)
-        )
-    }
-
     fn validate_t3_key_authorization_shape(
         &self,
         auth: &tempo_primitives::transaction::SignedKeyAuthorization,
@@ -236,7 +227,7 @@ where
                     ));
                 }
 
-                if !Self::is_constrained_tip20_selector(rule.selector) {
+                if !is_constrained_tip20_selector(rule.selector) {
                     return Err(TempoPoolTransactionError::Keychain(
                         "recipient-constrained selector rules require TIP-20 target and constrained selector",
                     ));

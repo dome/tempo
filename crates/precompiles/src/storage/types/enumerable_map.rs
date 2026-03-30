@@ -277,9 +277,23 @@ where
 mod tests {
     use super::*;
     use crate::{
-        storage::{Handler, StorageCtx},
+        storage::{Handler, LayoutCtx, StorableType, StorageCtx},
         test_util::setup_storage,
     };
+    use tempo_precompiles_macros::Storable;
+
+    #[derive(Debug, Clone, Default, PartialEq, Eq, Storable)]
+    struct TestScope {
+        mode: u8,
+        payload: u64,
+    }
+
+    #[derive(Debug, Clone, Storable, Default)]
+    struct TestContainer {
+        marker: u8,
+        entries: EnumerableMap<Address, TestScope>,
+        tail: u8,
+    }
 
     #[test]
     fn test_enumerable_map_key_index_preserves_order_and_uniqueness() {
@@ -336,6 +350,56 @@ mod tests {
 
             map[key].write(0)?;
             assert!(!map.contains_mapped(&key, |value| value.read().map(|mode| mode != 0))?);
+
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_enumerable_map_embedded_layout_and_persistence() {
+        let (mut storage, address) = setup_storage();
+        StorageCtx::enter(&mut storage, || -> Result<()> {
+            let first = Address::repeat_byte(0x55);
+            let second = Address::repeat_byte(0x66);
+
+            let mut container = TestContainer::handle(U256::ZERO, LayoutCtx::FULL, address);
+
+            assert_eq!(container.marker.slot(), U256::ZERO);
+            assert_eq!(container.entries.base_slot(), U256::ONE);
+            assert_eq!(container.tail.slot(), U256::from(3));
+
+            container.marker.write(9)?;
+            container.tail.write(7)?;
+
+            container.entries.insert_key_unchecked(first)?;
+            container.entries[first].mode.write(2)?;
+            container.entries[first].payload.write(11)?;
+
+            container.entries.insert_key_unchecked(second)?;
+            container.entries[second].mode.write(1)?;
+            container.entries[second].payload.write(22)?;
+
+            let container = TestContainer::handle(U256::ZERO, LayoutCtx::FULL, address);
+            assert_eq!(container.marker.read()?, 9);
+            assert_eq!(container.tail.read()?, 7);
+            assert_eq!(container.entries.keys()?, vec![first, second]);
+            assert!(
+                container
+                    .entries
+                    .contains_mapped(&first, |scope| { scope.mode.read().map(|mode| mode != 0) })?
+            );
+            assert_eq!(container.entries[first].payload.read()?, 11);
+            assert_eq!(container.entries[second].payload.read()?, 22);
+
+            let mut container = TestContainer::handle(U256::ZERO, LayoutCtx::FULL, address);
+            assert!(container.entries.remove_key(&first)?);
+
+            let container = TestContainer::handle(U256::ZERO, LayoutCtx::FULL, address);
+            assert_eq!(container.entries.keys()?, vec![second]);
+            assert_eq!(container.entries[first].payload.read()?, 11);
+            assert_eq!(container.marker.read()?, 9);
+            assert_eq!(container.tail.read()?, 7);
 
             Ok(())
         })

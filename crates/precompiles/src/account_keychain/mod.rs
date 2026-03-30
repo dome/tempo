@@ -45,6 +45,7 @@ pub const MAX_RECIPIENTS_PER_SELECTOR: u8 = 16;
 const TIP20_TRANSFER_SELECTOR: [u8; 4] = ITIP20::transferCall::SELECTOR;
 const TIP20_APPROVE_SELECTOR: [u8; 4] = ITIP20::approveCall::SELECTOR;
 const TIP20_TRANSFER_WITH_MEMO_SELECTOR: [u8; 4] = ITIP20::transferWithMemoCall::SELECTOR;
+type SelectorKey = FixedBytes<4>;
 
 #[inline]
 pub fn is_constrained_tip20_selector(selector: [u8; 4]) -> bool {
@@ -85,12 +86,12 @@ pub struct SelectorScope {
 /// mode:
 /// - 0 => unset/disabled
 /// - 1 => all selectors allowed
-/// - 2 => only selectors in the set are allowed
+/// - 2 => only selectors in the configured list are allowed
 #[derive(Debug, Clone, Storable, Default)]
 pub struct TargetScope {
     pub mode: u8,
-    pub selectors: Set<FixedBytes<4>>,
-    pub selector_scopes: Mapping<FixedBytes<4>, SelectorScope>,
+    pub selectors: Vec<SelectorKey>,
+    pub selector_scopes: Mapping<SelectorKey, SelectorScope>,
 }
 
 /// Key-level call scope.
@@ -102,7 +103,7 @@ pub struct TargetScope {
 #[derive(Debug, Clone, Storable, Default)]
 pub struct KeyScope {
     pub mode: u8,
-    pub targets: Set<Address>,
+    pub targets: Vec<Address>,
     pub target_scopes: Mapping<Address, TargetScope>,
 }
 
@@ -800,10 +801,11 @@ impl AccountKeychain {
             return Err(AccountKeychainError::call_not_allowed().into());
         }
 
-        let selector = FixedBytes::<4>::from([input[0], input[1], input[2], input[3]]);
+        let selector: SelectorKey = [input[0], input[1], input[2], input[3]].into();
         if !self.key_scopes[key_hash].target_scopes[target]
             .selectors
-            .contains(&selector)?
+            .read()?
+            .contains(&selector)
         {
             return Err(AccountKeychainError::call_not_allowed().into());
         }
@@ -897,9 +899,17 @@ impl AccountKeychain {
     }
 
     fn remove_target_scope(&mut self, account_key: B256, target: Address) -> Result<()> {
-        if !self.key_scopes[account_key].targets.remove(&target)? {
+        if self.key_scopes[account_key].target_scopes[target]
+            .mode
+            .read()?
+            == 0
+        {
             return Ok(());
         }
+
+        let mut targets = self.key_scopes[account_key].targets.read()?;
+        targets.retain(|configured_target| configured_target != &target);
+        self.key_scopes[account_key].targets.write(targets)?;
 
         self.clear_target_selectors(account_key, target)?;
         self.key_scopes[account_key].target_scopes[target]
@@ -938,13 +948,21 @@ impl AccountKeychain {
             self.validate_selector_rules(target, rules)?;
         }
 
-        if !self.key_scopes[account_key].targets.contains(&target)? {
-            let count = self.key_scopes[account_key].targets.len()?;
+        if self.key_scopes[account_key].target_scopes[target]
+            .mode
+            .read()?
+            == 0
+        {
+            let mut targets = self.key_scopes[account_key].targets.read()?;
+            let count = targets.len();
             if count >= MAX_CALL_SCOPES as usize {
                 return Err(AccountKeychainError::scope_limit_exceeded().into());
             }
 
-            self.key_scopes[account_key].targets.insert(target)?;
+            if !targets.contains(&target) {
+                targets.push(target);
+                self.key_scopes[account_key].targets.write(targets)?;
+            }
         }
 
         self.clear_target_selectors(account_key, target)?;
@@ -961,10 +979,10 @@ impl AccountKeychain {
                     .write(2)?;
 
                 for rule in rules {
-                    let selector = FixedBytes::<4>::from(rule.selector);
+                    let selector: SelectorKey = rule.selector.into();
                     self.key_scopes[account_key].target_scopes[target]
                         .selectors
-                        .insert(selector)?;
+                        .push(selector)?;
 
                     match rule.recipients {
                         None => {

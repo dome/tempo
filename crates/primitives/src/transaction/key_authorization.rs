@@ -365,23 +365,17 @@ impl KeyAuthorization {
                     + scopes
                         .iter()
                         .map(|scope| {
-                            size_of::<CallScope>()
-                                + scope.selector_rules.as_ref().map_or(0, |rules| {
-                                    rules.capacity() * size_of::<SelectorRule>()
-                                        + rules
-                                            .iter()
-                                            .map(|rule| {
-                                                size_of::<SelectorRule>()
-                                                    + rule.recipients.as_ref().map_or(
-                                                        0,
-                                                        |recipients| {
-                                                            recipients.capacity()
-                                                                * size_of::<Address>()
-                                                        },
-                                                    )
+                            scope.selector_rules.as_ref().map_or(0, |rules| {
+                                rules.capacity() * size_of::<SelectorRule>()
+                                    + rules
+                                        .iter()
+                                        .map(|rule| {
+                                            rule.recipients.as_ref().map_or(0, |recipients| {
+                                                recipients.capacity() * size_of::<Address>()
                                             })
-                                            .sum::<usize>()
-                                })
+                                        })
+                                        .sum::<usize>()
+                            })
                         })
                         .sum::<usize>()
             })
@@ -532,6 +526,42 @@ mod tests {
         assert!(make_auth(None, None).never_expires());
         assert!(!make_auth(Some(1000), None).never_expires());
         assert!(!make_auth(Some(0), None).never_expires()); // 0 is still Some
+    }
+
+    #[test]
+    fn test_size_does_not_double_count_call_scope_structs() {
+        let recipients = vec![Address::repeat_byte(0x11), Address::repeat_byte(0x22)];
+        let mut rules = Vec::with_capacity(3);
+        rules.push(SelectorRule {
+            selector: [1, 2, 3, 4],
+            recipients: Some(recipients),
+        });
+
+        let mut scopes = Vec::with_capacity(2);
+        scopes.push(CallScope {
+            target: Address::repeat_byte(0x33),
+            selector_rules: Some(rules),
+        });
+
+        let auth = KeyAuthorization {
+            chain_id: 1,
+            key_type: SignatureType::Secp256k1,
+            key_id: Address::repeat_byte(0x44),
+            expiry: None,
+            limits: None,
+            allowed_calls: Some(scopes),
+        };
+
+        let scope_rules = auth.allowed_calls.as_ref().unwrap();
+        let selector_rules = scope_rules[0].selector_rules.as_ref().unwrap();
+        let recipients = selector_rules[0].recipients.as_ref().unwrap();
+
+        let expected = size_of::<KeyAuthorization>()
+            + scope_rules.capacity() * size_of::<CallScope>()
+            + selector_rules.capacity() * size_of::<SelectorRule>()
+            + recipients.capacity() * size_of::<Address>();
+
+        assert_eq!(auth.size(), expected);
     }
 
     fn make_auth_with_chain_id(chain_id: u64) -> KeyAuthorization {

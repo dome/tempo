@@ -250,74 +250,6 @@ impl AccountKeychain {
         Ok(limit.to::<u128>())
     }
 
-    #[inline]
-    fn indexed_target_mode(&self, account_key: B256, target: Address) -> Result<u8> {
-        if !self.key_scopes[account_key]
-            .targets
-            .read()?
-            .contains(&target)
-        {
-            return Ok(0);
-        }
-
-        self.key_scopes[account_key].target_scopes[target]
-            .mode
-            .read()
-    }
-
-    #[inline]
-    fn indexed_selector_mode(
-        &self,
-        account_key: B256,
-        target: Address,
-        selector: FixedBytes<4>,
-    ) -> Result<u8> {
-        if !self.key_scopes[account_key].target_scopes[target]
-            .selectors
-            .read()?
-            .contains(&selector)
-        {
-            return Ok(0);
-        }
-
-        self.key_scopes[account_key].target_scopes[target].selector_scopes[selector]
-            .mode
-            .read()
-    }
-
-    #[inline]
-    fn push_unique_target(&mut self, account_key: B256, target: Address) -> Result<()> {
-        if !self.key_scopes[account_key]
-            .targets
-            .read()?
-            .contains(&target)
-        {
-            self.key_scopes[account_key].targets.push(target)?;
-        }
-
-        Ok(())
-    }
-
-    #[inline]
-    fn push_unique_selector(
-        &mut self,
-        account_key: B256,
-        target: Address,
-        selector: FixedBytes<4>,
-    ) -> Result<()> {
-        if !self.key_scopes[account_key].target_scopes[target]
-            .selectors
-            .read()?
-            .contains(&selector)
-        {
-            self.key_scopes[account_key].target_scopes[target]
-                .selectors
-                .push(selector)?;
-        }
-
-        Ok(())
-    }
-
     /// Initializes the account keychain precompile.
     pub fn initialize(&mut self) -> Result<()> {
         self.__initialize()
@@ -853,7 +785,11 @@ impl AccountKeychain {
             TxKind::Create => return Err(AccountKeychainError::call_not_allowed().into()),
         };
 
-        let target_mode = self.indexed_target_mode(key_hash, target)?;
+        let target_mode = if !self.key_scopes[key_hash].targets.read()?.contains(&target) {
+            0
+        } else {
+            self.key_scopes[key_hash].target_scopes[target].mode.read()?
+        };
         if target_mode == 1 {
             return Ok(());
         }
@@ -867,7 +803,17 @@ impl AccountKeychain {
         }
 
         let selector: FixedBytes<4> = [input[0], input[1], input[2], input[3]].into();
-        let selector_mode = self.indexed_selector_mode(key_hash, target, selector)?;
+        let selector_mode = if !self.key_scopes[key_hash].target_scopes[target]
+            .selectors
+            .read()?
+            .contains(&selector)
+        {
+            0
+        } else {
+            self.key_scopes[key_hash].target_scopes[target].selector_scopes[selector]
+                .mode
+                .read()?
+        };
         if selector_mode == 1 {
             return Ok(());
         }
@@ -1012,7 +958,9 @@ impl AccountKeychain {
                 return Err(AccountKeychainError::scope_limit_exceeded().into());
             }
 
-            self.push_unique_target(account_key, target)?;
+            if !self.key_scopes[account_key].targets.read()?.contains(&target) {
+                self.key_scopes[account_key].targets.push(target)?;
+            }
         }
 
         self.clear_target_selectors(account_key, target)?;
@@ -1030,7 +978,15 @@ impl AccountKeychain {
 
                 for rule in rules {
                     let selector: FixedBytes<4> = rule.selector.into();
-                    self.push_unique_selector(account_key, target, selector)?;
+                    if !self.key_scopes[account_key].target_scopes[target]
+                        .selectors
+                        .read()?
+                        .contains(&selector)
+                    {
+                        self.key_scopes[account_key].target_scopes[target]
+                            .selectors
+                            .push(selector)?;
+                    }
 
                     match rule.recipients {
                         None => {

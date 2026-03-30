@@ -1055,27 +1055,29 @@ where
                     .map(|scopes| {
                         scopes
                             .iter()
-                            .map(|scope| tempo_precompiles::account_keychain::CallScope {
-                                target: scope.target,
-                                allowAllSelectors: scope.selector_rules.is_none(),
-                                selectorRules: scope
-                                    .selector_rules
-                                    .as_ref()
-                                    .map(|rules| {
-                                        rules
-                                            .iter()
-                                            .map(|rule| {
-                                                tempo_precompiles::account_keychain::SelectorRule {
-                                                    selector: rule.selector.into(),
-                                                    recipients: rule
-                                                        .recipients
-                                                        .clone()
-                                                        .unwrap_or_default(),
-                                                }
-                                            })
-                                            .collect()
-                                    })
-                                    .unwrap_or_default(),
+                            .filter_map(|scope| match scope.selector_rules.as_ref() {
+                                Some(rules) if rules.is_empty() => None,
+                                _ => Some(tempo_precompiles::account_keychain::CallScope {
+                                    target: scope.target,
+                                    selectorRules: scope
+                                        .selector_rules
+                                        .as_ref()
+                                        .map(|rules| {
+                                            rules
+                                                .iter()
+                                                .map(|rule| {
+                                                    tempo_precompiles::account_keychain::SelectorRule {
+                                                        selector: rule.selector.into(),
+                                                        recipients: rule
+                                                            .recipients
+                                                            .clone()
+                                                            .unwrap_or_default(),
+                                                    }
+                                                })
+                                                .collect()
+                                        })
+                                        .unwrap_or_default(),
+                                }),
                             })
                             .collect()
                     })

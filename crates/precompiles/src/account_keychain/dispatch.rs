@@ -8,7 +8,7 @@ use alloy::{
 };
 use revm::precompile::{PrecompileError, PrecompileResult};
 use tempo_contracts::precompiles::{
-    IAccountKeychain::{IAccountKeychainCalls, setAllowedCallsCall},
+    IAccountKeychain::{IAccountKeychainCalls, removeAllowedCallsCall, setAllowedCallsCall},
     legacyAuthorizeKeyCall,
 };
 
@@ -78,6 +78,17 @@ impl Precompile for AccountKeychain {
                     }
                     mutate_void(call, msg_sender, |sender, c| {
                         self.set_allowed_calls(sender, c)
+                    })
+                }
+                IAccountKeychainCalls::removeAllowedCalls(call) => {
+                    if !self.storage.spec().is_t3() {
+                        return unknown_selector(
+                            removeAllowedCallsCall::SELECTOR,
+                            self.storage.gas_used(),
+                        );
+                    }
+                    mutate_void(call, msg_sender, |sender, c| {
+                        self.remove_allowed_calls(sender, c)
                     })
                 }
                 IAccountKeychainCalls::getKey(call) => view(call, |c| self.get_key(c)),

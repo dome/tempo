@@ -20,9 +20,13 @@ pub use tempo_contracts::precompiles::{
     IAccountKeychain::{
         CallScope, KeyInfo, KeyRestrictions, SelectorRule, SignatureType, TokenLimit,
         getAllowedCallsCall, getKeyCall, getRemainingLimitCall, getRemainingLimitWithPeriodCall,
-        getTransactionKeyCall, revokeKeyCall, setAllowedCallsCall, updateSpendingLimitCall,
+        getTransactionKeyCall, removeAllowedCallsCall, revokeKeyCall, setAllowedCallsCall,
+        updateSpendingLimitCall,
     },
     authorizeKeyCall, getRemainingLimitReturn,
+};
+use tempo_primitives::transaction::{
+    CallScope as ProtocolCallScope, SelectorRule as ProtocolSelectorRule,
 };
 
 use crate::{
@@ -52,20 +56,6 @@ pub fn is_constrained_tip20_selector(selector: [u8; 4]) -> bool {
         selector,
         TIP20_TRANSFER_SELECTOR | TIP20_APPROVE_SELECTOR | TIP20_TRANSFER_WITH_MEMO_SELECTOR
     )
-}
-
-/// Internal selector rule configuration used by handler-side key authorization.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SelectorRuleConfig {
-    pub selector: [u8; 4],
-    pub recipients: Option<Vec<Address>>,
-}
-
-/// Internal call scope configuration used by handler-side key authorization.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CallScopeConfig {
-    pub target: Address,
-    pub selector_rules: Option<Vec<SelectorRuleConfig>>,
 }
 
 /// Selector-level scope for one selector under one target.
@@ -565,15 +555,14 @@ impl AccountKeychain {
         let key_hash = Self::spending_limit_key(msg_sender, call.keyId);
         let scope = call.scope;
 
-        if scope.allowAllSelectors {
-            // TIP-1011 precedence: allow-all selectors ignores selectorRules entirely.
-            self.upsert_target_scope(key_hash, scope.target, None)?;
+        let selector_rules = if scope.selectorRules.is_empty() {
+            None
         } else {
             let mut selector_rules = Vec::new();
             for rule in scope.selectorRules {
                 // Empty recipients is the canonical "no recipient restriction" encoding.
                 // Callers must remove the selector rule entirely to block that selector.
-                selector_rules.push(SelectorRuleConfig {
+                selector_rules.push(ProtocolSelectorRule {
                     selector: *rule.selector,
                     recipients: if rule.recipients.is_empty() {
                         None
@@ -582,8 +571,44 @@ impl AccountKeychain {
                     },
                 });
             }
-            self.upsert_target_scope(key_hash, scope.target, Some(selector_rules))?;
+            Some(selector_rules)
+        };
+
+        self.upsert_target_scope(key_hash, scope.target, selector_rules)?;
+
+        let mode = if self.key_scopes[key_hash].targets.is_empty()? {
+            2
+        } else {
+            1
+        };
+        self.key_scopes[key_hash].mode.write(mode)
+    }
+
+    /// Root-only removal of one target call scope.
+    pub fn remove_allowed_calls(
+        &mut self,
+        msg_sender: Address,
+        call: removeAllowedCallsCall,
+    ) -> Result<()> {
+        if !self.storage.spec().is_t3() {
+            return Err(AccountKeychainError::invalid_call_scope().into());
         }
+
+        self.ensure_admin_caller(msg_sender)?;
+
+        let key = self.load_active_key(msg_sender, call.keyId)?;
+        let current_timestamp = self.storage.timestamp().saturating_to::<u64>();
+        if current_timestamp >= key.expiry {
+            return Err(AccountKeychainError::key_expired().into());
+        }
+
+        let key_hash = Self::spending_limit_key(msg_sender, call.keyId);
+        let current_mode = self.key_scopes[key_hash].mode.read()?;
+        if current_mode == 0 {
+            return Ok(());
+        }
+
+        self.remove_target_scope(key_hash, call.target)?;
 
         let mode = if self.key_scopes[key_hash].targets.is_empty()? {
             2
@@ -596,8 +621,8 @@ impl AccountKeychain {
     /// Returns call scopes configured for an account key.
     ///
     /// When the key is in explicit deny-all mode (`allowed_calls = Some([])`), returns a
-    /// sentinel entry `{target: address(0), allowAllSelectors: false, selectorRules: []}` so
-    /// callers can distinguish it from unrestricted mode (`[]`).
+    /// sentinel entry `{target: address(0), selectorRules: []}` so callers can distinguish it
+    /// from unrestricted mode (`[]`).
     pub fn get_allowed_calls(&self, call: getAllowedCallsCall) -> Result<Vec<CallScope>> {
         if !self.storage.spec().is_t3() {
             return Ok(Vec::new());
@@ -612,7 +637,6 @@ impl AccountKeychain {
             // Explicit deny-all marker to preserve round-tripping for `allowed_calls = Some([])`.
             return Ok(vec![CallScope {
                 target: Address::ZERO,
-                allowAllSelectors: false,
                 selectorRules: Vec::new(),
             }]);
         }
@@ -621,7 +645,6 @@ impl AccountKeychain {
         if targets.is_empty() {
             return Ok(vec![CallScope {
                 target: Address::ZERO,
-                allowAllSelectors: false,
                 selectorRules: Vec::new(),
             }]);
         }
@@ -635,7 +658,6 @@ impl AccountKeychain {
             let scope = match target_mode {
                 1 => CallScope {
                     target,
-                    allowAllSelectors: true,
                     selectorRules: Vec::new(),
                 },
                 2 => {
@@ -671,7 +693,6 @@ impl AccountKeychain {
 
                     CallScope {
                         target,
-                        allowAllSelectors: false,
                         selectorRules: rules,
                     }
                 }
@@ -721,7 +742,7 @@ impl AccountKeychain {
         account: Address,
         key_id: Address,
         limits: impl IntoIterator<Item = &'a TokenLimit>,
-        allowed_calls: Option<&[CallScopeConfig]>,
+        allowed_calls: Option<&[ProtocolCallScope]>,
     ) -> Result<()> {
         if !self.storage.spec().is_t3() {
             return Ok(());
@@ -842,7 +863,7 @@ impl AccountKeychain {
     fn replace_allowed_calls(
         &mut self,
         account_key: B256,
-        allowed_calls: Option<&[CallScopeConfig]>,
+        allowed_calls: Option<&[ProtocolCallScope]>,
     ) -> Result<()> {
         // Fresh authorizations should not have any pre-existing call-scope rows because
         // `authorize_key` rejects both existing and previously revoked keys before reaching this
@@ -929,7 +950,7 @@ impl AccountKeychain {
         &mut self,
         account_key: B256,
         target: Address,
-        selector_rules: Option<Vec<SelectorRuleConfig>>,
+        selector_rules: Option<Vec<ProtocolSelectorRule>>,
     ) -> Result<()> {
         if let Some(rules) = selector_rules.as_ref() {
             if rules.is_empty() {
@@ -995,7 +1016,11 @@ impl AccountKeychain {
         Ok(())
     }
 
-    fn validate_selector_rules(&self, target: Address, rules: &[SelectorRuleConfig]) -> Result<()> {
+    fn validate_selector_rules(
+        &self,
+        target: Address,
+        rules: &[ProtocolSelectorRule],
+    ) -> Result<()> {
         if rules.len() > MAX_SELECTOR_RULES_PER_SCOPE as usize {
             return Err(AccountKeychainError::selector_limit_exceeded().into());
         }
@@ -1035,9 +1060,9 @@ impl AccountKeychain {
         Ok(())
     }
 
-    fn abi_call_scope_to_config(scope: &CallScope) -> Result<CallScopeConfig> {
-        if scope.allowAllSelectors {
-            Ok(CallScopeConfig {
+    fn abi_call_scope_to_config(scope: &CallScope) -> Result<ProtocolCallScope> {
+        if scope.selectorRules.is_empty() {
+            Ok(ProtocolCallScope {
                 target: scope.target,
                 selector_rules: None,
             })
@@ -1046,7 +1071,7 @@ impl AccountKeychain {
                 .selectorRules
                 .iter()
                 .map(|rule| {
-                    Ok(SelectorRuleConfig {
+                    Ok(ProtocolSelectorRule {
                         selector: *rule.selector,
                         recipients: if rule.recipients.is_empty() {
                             None
@@ -1057,7 +1082,7 @@ impl AccountKeychain {
                 })
                 .collect::<Result<Vec<_>>>()?;
 
-            Ok(CallScopeConfig {
+            Ok(ProtocolCallScope {
                 target: scope.target,
                 selector_rules: Some(selector_rules),
             })
@@ -3329,9 +3354,9 @@ mod tests {
                     account,
                     key_id,
                     &[],
-                    Some(&[CallScopeConfig {
+                    Some(&[ProtocolCallScope {
                         target: undeployed_tip20,
-                        selector_rules: Some(vec![SelectorRuleConfig {
+                        selector_rules: Some(vec![ProtocolSelectorRule {
                             selector: TIP20_TRANSFER_SELECTOR,
                             recipients: Some(vec![recipient]),
                         }]),
@@ -3462,7 +3487,6 @@ mod tests {
             })?;
             assert_eq!(scopes.len(), 1);
             assert_eq!(scopes[0].target, Address::ZERO);
-            assert!(!scopes[0].allowAllSelectors);
             assert!(scopes[0].selectorRules.is_empty());
 
             Ok(())
@@ -3503,7 +3527,6 @@ mod tests {
                     keyId: key_id,
                     scope: CallScope {
                         target,
-                        allowAllSelectors: false,
                         selectorRules: vec![SelectorRule {
                             selector: TIP20_TRANSFER_SELECTOR.into(),
                             recipients: vec![],
@@ -3518,7 +3541,6 @@ mod tests {
             })?;
             assert_eq!(scopes.len(), 1);
             assert_eq!(scopes[0].target, target);
-            assert!(!scopes[0].allowAllSelectors);
             assert_eq!(scopes[0].selectorRules.len(), 1);
             assert_eq!(
                 *scopes[0].selectorRules[0].selector,
@@ -3526,15 +3548,11 @@ mod tests {
             );
             assert!(scopes[0].selectorRules[0].recipients.is_empty());
 
-            keychain.set_allowed_calls(
+            keychain.remove_allowed_calls(
                 account,
-                setAllowedCallsCall {
+                removeAllowedCallsCall {
                     keyId: key_id,
-                    scope: CallScope {
-                        target,
-                        allowAllSelectors: false,
-                        selectorRules: vec![],
-                    },
+                    target,
                 },
             )?;
 
@@ -3544,7 +3562,6 @@ mod tests {
             })?;
             assert_eq!(removed.len(), 1);
             assert_eq!(removed[0].target, Address::ZERO);
-            assert!(!removed[0].allowAllSelectors);
             assert!(removed[0].selectorRules.is_empty());
 
             Ok(())
@@ -3552,7 +3569,7 @@ mod tests {
     }
 
     #[test]
-    fn test_t3_set_allowed_calls_allow_all_selectors_ignores_selector_rules() -> eyre::Result<()> {
+    fn test_t3_set_allowed_calls_empty_selector_rules_allow_all_selectors() -> eyre::Result<()> {
         let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T3);
         let account = Address::random();
         let key_id = Address::random();
@@ -3585,11 +3602,7 @@ mod tests {
                     keyId: key_id,
                     scope: CallScope {
                         target,
-                        allowAllSelectors: true,
-                        selectorRules: vec![SelectorRule {
-                            selector: TIP20_TRANSFER_SELECTOR.into(),
-                            recipients: vec![Address::repeat_byte(0x99)],
-                        }],
+                        selectorRules: vec![],
                     },
                 },
             )?;
@@ -3600,8 +3613,15 @@ mod tests {
             })?;
             assert_eq!(scopes.len(), 1);
             assert_eq!(scopes[0].target, target);
-            assert!(scopes[0].allowAllSelectors);
             assert!(scopes[0].selectorRules.is_empty());
+
+            let allow = keychain.validate_call_scope_for_transaction(
+                account,
+                key_id,
+                &TxKind::Call(target),
+                &[],
+            );
+            assert!(allow.is_ok());
 
             Ok(())
         })
@@ -3642,9 +3662,9 @@ mod tests {
                 account,
                 key_id,
                 &[],
-                Some(&[CallScopeConfig {
+                Some(&[ProtocolCallScope {
                     target,
-                    selector_rules: Some(vec![SelectorRuleConfig {
+                    selector_rules: Some(vec![ProtocolSelectorRule {
                         selector: TIP20_TRANSFER_SELECTOR,
                         recipients: Some(vec![allowed_recipient]),
                     }]),

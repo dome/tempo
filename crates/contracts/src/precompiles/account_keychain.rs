@@ -49,7 +49,9 @@ crate::sol! {
         /// Per-target call scope.
         struct CallScope {
             address target;
-            bool allowAllSelectors;
+            /// Empty means no selector restriction for this target.
+            /// To block the target entirely, omit this scope from `allowedCalls` or call
+            /// `removeAllowedCalls` for incremental updates.
             SelectorRule[] selectorRules;
         }
 
@@ -122,12 +124,16 @@ crate::sol! {
         ) external;
 
         /// Set or replace allowed calls for a key+target pair.
-        /// @dev Warning: `scope.selectorRules[i].recipients = []` does NOT block that selector; it allows any recipient.
-        /// @dev To block a selector entirely, remove that selector rule from `scope.selectorRules`.
+        /// @dev `scope.selectorRules = []` does NOT block the target; it allows any selector on that target.
+        /// @dev To block the target entirely, call `removeAllowedCalls`. To block one selector,
+        ///      omit that selector rule from `scope.selectorRules`.
         function setAllowedCalls(
             address keyId,
             CallScope calldata scope
         ) external;
+
+        /// Remove any configured call scope for a key+target pair.
+        function removeAllowedCalls(address keyId, address target) external;
 
         /// Get key information
         /// @param account The account address

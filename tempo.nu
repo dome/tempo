@@ -797,8 +797,6 @@ def generate-summary [results_dir: string, baseline_ref: string, feature_ref: st
         let total_ok = ($blocks | get ok_count | math sum)
         let total_err = ($blocks | get err_count | math sum)
         let total_gas = ($blocks | get gas_used | math sum)
-        let latencies = ($blocks | where latency_ms != null | get latency_ms | sort)
-        let p50_latency = (percentile $latencies 50 | math round --precision 1)
         let num_blocks = ($blocks | length)
 
         # Compute TPS from block timestamps (timestamps are in milliseconds)
@@ -824,7 +822,6 @@ def generate-summary [results_dir: string, baseline_ref: string, feature_ref: st
             ok: $total_ok
             err: $total_err
             total_gas: $total_gas
-            p50_latency: $p50_latency
             tps: $actual_tps
             tps_p50: $run_tps.p50
             tps_p90: $run_tps.p90
@@ -842,21 +839,8 @@ def generate-summary [results_dir: string, baseline_ref: string, feature_ref: st
         return
     }
 
-    # Compute per-block latency percentiles for each group
-    let compute_latency_stats = { |blocks: list<any>|
-        let latencies = ($blocks | where latency_ms != null | get latency_ms | sort)
-        {
-            n: ($blocks | length)
-            mean: (if ($latencies | length) > 0 { $latencies | math avg | math round --precision 1 } else { 0 })
-            stddev: (if ($latencies | length) > 1 { $latencies | math stddev | math round --precision 1 } else { 0 })
-            p50: (percentile $latencies 50 | math round --precision 1)
-            p90: (percentile $latencies 90 | math round --precision 1)
-            p99: (percentile $latencies 99 | math round --precision 1)
-        }
-    }
-
-    let b_lat = do $compute_latency_stats $baseline_blocks
-    let f_lat = do $compute_latency_stats $feature_blocks
+    let b_num_blocks = ($baseline_blocks | length)
+    let f_num_blocks = ($feature_blocks | length)
 
     let b_bt = do $compute_block_time_stats $baseline_intervals
     let f_bt = do $compute_block_time_stats $feature_intervals
@@ -885,8 +869,8 @@ def generate-summary [results_dir: string, baseline_ref: string, feature_ref: st
         $"- Target TPS: ($tps)"
         $"- Duration: ($duration)s"
         $"- Snapshot: (if (has-schelk) { 'schelk' } else { 'cp fallback' })"
-        $"- Baseline blocks: ($b_lat.n)"
-        $"- Feature blocks: ($f_lat.n)"
+        $"- Baseline blocks: ($b_num_blocks)"
+        $"- Feature blocks: ($f_num_blocks)"
         ""
         "## Tempo Metrics"
         ""
@@ -900,16 +884,6 @@ def generate-summary [results_dir: string, baseline_ref: string, feature_ref: st
         $"| Block Time P50 [ms] | ($b_bt.p50) | ($f_bt.p50) | (do $delta $b_bt.p50 $f_bt.p50)% |"
         $"| Block Time P90 [ms] | ($b_bt.p90) | ($f_bt.p90) | (do $delta $b_bt.p90 $f_bt.p90)% |"
         $"| Block Time P99 [ms] | ($b_bt.p99) | ($f_bt.p99) | (do $delta $b_bt.p99 $f_bt.p99)% |"
-        ""
-        "## Latency (Secondary)"
-        ""
-        "| Metric | Baseline | Feature | Delta |"
-        "|--------|----------|---------|-------|"
-        $"| Latency Mean [ms] | ($b_lat.mean) | ($f_lat.mean) | (do $delta $b_lat.mean $f_lat.mean)% |"
-        $"| Latency Std Dev [ms] | ($b_lat.stddev) | ($f_lat.stddev) | (do $delta $b_lat.stddev $f_lat.stddev)% |"
-        $"| Latency P50 [ms] | ($b_lat.p50) | ($f_lat.p50) | (do $delta $b_lat.p50 $f_lat.p50)% |"
-        $"| Latency P90 [ms] | ($b_lat.p90) | ($f_lat.p90) | (do $delta $b_lat.p90 $f_lat.p90)% |"
-        $"| Latency P99 [ms] | ($b_lat.p99) | ($f_lat.p99) | (do $delta $b_lat.p99 $f_lat.p99)% |"
         ""
         "## Per-Run Details"
         ""
@@ -941,11 +915,6 @@ def generate-summary [results_dir: string, baseline_ref: string, feature_ref: st
         }
         results: {
             baseline: {
-                latency_mean: $b_lat.mean
-                latency_stddev: $b_lat.stddev
-                latency_p50: $b_lat.p50
-                latency_p90: $b_lat.p90
-                latency_p99: $b_lat.p99
                 tps: $b_tps
                 tps_p50: $b_tps_stats.p50
                 tps_p90: $b_tps_stats.p90
@@ -954,14 +923,9 @@ def generate-summary [results_dir: string, baseline_ref: string, feature_ref: st
                 block_time_p50: $b_bt.p50
                 block_time_p90: $b_bt.p90
                 block_time_p99: $b_bt.p99
-                blocks: $b_lat.n
+                blocks: $b_num_blocks
             }
             feature: {
-                latency_mean: $f_lat.mean
-                latency_stddev: $f_lat.stddev
-                latency_p50: $f_lat.p50
-                latency_p90: $f_lat.p90
-                latency_p99: $f_lat.p99
                 tps: $f_tps
                 tps_p50: $f_tps_stats.p50
                 tps_p90: $f_tps_stats.p90
@@ -970,14 +934,9 @@ def generate-summary [results_dir: string, baseline_ref: string, feature_ref: st
                 block_time_p50: $f_bt.p50
                 block_time_p90: $f_bt.p90
                 block_time_p99: $f_bt.p99
-                blocks: $f_lat.n
+                blocks: $f_num_blocks
             }
             deltas: {
-                latency_mean: (do $delta $b_lat.mean $f_lat.mean)
-                latency_stddev: (do $delta $b_lat.stddev $f_lat.stddev)
-                latency_p50: (do $delta $b_lat.p50 $f_lat.p50)
-                latency_p90: (do $delta $b_lat.p90 $f_lat.p90)
-                latency_p99: (do $delta $b_lat.p99 $f_lat.p99)
                 tps: (do $delta $b_tps $f_tps)
                 tps_p50: (do $delta $b_tps_stats.p50 $f_tps_stats.p50)
                 tps_p90: (do $delta $b_tps_stats.p90 $f_tps_stats.p90)

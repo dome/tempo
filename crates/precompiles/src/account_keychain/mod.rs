@@ -953,15 +953,17 @@ impl AccountKeychain {
             .read()?
             == 0
         {
-            let mut targets = self.key_scopes[account_key].targets.read()?;
-            let count = targets.len();
+            let count = self.key_scopes[account_key].targets.len()?;
             if count >= MAX_CALL_SCOPES as usize {
                 return Err(AccountKeychainError::scope_limit_exceeded().into());
             }
 
-            if !targets.contains(&target) {
-                targets.push(target);
-                self.key_scopes[account_key].targets.write(targets)?;
+            if !self.key_scopes[account_key]
+                .targets
+                .read()?
+                .contains(&target)
+            {
+                self.key_scopes[account_key].targets.push(target)?;
             }
         }
 
@@ -3705,6 +3707,73 @@ mod tests {
                 )
                 .expect_err("unexpected success for wrong selector");
             assert_call_not_allowed(wrong_selector);
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_t3_validate_call_scope_rejects_selector_not_listed_in_vec() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T3);
+        let account = Address::random();
+        let key_id = Address::random();
+        let target = DEFAULT_FEE_TOKEN;
+        let selector = FixedBytes::<4>::from(TIP20_TRANSFER_SELECTOR);
+        let allowed_recipient = Address::repeat_byte(0x44);
+
+        StorageCtx::enter(&mut storage, || {
+            let mut keychain = AccountKeychain::new();
+            keychain.initialize()?;
+            keychain.set_transaction_key(Address::ZERO)?;
+            keychain.set_tx_origin(account)?;
+            TIP20Setup::path_usd(account).apply()?;
+
+            keychain.authorize_key(
+                account,
+                authorizeKeyCall {
+                    keyId: key_id,
+                    signatureType: SignatureType::Secp256k1,
+                    config: KeyRestrictions {
+                        expiry: u64::MAX,
+                        enforceLimits: false,
+                        limits: vec![],
+                        enforceAllowedCalls: false,
+                        allowedCalls: vec![],
+                    },
+                },
+            )?;
+
+            let key_hash = AccountKeychain::spending_limit_key(account, key_id);
+            keychain.key_scopes[key_hash].mode.write(1)?;
+            keychain.key_scopes[key_hash].targets.write(vec![target])?;
+            keychain.key_scopes[key_hash].target_scopes[target]
+                .mode
+                .write(2)?;
+            keychain.key_scopes[key_hash].target_scopes[target]
+                .selectors
+                .write(vec![])?;
+            keychain.key_scopes[key_hash].target_scopes[target].selector_scopes[selector]
+                .mode
+                .write(2)?;
+            keychain.key_scopes[key_hash].target_scopes[target].selector_scopes[selector]
+                .recipients
+                .write(Set::from(vec![allowed_recipient]))?;
+
+            let mut calldata = TIP20_TRANSFER_SELECTOR.to_vec();
+            let mut recipient_word = [0u8; 32];
+            recipient_word[12..].copy_from_slice(allowed_recipient.as_slice());
+            calldata.extend_from_slice(&recipient_word);
+            calldata.extend_from_slice(&[0u8; 32]);
+
+            let err = keychain
+                .validate_call_scope_for_transaction(
+                    account,
+                    key_id,
+                    &TxKind::Call(target),
+                    &calldata,
+                )
+                .expect_err("unexpected success for selector missing from vec index");
+            assert_call_not_allowed(err);
 
             Ok(())
         })

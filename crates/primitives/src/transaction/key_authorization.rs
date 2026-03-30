@@ -344,11 +344,11 @@ impl KeyAuthorization {
 
                 // Storage write accounting:
                 // - account mode write: 1
-                // - each target insertion + target mode write: 3 + 1
-                // - each selector insertion + selector mode write: 3 + 1
+                // - each target vec push + target mode write: 2 + 1
+                // - each selector vec push + selector mode write: 2 + 1
                 // - recipient-constrained selectors also write recipient set length: +1 per selector
                 // - recipient set values+positions: +2 per recipient
-                1 + scopes.len() as u64 * 4 + selectors * 4 + constrained_selectors + recipients * 2
+                1 + scopes.len() as u64 * 3 + selectors * 3 + constrained_selectors + recipients * 2
             }
         }
     }

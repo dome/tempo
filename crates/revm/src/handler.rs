@@ -2667,10 +2667,10 @@ mod tests {
         };
 
         let gas = calculate_key_authorization_gas(&scoped, &t1b_gas_params, TempoHardfork::T3);
-        // 1 key write + 14 scope slots:
-        // account mode(1) + target insert+mode(4) + selector insert+mode(4)
+        // 1 key write + 12 scope slots:
+        // account mode(1) + target vec push+mode(3) + selector vec push+mode(3)
         // + constrained selector recipient-length(1) + recipients values+positions(2*2).
-        let expected = ECRECOVER_GAS + sload + sstore * (1 + 14) + BUFFER;
+        let expected = ECRECOVER_GAS + sload + sstore * (1 + 12) + BUFFER;
         assert_eq!(gas, expected, "T3 scope writes should be fully charged");
     }
 

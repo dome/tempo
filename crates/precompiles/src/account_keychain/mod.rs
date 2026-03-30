@@ -8,28 +8,93 @@
 
 pub mod dispatch;
 
+use std::collections::HashSet;
+
 use __packing_authorized_key::{
     ENFORCE_LIMITS_LOC, EXPIRY_LOC, IS_REVOKED_LOC, SIGNATURE_TYPE_LOC,
 };
-use tempo_contracts::precompiles::{AccountKeychainError, AccountKeychainEvent};
+use alloy::sol_types::SolCall;
+use tempo_contracts::precompiles::{AccountKeychainError, AccountKeychainEvent, ITIP20};
 pub use tempo_contracts::precompiles::{
     IAccountKeychain,
     IAccountKeychain::{
-        CallScope, KeyInfo, KeyRestrictions, SignatureType, TokenLimit,
+        CallScope, KeyInfo, KeyRestrictions, SelectorRule, SignatureType, TokenLimit,
         getAllowedCallsCall, getKeyCall, getRemainingLimitCall, getRemainingLimitWithPeriodCall,
         getTransactionKeyCall, removeAllowedCallsCall, revokeKeyCall, setAllowedCallsCall,
         updateSpendingLimitCall,
     },
     authorizeKeyCall, getRemainingLimitReturn,
 };
+use tempo_primitives::transaction::{
+    CallScope as ProtocolCallScope, SelectorRule as ProtocolSelectorRule,
+};
 
 use crate::{
     ACCOUNT_KEYCHAIN_ADDRESS,
     error::Result,
-    storage::{Handler, Mapping, packing::insert_into_word},
+    storage::{Handler, Mapping, Set, packing::insert_into_word},
+    tip20_factory::TIP20Factory,
 };
-use alloy::primitives::{Address, B256, TxKind, U256, keccak256};
+use alloy::primitives::{Address, B256, FixedBytes, TxKind, U256, keccak256};
 use tempo_precompiles_macros::{Storable, contract};
+
+/// Maximum number of call scopes per account key.
+pub const MAX_CALL_SCOPES: u8 = 8;
+/// Maximum number of selector rules per call scope.
+pub const MAX_SELECTOR_RULES_PER_SCOPE: u8 = 16;
+/// Maximum number of recipients per selector rule.
+pub const MAX_RECIPIENTS_PER_SELECTOR: u8 = 16;
+
+/// Allowed TIP-20 selectors for recipient-constrained rules.
+const TIP20_TRANSFER_SELECTOR: [u8; 4] = ITIP20::transferCall::SELECTOR;
+const TIP20_APPROVE_SELECTOR: [u8; 4] = ITIP20::approveCall::SELECTOR;
+const TIP20_TRANSFER_WITH_MEMO_SELECTOR: [u8; 4] = ITIP20::transferWithMemoCall::SELECTOR;
+
+#[inline]
+pub fn is_constrained_tip20_selector(selector: [u8; 4]) -> bool {
+    matches!(
+        selector,
+        TIP20_TRANSFER_SELECTOR | TIP20_APPROVE_SELECTOR | TIP20_TRANSFER_WITH_MEMO_SELECTOR
+    )
+}
+
+/// Selector-level scope for one selector under one target.
+///
+/// mode:
+/// - 0 => unset/disabled
+/// - 1 => selector allowed for any recipient
+/// - 2 => selector allowed only for recipients in the set
+#[derive(Debug, Clone, Storable, Default)]
+pub struct SelectorScope {
+    pub mode: u8,
+    pub recipients: Set<Address>,
+}
+
+/// Target-level scope for one target under one account key.
+///
+/// mode:
+/// - 0 => unset/disabled
+/// - 1 => all selectors allowed
+/// - 2 => only selectors in the set are allowed
+#[derive(Debug, Clone, Storable, Default)]
+pub struct TargetScope {
+    pub mode: u8,
+    pub selectors: Set<FixedBytes<4>>,
+    pub selector_scopes: Mapping<FixedBytes<4>, SelectorScope>,
+}
+
+/// Key-level call scope.
+///
+/// mode:
+/// - 0 => unrestricted
+/// - 1 => scoped
+/// - 2 => deny-all
+#[derive(Debug, Clone, Storable, Default)]
+pub struct KeyScope {
+    pub mode: u8,
+    pub targets: Set<Address>,
+    pub target_scopes: Mapping<Address, TargetScope>,
+}
 
 /// Key information stored in the precompile
 ///
@@ -142,6 +207,9 @@ pub struct AccountKeychain {
     // Using a hash of account and keyId as the key to avoid triple nesting
     spending_limits: Mapping<B256, Mapping<Address, SpendingLimitState>>,
 
+    // key_scopes[(account, keyId)] -> call scoping configuration.
+    key_scopes: Mapping<B256, KeyScope>,
+
     // WARNING(rusowsky): transient storage slots must always be placed at the very end until the `contract`
     // macro is refactored and has 2 independent layouts (persistent and transient).
     // If new (persistent) storage fields need to be added to the precompile, they must go above this one.
@@ -226,17 +294,30 @@ impl AccountKeychain {
             _ => return Err(AccountKeychainError::invalid_signature_type().into()),
         };
 
-        // TIP-1011 fields are hardfork-gated at T3. This branch only implements periodic limits;
-        // scoped calls are added in the follow-up PR, so reject them here before mutating state.
-        if !is_t3 {
+        // TIP-1011 fields are hardfork-gated at T3, so reject them before mutating state.
+        let allowed_call_configs = if is_t3 {
+            if config.enforceAllowedCalls {
+                Some(
+                    config
+                        .allowedCalls
+                        .iter()
+                        .map(Self::abi_call_scope_to_config)
+                        .collect::<Result<Vec<_>>>()?,
+                )
+            } else {
+                None
+            }
+        } else {
             if config.limits.iter().any(|limit| limit.period != 0) {
                 return Err(AccountKeychainError::invalid_call_scope().into());
             }
-        }
 
-        if config.enforceAllowedCalls || !config.allowedCalls.is_empty() {
-            return Err(AccountKeychainError::invalid_call_scope().into());
-        }
+            if config.enforceAllowedCalls || !config.allowedCalls.is_empty() {
+                return Err(AccountKeychainError::invalid_call_scope().into());
+            }
+
+            None
+        };
 
         // Create and store the new key
         let new_key = AuthorizedKey {
@@ -254,7 +335,12 @@ impl AccountKeychain {
             .into_iter()
             .flatten();
 
-        self.apply_key_authorization_restrictions(msg_sender, call.keyId, limits)?;
+        self.apply_key_authorization_restrictions(
+            msg_sender,
+            call.keyId,
+            limits,
+            allowed_call_configs.as_deref(),
+        )?;
 
         // Emit event
         self.emit_event(AccountKeychainEvent::KeyAuthorized(
@@ -439,27 +525,175 @@ impl AccountKeychain {
         })
     }
 
-    /// Scoped-call mutations land in the follow-up stacked PR.
+    /// Root-only create-or-replace update for one target call scope.
     pub fn set_allowed_calls(
         &mut self,
-        _msg_sender: Address,
-        _call: setAllowedCallsCall,
+        msg_sender: Address,
+        call: setAllowedCallsCall,
     ) -> Result<()> {
-        Err(AccountKeychainError::invalid_call_scope().into())
+        if !self.storage.spec().is_t3() {
+            return Err(AccountKeychainError::invalid_call_scope().into());
+        }
+
+        self.ensure_admin_caller(msg_sender)?;
+
+        let key = self.load_active_key(msg_sender, call.keyId)?;
+        let current_timestamp = self.storage.timestamp().saturating_to::<u64>();
+        if current_timestamp >= key.expiry {
+            return Err(AccountKeychainError::key_expired().into());
+        }
+
+        let key_hash = Self::spending_limit_key(msg_sender, call.keyId);
+        let scope = call.scope;
+
+        let selector_rules = if scope.selectorRules.is_empty() {
+            None
+        } else {
+            let mut selector_rules = Vec::new();
+            for rule in scope.selectorRules {
+                // Empty recipients is the canonical "no recipient restriction" encoding.
+                // Callers must remove the selector rule entirely to block that selector.
+                selector_rules.push(ProtocolSelectorRule {
+                    selector: *rule.selector,
+                    recipients: if rule.recipients.is_empty() {
+                        None
+                    } else {
+                        Some(rule.recipients)
+                    },
+                });
+            }
+            Some(selector_rules)
+        };
+
+        self.upsert_target_scope(key_hash, scope.target, selector_rules)?;
+
+        let mode = if self.key_scopes[key_hash].targets.is_empty()? {
+            2
+        } else {
+            1
+        };
+        self.key_scopes[key_hash].mode.write(mode)
     }
 
-    /// Scoped-call mutations land in the follow-up stacked PR.
+    /// Root-only removal of one target call scope.
     pub fn remove_allowed_calls(
         &mut self,
-        _msg_sender: Address,
-        _call: removeAllowedCallsCall,
+        msg_sender: Address,
+        call: removeAllowedCallsCall,
     ) -> Result<()> {
-        Err(AccountKeychainError::invalid_call_scope().into())
+        if !self.storage.spec().is_t3() {
+            return Err(AccountKeychainError::invalid_call_scope().into());
+        }
+
+        self.ensure_admin_caller(msg_sender)?;
+
+        let key = self.load_active_key(msg_sender, call.keyId)?;
+        let current_timestamp = self.storage.timestamp().saturating_to::<u64>();
+        if current_timestamp >= key.expiry {
+            return Err(AccountKeychainError::key_expired().into());
+        }
+
+        let key_hash = Self::spending_limit_key(msg_sender, call.keyId);
+        let current_mode = self.key_scopes[key_hash].mode.read()?;
+        if current_mode == 0 {
+            return Ok(());
+        }
+
+        self.remove_target_scope(key_hash, call.target)?;
+
+        let mode = if self.key_scopes[key_hash].targets.is_empty()? {
+            2
+        } else {
+            1
+        };
+        self.key_scopes[key_hash].mode.write(mode)
     }
 
-    /// Scoped-call reads land in the follow-up stacked PR.
-    pub fn get_allowed_calls(&self, _call: getAllowedCallsCall) -> Result<Vec<CallScope>> {
-        Ok(Vec::new())
+    /// Returns call scopes configured for an account key.
+    ///
+    /// When the key is in explicit deny-all mode (`allowed_calls = Some([])`), returns a
+    /// sentinel entry `{target: address(0), selectorRules: []}` so callers can distinguish it
+    /// from unrestricted mode (`[]`).
+    pub fn get_allowed_calls(&self, call: getAllowedCallsCall) -> Result<Vec<CallScope>> {
+        if !self.storage.spec().is_t3() {
+            return Ok(Vec::new());
+        }
+
+        let key_hash = Self::spending_limit_key(call.account, call.keyId);
+        let mode = self.key_scopes[key_hash].mode.read()?;
+        if mode == 0 {
+            return Ok(Vec::new());
+        }
+        if mode == 2 {
+            // Explicit deny-all marker to preserve round-tripping for `allowed_calls = Some([])`.
+            return Ok(vec![CallScope {
+                target: Address::ZERO,
+                selectorRules: Vec::new(),
+            }]);
+        }
+
+        let targets = self.key_scopes[key_hash].targets.read()?;
+        if targets.is_empty() {
+            return Ok(vec![CallScope {
+                target: Address::ZERO,
+                selectorRules: Vec::new(),
+            }]);
+        }
+
+        let mut scopes = Vec::new();
+        for target in targets {
+            let target_mode = self.key_scopes[key_hash].target_scopes[target]
+                .mode
+                .read()?;
+
+            let scope = match target_mode {
+                1 => CallScope {
+                    target,
+                    selectorRules: Vec::new(),
+                },
+                2 => {
+                    let mut rules = Vec::new();
+                    let selectors = self.key_scopes[key_hash].target_scopes[target]
+                        .selectors
+                        .read()?;
+                    for selector in selectors {
+                        let selector_mode = self.key_scopes[key_hash].target_scopes[target]
+                            .selector_scopes[selector]
+                            .mode
+                            .read()?;
+
+                        let recipients = if selector_mode == 2 {
+                            let recipients: Vec<Address> = self.key_scopes[key_hash].target_scopes
+                                [target]
+                                .selector_scopes[selector]
+                                .recipients
+                                .read()?
+                                .into();
+                            recipients
+                        } else if selector_mode == 1 {
+                            Vec::new()
+                        } else {
+                            continue;
+                        };
+
+                        rules.push(SelectorRule {
+                            selector,
+                            recipients,
+                        });
+                    }
+
+                    CallScope {
+                        target,
+                        selectorRules: rules,
+                    }
+                }
+                _ => continue,
+            };
+
+            scopes.push(scope);
+        }
+
+        Ok(scopes)
     }
 
     /// Returns the access key used to authorize the current transaction (`Address::ZERO` = root key).
@@ -498,10 +732,13 @@ impl AccountKeychain {
         account: Address,
         key_id: Address,
         limits: impl IntoIterator<Item = &'a TokenLimit>,
+        allowed_calls: Option<&[ProtocolCallScope]>,
     ) -> Result<()> {
         let limit_key = Self::spending_limit_key(account, key_id);
 
         if !self.storage.spec().is_t3() {
+            debug_assert!(allowed_calls.is_none());
+
             for limit in limits {
                 self.spending_limits[limit_key][limit.token].write(SpendingLimitState {
                     remaining: limit.amount,
@@ -528,18 +765,322 @@ impl AccountKeychain {
             })?;
         }
 
+        self.replace_allowed_calls(limit_key, allowed_calls)
+    }
+
+    /// Validates a top-level call against scoped permissions for this key.
+    pub fn validate_call_scope_for_transaction(
+        &self,
+        account: Address,
+        key_id: Address,
+        to: &TxKind,
+        input: &[u8],
+    ) -> Result<()> {
+        if key_id == Address::ZERO || !self.storage.spec().is_t3() {
+            return Ok(());
+        }
+
+        if to.is_create() {
+            return Err(AccountKeychainError::call_not_allowed().into());
+        }
+
+        let key_hash = Self::spending_limit_key(account, key_id);
+        let mode = self.key_scopes[key_hash].mode.read()?;
+
+        // Unrestricted mode.
+        if mode == 0 {
+            return Ok(());
+        }
+        if mode == 2 {
+            return Err(AccountKeychainError::call_not_allowed().into());
+        }
+
+        let target = match to {
+            TxKind::Call(target) => *target,
+            TxKind::Create => return Err(AccountKeychainError::call_not_allowed().into()),
+        };
+
+        let target_mode = self.key_scopes[key_hash].target_scopes[target]
+            .mode
+            .read()?;
+        if target_mode == 1 {
+            return Ok(());
+        }
+
+        if target_mode != 2 {
+            return Err(AccountKeychainError::call_not_allowed().into());
+        }
+
+        if input.len() < 4 {
+            return Err(AccountKeychainError::call_not_allowed().into());
+        }
+
+        let selector = FixedBytes::<4>::from([input[0], input[1], input[2], input[3]]);
+        if !self.key_scopes[key_hash].target_scopes[target]
+            .selectors
+            .contains(&selector)?
+        {
+            return Err(AccountKeychainError::call_not_allowed().into());
+        }
+
+        let selector_mode = self.key_scopes[key_hash].target_scopes[target].selector_scopes
+            [selector]
+            .mode
+            .read()?;
+        if selector_mode == 1 {
+            return Ok(());
+        }
+        if selector_mode != 2 {
+            return Err(AccountKeychainError::call_not_allowed().into());
+        }
+
+        if input.len() < 36 {
+            return Err(AccountKeychainError::call_not_allowed().into());
+        }
+
+        let recipient_word = &input[4..36];
+        if recipient_word[..12].iter().any(|byte| *byte != 0) {
+            return Err(AccountKeychainError::call_not_allowed().into());
+        }
+
+        let recipient = Address::from_slice(&recipient_word[12..]);
+        if self.key_scopes[key_hash].target_scopes[target].selector_scopes[selector]
+            .recipients
+            .contains(&recipient)?
+        {
+            Ok(())
+        } else {
+            Err(AccountKeychainError::call_not_allowed().into())
+        }
+    }
+
+    fn replace_allowed_calls(
+        &mut self,
+        account_key: B256,
+        allowed_calls: Option<&[ProtocolCallScope]>,
+    ) -> Result<()> {
+        // Fresh authorizations should not have any pre-existing call-scope rows because
+        // `authorize_key` rejects both existing and previously revoked keys before reaching this
+        // path. We still clear the scope tree first as a defense-in-depth measure against stale or
+        // out-of-band state, and keep it because the valid-path cost is low (empty target set).
+        self.clear_all_target_scopes(account_key)?;
+
+        match allowed_calls {
+            None => {
+                self.key_scopes[account_key].mode.write(0)?;
+                Ok(())
+            }
+            Some(scopes) => {
+                if scopes.is_empty() {
+                    // Canonical deny-all state for `allowed_calls = Some([])`.
+                    self.key_scopes[account_key].mode.write(2)?;
+                    return Ok(());
+                }
+
+                if scopes.len() > MAX_CALL_SCOPES as usize {
+                    return Err(AccountKeychainError::scope_limit_exceeded().into());
+                }
+
+                let mut seen_targets = HashSet::new();
+                for scope in scopes {
+                    if !seen_targets.insert(scope.target) {
+                        return Err(AccountKeychainError::invalid_call_scope().into());
+                    }
+                }
+
+                self.key_scopes[account_key].mode.write(1)?;
+                for scope in scopes {
+                    self.upsert_target_scope(
+                        account_key,
+                        scope.target,
+                        scope.selector_rules.clone(),
+                    )?;
+                }
+
+                Ok(())
+            }
+        }
+    }
+
+    fn clear_all_target_scopes(&mut self, account_key: B256) -> Result<()> {
+        let targets = self.key_scopes[account_key].targets.read()?;
+        for target in targets {
+            self.remove_target_scope(account_key, target)?;
+        }
+
         Ok(())
     }
 
-    /// Scoped-call enforcement lands in the follow-up stacked PR.
-    pub fn validate_call_scope_for_transaction(
-        &self,
-        _account: Address,
-        _key_id: Address,
-        _to: &TxKind,
-        _input: &[u8],
+    fn remove_target_scope(&mut self, account_key: B256, target: Address) -> Result<()> {
+        if !self.key_scopes[account_key].targets.remove(&target)? {
+            return Ok(());
+        }
+
+        self.clear_target_selectors(account_key, target)?;
+        self.key_scopes[account_key].target_scopes[target]
+            .mode
+            .write(0)
+    }
+
+    fn clear_target_selectors(&mut self, account_key: B256, target: Address) -> Result<()> {
+        let selectors = self.key_scopes[account_key].target_scopes[target]
+            .selectors
+            .read()?;
+        for selector in selectors {
+            self.key_scopes[account_key].target_scopes[target].selector_scopes[selector]
+                .recipients
+                .delete()?;
+            self.key_scopes[account_key].target_scopes[target].selector_scopes[selector]
+                .mode
+                .write(0)?;
+        }
+
+        self.key_scopes[account_key].target_scopes[target]
+            .selectors
+            .delete()
+    }
+
+    fn upsert_target_scope(
+        &mut self,
+        account_key: B256,
+        target: Address,
+        selector_rules: Option<Vec<ProtocolSelectorRule>>,
     ) -> Result<()> {
+        if let Some(rules) = selector_rules.as_ref() {
+            if rules.is_empty() {
+                return self.remove_target_scope(account_key, target);
+            }
+            self.validate_selector_rules(target, rules)?;
+        }
+
+        if !self.key_scopes[account_key].targets.contains(&target)? {
+            let count = self.key_scopes[account_key].targets.len()?;
+            if count >= MAX_CALL_SCOPES as usize {
+                return Err(AccountKeychainError::scope_limit_exceeded().into());
+            }
+
+            self.key_scopes[account_key].targets.insert(target)?;
+        }
+
+        self.clear_target_selectors(account_key, target)?;
+
+        match selector_rules {
+            None => {
+                self.key_scopes[account_key].target_scopes[target]
+                    .mode
+                    .write(1)?;
+            }
+            Some(rules) => {
+                self.key_scopes[account_key].target_scopes[target]
+                    .mode
+                    .write(2)?;
+
+                for rule in rules {
+                    let selector = FixedBytes::<4>::from(rule.selector);
+                    self.key_scopes[account_key].target_scopes[target]
+                        .selectors
+                        .insert(selector)?;
+
+                    match rule.recipients {
+                        None => {
+                            self.key_scopes[account_key].target_scopes[target].selector_scopes
+                                [selector]
+                                .mode
+                                .write(1)?;
+                            self.key_scopes[account_key].target_scopes[target].selector_scopes
+                                [selector]
+                                .recipients
+                                .delete()?;
+                        }
+                        Some(recipients) => {
+                            self.key_scopes[account_key].target_scopes[target].selector_scopes
+                                [selector]
+                                .mode
+                                .write(2)?;
+                            self.key_scopes[account_key].target_scopes[target].selector_scopes
+                                [selector]
+                                .recipients
+                                .write(Set::from(recipients))?;
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
+    }
+
+    fn validate_selector_rules(
+        &self,
+        target: Address,
+        rules: &[ProtocolSelectorRule],
+    ) -> Result<()> {
+        if rules.len() > MAX_SELECTOR_RULES_PER_SCOPE as usize {
+            return Err(AccountKeychainError::selector_limit_exceeded().into());
+        }
+
+        let mut selectors = HashSet::new();
+        for rule in rules {
+            if !selectors.insert(rule.selector) {
+                return Err(AccountKeychainError::invalid_call_scope().into());
+            }
+
+            let Some(recipients) = &rule.recipients else {
+                continue;
+            };
+
+            if recipients.is_empty() {
+                return Err(AccountKeychainError::invalid_call_scope().into());
+            }
+
+            if recipients.len() > MAX_RECIPIENTS_PER_SELECTOR as usize {
+                return Err(AccountKeychainError::recipient_limit_exceeded().into());
+            }
+
+            if !TIP20Factory::new().is_tip20(target)?
+                || !is_constrained_tip20_selector(rule.selector)
+            {
+                return Err(AccountKeychainError::invalid_call_scope().into());
+            }
+
+            let mut unique_recipients = HashSet::new();
+            for recipient in recipients {
+                if recipient.is_zero() || !unique_recipients.insert(*recipient) {
+                    return Err(AccountKeychainError::invalid_call_scope().into());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn abi_call_scope_to_config(scope: &CallScope) -> Result<ProtocolCallScope> {
+        if scope.selectorRules.is_empty() {
+            Ok(ProtocolCallScope {
+                target: scope.target,
+                selector_rules: None,
+            })
+        } else {
+            let selector_rules = scope
+                .selectorRules
+                .iter()
+                .map(|rule| {
+                    Ok(ProtocolSelectorRule {
+                        selector: *rule.selector,
+                        recipients: if rule.recipients.is_empty() {
+                            None
+                        } else {
+                            Some(rule.recipients.clone())
+                        },
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            Ok(ProtocolCallScope {
+                target: scope.target,
+                selector_rules: Some(selector_rules),
+            })
+        }
     }
 
     /// Ensures admin operations are authorized for this caller.
@@ -875,10 +1416,10 @@ mod tests {
         storage::{StorageCtx, hashmap::HashMapStorageProvider},
         test_util::TIP20Setup,
     };
-    use alloy::primitives::{Address, U256};
+    use alloy::primitives::{Address, TxKind, U256};
     use revm::state::Bytecode;
     use tempo_chainspec::hardfork::TempoHardfork;
-    use tempo_contracts::precompiles::IAccountKeychain::SignatureType;
+    use tempo_contracts::precompiles::{DEFAULT_FEE_TOKEN, IAccountKeychain::SignatureType};
 
     // Helper function to assert unauthorized error
     fn assert_unauthorized_error(error: TempoPrecompileError) {
@@ -887,6 +1428,18 @@ mod tests {
                 assert!(
                     matches!(e, AccountKeychainError::UnauthorizedCaller(_)),
                     "Expected UnauthorizedCaller error, got: {e:?}"
+                );
+            }
+            _ => panic!("Expected AccountKeychainError, got: {error:?}"),
+        }
+    }
+
+    fn assert_call_not_allowed(error: TempoPrecompileError) {
+        match error {
+            TempoPrecompileError::AccountKeychainError(e) => {
+                assert!(
+                    matches!(e, AccountKeychainError::CallNotAllowed(_)),
+                    "Expected CallNotAllowed error, got: {e:?}"
                 );
             }
             _ => panic!("Expected AccountKeychainError, got: {error:?}"),
@@ -2816,6 +3369,65 @@ mod tests {
     }
 
     #[test]
+    fn test_t3_rejects_recipient_constrained_scope_for_undeployed_tip20() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T3);
+        let account = Address::random();
+        let key_id = Address::random();
+        let recipient = Address::repeat_byte(0x44);
+        let mut target_bytes = [0u8; 20];
+        target_bytes[0] = 0x20;
+        target_bytes[1] = 0xc0;
+        target_bytes[19] = 0x42;
+        let undeployed_tip20 = Address::from(target_bytes);
+
+        StorageCtx::enter(&mut storage, || {
+            let mut keychain = AccountKeychain::new();
+            keychain.initialize()?;
+            keychain.set_transaction_key(Address::ZERO)?;
+            keychain.set_tx_origin(account)?;
+
+            keychain.authorize_key(
+                account,
+                authorizeKeyCall {
+                    keyId: key_id,
+                    signatureType: SignatureType::Secp256k1,
+                    config: KeyRestrictions {
+                        expiry: u64::MAX,
+                        enforceLimits: false,
+                        limits: vec![],
+                        enforceAllowedCalls: false,
+                        allowedCalls: vec![],
+                    },
+                },
+            )?;
+
+            let err = keychain
+                .apply_key_authorization_restrictions(
+                    account,
+                    key_id,
+                    &[],
+                    Some(&[ProtocolCallScope {
+                        target: undeployed_tip20,
+                        selector_rules: Some(vec![ProtocolSelectorRule {
+                            selector: TIP20_TRANSFER_SELECTOR,
+                            recipients: Some(vec![recipient]),
+                        }]),
+                    }]),
+                )
+                .expect_err("unexpected success for undeployed TIP-20 target");
+
+            match err {
+                TempoPrecompileError::AccountKeychainError(
+                    AccountKeychainError::InvalidCallScope(_),
+                ) => {}
+                other => panic!("expected InvalidCallScope, got {other:?}"),
+            }
+
+            Ok(())
+        })
+    }
+
+    #[test]
     fn test_t3_periodic_limit_rollover() -> eyre::Result<()> {
         let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T3);
         storage.set_timestamp(U256::from(1_000u64));
@@ -2858,6 +3470,7 @@ mod tests {
                     amount: U256::from(100),
                     period: 60,
                 }],
+                None,
             )?;
 
             keychain.set_transaction_key(key_id)?;
@@ -2887,6 +3500,302 @@ mod tests {
                 token,
             })?;
             assert_eq!(remaining, U256::from(90));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_t3_get_allowed_calls_returns_deny_all_sentinel() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T3);
+        let account = Address::random();
+        let key_id = Address::random();
+
+        StorageCtx::enter(&mut storage, || {
+            let mut keychain = AccountKeychain::new();
+            keychain.initialize()?;
+            keychain.set_transaction_key(Address::ZERO)?;
+            keychain.set_tx_origin(account)?;
+
+            keychain.authorize_key(
+                account,
+                authorizeKeyCall {
+                    keyId: key_id,
+                    signatureType: SignatureType::Secp256k1,
+                    config: KeyRestrictions {
+                        expiry: u64::MAX,
+                        enforceLimits: false,
+                        limits: vec![],
+                        enforceAllowedCalls: false,
+                        allowedCalls: vec![],
+                    },
+                },
+            )?;
+
+            keychain.apply_key_authorization_restrictions(account, key_id, &[], Some(&[]))?;
+
+            let scopes = keychain.get_allowed_calls(getAllowedCallsCall {
+                account,
+                keyId: key_id,
+            })?;
+            assert_eq!(scopes.len(), 1);
+            assert_eq!(scopes[0].target, Address::ZERO);
+            assert!(scopes[0].selectorRules.is_empty());
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_t3_set_allowed_calls_roundtrip_and_remove_target_scope() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T3);
+        let account = Address::random();
+        let key_id = Address::random();
+        let target = Address::random();
+
+        StorageCtx::enter(&mut storage, || {
+            let mut keychain = AccountKeychain::new();
+            keychain.initialize()?;
+            keychain.set_transaction_key(Address::ZERO)?;
+            keychain.set_tx_origin(account)?;
+
+            keychain.authorize_key(
+                account,
+                authorizeKeyCall {
+                    keyId: key_id,
+                    signatureType: SignatureType::Secp256k1,
+                    config: KeyRestrictions {
+                        expiry: u64::MAX,
+                        enforceLimits: false,
+                        limits: vec![],
+                        enforceAllowedCalls: false,
+                        allowedCalls: vec![],
+                    },
+                },
+            )?;
+
+            keychain.set_allowed_calls(
+                account,
+                setAllowedCallsCall {
+                    keyId: key_id,
+                    scope: CallScope {
+                        target,
+                        selectorRules: vec![SelectorRule {
+                            selector: TIP20_TRANSFER_SELECTOR.into(),
+                            recipients: vec![],
+                        }],
+                    },
+                },
+            )?;
+
+            let scopes = keychain.get_allowed_calls(getAllowedCallsCall {
+                account,
+                keyId: key_id,
+            })?;
+            assert_eq!(scopes.len(), 1);
+            assert_eq!(scopes[0].target, target);
+            assert_eq!(scopes[0].selectorRules.len(), 1);
+            assert_eq!(
+                *scopes[0].selectorRules[0].selector,
+                TIP20_TRANSFER_SELECTOR
+            );
+            assert!(scopes[0].selectorRules[0].recipients.is_empty());
+
+            keychain.remove_allowed_calls(
+                account,
+                removeAllowedCallsCall {
+                    keyId: key_id,
+                    target,
+                },
+            )?;
+
+            let removed = keychain.get_allowed_calls(getAllowedCallsCall {
+                account,
+                keyId: key_id,
+            })?;
+            assert_eq!(removed.len(), 1);
+            assert_eq!(removed[0].target, Address::ZERO);
+            assert!(removed[0].selectorRules.is_empty());
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_t3_set_allowed_calls_empty_selector_rules_allow_all_selectors() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T3);
+        let account = Address::random();
+        let key_id = Address::random();
+        let target = DEFAULT_FEE_TOKEN;
+
+        StorageCtx::enter(&mut storage, || {
+            let mut keychain = AccountKeychain::new();
+            keychain.initialize()?;
+            keychain.set_transaction_key(Address::ZERO)?;
+            keychain.set_tx_origin(account)?;
+
+            keychain.authorize_key(
+                account,
+                authorizeKeyCall {
+                    keyId: key_id,
+                    signatureType: SignatureType::Secp256k1,
+                    config: KeyRestrictions {
+                        expiry: u64::MAX,
+                        enforceLimits: false,
+                        limits: vec![],
+                        enforceAllowedCalls: false,
+                        allowedCalls: vec![],
+                    },
+                },
+            )?;
+
+            keychain.set_allowed_calls(
+                account,
+                setAllowedCallsCall {
+                    keyId: key_id,
+                    scope: CallScope {
+                        target,
+                        selectorRules: vec![],
+                    },
+                },
+            )?;
+
+            let scopes = keychain.get_allowed_calls(getAllowedCallsCall {
+                account,
+                keyId: key_id,
+            })?;
+            assert_eq!(scopes.len(), 1);
+            assert_eq!(scopes[0].target, target);
+            assert!(scopes[0].selectorRules.is_empty());
+
+            let allow = keychain.validate_call_scope_for_transaction(
+                account,
+                key_id,
+                &TxKind::Call(target),
+                &[],
+            );
+            assert!(allow.is_ok());
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_t3_call_scope_selector_and_recipient_checks() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T3);
+        let account = Address::random();
+        let key_id = Address::random();
+        let target = DEFAULT_FEE_TOKEN;
+        let allowed_recipient = Address::repeat_byte(0x22);
+        let denied_recipient = Address::repeat_byte(0x33);
+
+        StorageCtx::enter(&mut storage, || {
+            let mut keychain = AccountKeychain::new();
+            keychain.initialize()?;
+            keychain.set_transaction_key(Address::ZERO)?;
+            keychain.set_tx_origin(account)?;
+            TIP20Setup::path_usd(account).apply()?;
+
+            keychain.authorize_key(
+                account,
+                authorizeKeyCall {
+                    keyId: key_id,
+                    signatureType: SignatureType::Secp256k1,
+                    config: KeyRestrictions {
+                        expiry: u64::MAX,
+                        enforceLimits: false,
+                        limits: vec![],
+                        enforceAllowedCalls: false,
+                        allowedCalls: vec![],
+                    },
+                },
+            )?;
+
+            keychain.apply_key_authorization_restrictions(
+                account,
+                key_id,
+                &[],
+                Some(&[ProtocolCallScope {
+                    target,
+                    selector_rules: Some(vec![ProtocolSelectorRule {
+                        selector: TIP20_TRANSFER_SELECTOR,
+                        recipients: Some(vec![allowed_recipient]),
+                    }]),
+                }]),
+            )?;
+
+            let make_calldata = |selector: [u8; 4], recipient: Address| {
+                let mut data = selector.to_vec();
+                let mut recipient_word = [0u8; 32];
+                recipient_word[12..].copy_from_slice(recipient.as_slice());
+                data.extend_from_slice(&recipient_word);
+                data.extend_from_slice(&[0u8; 32]);
+                data
+            };
+
+            let allow = keychain.validate_call_scope_for_transaction(
+                account,
+                key_id,
+                &TxKind::Call(target),
+                &make_calldata(TIP20_TRANSFER_SELECTOR, allowed_recipient),
+            );
+            assert!(allow.is_ok());
+
+            let denied = keychain
+                .validate_call_scope_for_transaction(
+                    account,
+                    key_id,
+                    &TxKind::Call(target),
+                    &make_calldata(TIP20_TRANSFER_SELECTOR, denied_recipient),
+                )
+                .expect_err("unexpected success for denied recipient");
+            assert_call_not_allowed(denied);
+
+            let wrong_selector = keychain
+                .validate_call_scope_for_transaction(
+                    account,
+                    key_id,
+                    &TxKind::Call(target),
+                    &make_calldata([0xde, 0xad, 0xbe, 0xef], allowed_recipient),
+                )
+                .expect_err("unexpected success for wrong selector");
+            assert_call_not_allowed(wrong_selector);
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_t3_contract_creation_rejected_for_access_key() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T3);
+        let account = Address::random();
+        let key_id = Address::random();
+
+        StorageCtx::enter(&mut storage, || {
+            let mut keychain = AccountKeychain::new();
+            keychain.initialize()?;
+            keychain.set_transaction_key(Address::ZERO)?;
+            keychain.set_tx_origin(account)?;
+
+            keychain.authorize_key(
+                account,
+                authorizeKeyCall {
+                    keyId: key_id,
+                    signatureType: SignatureType::Secp256k1,
+                    config: KeyRestrictions {
+                        expiry: u64::MAX,
+                        enforceLimits: false,
+                        limits: vec![],
+                        enforceAllowedCalls: false,
+                        allowedCalls: vec![],
+                    },
+                },
+            )?;
+
+            let err = keychain
+                .validate_call_scope_for_transaction(account, key_id, &TxKind::Create, &[])
+                .expect_err("unexpected success for CREATE");
+            assert_call_not_allowed(err);
+
             Ok(())
         })
     }

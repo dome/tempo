@@ -28,7 +28,7 @@ pub use tempo_contracts::precompiles::{
 use crate::{
     ACCOUNT_KEYCHAIN_ADDRESS,
     error::Result,
-    storage::{Handler, Mapping, Set, packing::insert_into_word},
+    storage::{EnumerableMap, Handler, Mapping, Set, packing::insert_into_word},
     tip20_factory::TIP20Factory,
 };
 use alloy::primitives::{Address, B256, FixedBytes, TxKind, U256, keccak256};
@@ -89,8 +89,7 @@ pub struct SelectorScope {
 #[derive(Debug, Clone, Storable, Default)]
 pub struct TargetScope {
     pub mode: u8,
-    pub selectors: Vec<FixedBytes<4>>,
-    pub selector_scopes: Mapping<FixedBytes<4>, SelectorScope>,
+    pub selectors: EnumerableMap<FixedBytes<4>, SelectorScope>,
 }
 
 /// Key-level call scope.
@@ -102,8 +101,7 @@ pub struct TargetScope {
 #[derive(Debug, Clone, Storable, Default)]
 pub struct KeyScope {
     pub mode: u8,
-    pub targets: Vec<Address>,
-    pub target_scopes: Mapping<Address, TargetScope>,
+    pub targets: EnumerableMap<Address, TargetScope>,
 }
 
 /// Key information stored in the precompile
@@ -248,42 +246,6 @@ impl AccountKeychain {
         }
 
         Ok(limit.to::<u128>())
-    }
-
-    #[inline]
-    fn ensure_target_indexed(&mut self, account_key: B256, target: Address) -> Result<()> {
-        if !self.key_scopes[account_key].targets.read()?.contains(&target) {
-            self.key_scopes[account_key].targets.push(target)?;
-        }
-
-        Ok(())
-    }
-
-    #[inline]
-    fn remove_target_index(&mut self, account_key: B256, target: Address) -> Result<()> {
-        let mut targets = self.key_scopes[account_key].targets.read()?;
-        targets.retain(|configured_target| configured_target != &target);
-        self.key_scopes[account_key].targets.write(targets)
-    }
-
-    #[inline]
-    fn ensure_selector_indexed(
-        &mut self,
-        account_key: B256,
-        target: Address,
-        selector: FixedBytes<4>,
-    ) -> Result<()> {
-        if !self.key_scopes[account_key].target_scopes[target]
-            .selectors
-            .read()?
-            .contains(&selector)
-        {
-            self.key_scopes[account_key].target_scopes[target]
-                .selectors
-                .push(selector)?;
-        }
-
-        Ok(())
     }
 
     /// Initializes the account keychain precompile.
@@ -653,7 +615,7 @@ impl AccountKeychain {
             }]);
         }
 
-        let targets = self.key_scopes[key_hash].targets.read()?;
+        let targets = self.key_scopes[key_hash].targets.keys()?;
         if targets.is_empty() {
             return Ok(vec![CallScope {
                 target: Address::ZERO,
@@ -664,9 +626,7 @@ impl AccountKeychain {
 
         let mut scopes = Vec::new();
         for target in targets {
-            let target_mode = self.key_scopes[key_hash].target_scopes[target]
-                .mode
-                .read()?;
+            let target_mode = self.key_scopes[key_hash].targets[target].mode.read()?;
 
             let scope = match target_mode {
                 1 => CallScope {
@@ -676,22 +636,19 @@ impl AccountKeychain {
                 },
                 2 => {
                     let mut rules = Vec::new();
-                    let selectors = self.key_scopes[key_hash].target_scopes[target]
-                        .selectors
-                        .read()?;
+                    let selectors = self.key_scopes[key_hash].targets[target].selectors.keys()?;
                     for selector in selectors {
-                        let selector_mode = self.key_scopes[key_hash].target_scopes[target]
-                            .selector_scopes[selector]
+                        let selector_mode = self.key_scopes[key_hash].targets[target].selectors
+                            [selector]
                             .mode
                             .read()?;
 
                         let recipients = if selector_mode == 2 {
-                            let recipients: Vec<Address> = self.key_scopes[key_hash].target_scopes
-                                [target]
-                                .selector_scopes[selector]
-                                .recipients
-                                .read()?
-                                .into();
+                            let recipients: Vec<Address> =
+                                self.key_scopes[key_hash].targets[target].selectors[selector]
+                                    .recipients
+                                    .read()?
+                                    .into();
                             recipients
                         } else if selector_mode == 1 {
                             Vec::new()
@@ -821,7 +778,7 @@ impl AccountKeychain {
             TxKind::Create => return Err(AccountKeychainError::call_not_allowed().into()),
         };
 
-        let target_mode = self.key_scopes[key_hash].target_scopes[target].mode.read()?;
+        let target_mode = self.key_scopes[key_hash].targets[target].mode.read()?;
         if target_mode == 1 {
             return Ok(());
         }
@@ -835,8 +792,7 @@ impl AccountKeychain {
         }
 
         let selector: FixedBytes<4> = [input[0], input[1], input[2], input[3]].into();
-        let selector_mode = self.key_scopes[key_hash].target_scopes[target].selector_scopes
-            [selector]
+        let selector_mode = self.key_scopes[key_hash].targets[target].selectors[selector]
             .mode
             .read()?;
         if selector_mode == 1 {
@@ -856,7 +812,7 @@ impl AccountKeychain {
         }
 
         let recipient = Address::from_slice(&recipient_word[12..]);
-        if self.key_scopes[key_hash].target_scopes[target].selector_scopes[selector]
+        if self.key_scopes[key_hash].targets[target].selectors[selector]
             .recipients
             .contains(&recipient)?
         {
@@ -916,7 +872,7 @@ impl AccountKeychain {
     }
 
     fn clear_all_target_scopes(&mut self, account_key: B256) -> Result<()> {
-        let targets = self.key_scopes[account_key].targets.read()?;
+        let targets = self.key_scopes[account_key].targets.keys()?;
         for target in targets {
             self.remove_target_scope(account_key, target)?;
         }
@@ -925,38 +881,32 @@ impl AccountKeychain {
     }
 
     fn remove_target_scope(&mut self, account_key: B256, target: Address) -> Result<()> {
-        if self.key_scopes[account_key].target_scopes[target]
-            .mode
-            .read()?
-            == 0
-        {
+        if self.key_scopes[account_key].targets[target].mode.read()? == 0 {
             return Ok(());
         }
 
-        self.remove_target_index(account_key, target)?;
-
         self.clear_target_selectors(account_key, target)?;
-        self.key_scopes[account_key].target_scopes[target]
-            .mode
-            .write(0)
+        self.key_scopes[account_key].targets[target].mode.write(0)?;
+        self.key_scopes[account_key].targets.remove_key(&target)?;
+        Ok(())
     }
 
     fn clear_target_selectors(&mut self, account_key: B256, target: Address) -> Result<()> {
-        let selectors = self.key_scopes[account_key].target_scopes[target]
+        let selectors = self.key_scopes[account_key].targets[target]
             .selectors
-            .read()?;
+            .keys()?;
         for selector in selectors {
-            self.key_scopes[account_key].target_scopes[target].selector_scopes[selector]
+            self.key_scopes[account_key].targets[target].selectors[selector]
                 .recipients
                 .delete()?;
-            self.key_scopes[account_key].target_scopes[target].selector_scopes[selector]
+            self.key_scopes[account_key].targets[target].selectors[selector]
                 .mode
                 .write(0)?;
         }
 
-        self.key_scopes[account_key].target_scopes[target]
+        self.key_scopes[account_key].targets[target]
             .selectors
-            .delete()
+            .clear_keys()
     }
 
     fn upsert_target_scope(
@@ -972,54 +922,49 @@ impl AccountKeychain {
             self.validate_selector_rules(target, rules)?;
         }
 
-        if self.key_scopes[account_key].target_scopes[target]
-            .mode
-            .read()?
-            == 0
+        if !self.key_scopes[account_key]
+            .targets
+            .contains_mapped(&target, |scope| scope.mode.read().map(|mode| mode != 0))?
         {
             let count = self.key_scopes[account_key].targets.len()?;
             if count >= MAX_CALL_SCOPES as usize {
                 return Err(AccountKeychainError::scope_limit_exceeded().into());
             }
 
-            self.ensure_target_indexed(account_key, target)?;
+            self.key_scopes[account_key]
+                .targets
+                .insert_key_unchecked(target)?;
         }
 
         self.clear_target_selectors(account_key, target)?;
 
         match selector_rules {
             None => {
-                self.key_scopes[account_key].target_scopes[target]
-                    .mode
-                    .write(1)?;
+                self.key_scopes[account_key].targets[target].mode.write(1)?;
             }
             Some(rules) => {
-                self.key_scopes[account_key].target_scopes[target]
-                    .mode
-                    .write(2)?;
+                self.key_scopes[account_key].targets[target].mode.write(2)?;
 
                 for rule in rules {
                     let selector: FixedBytes<4> = rule.selector.into();
-                    self.ensure_selector_indexed(account_key, target, selector)?;
+                    self.key_scopes[account_key].targets[target]
+                        .selectors
+                        .insert_key_unchecked(selector)?;
 
                     match rule.recipients {
                         None => {
-                            self.key_scopes[account_key].target_scopes[target].selector_scopes
-                                [selector]
+                            self.key_scopes[account_key].targets[target].selectors[selector]
                                 .mode
                                 .write(1)?;
-                            self.key_scopes[account_key].target_scopes[target].selector_scopes
-                                [selector]
+                            self.key_scopes[account_key].targets[target].selectors[selector]
                                 .recipients
                                 .delete()?;
                         }
                         Some(recipients) => {
-                            self.key_scopes[account_key].target_scopes[target].selector_scopes
-                                [selector]
+                            self.key_scopes[account_key].targets[target].selectors[selector]
                                 .mode
                                 .write(2)?;
-                            self.key_scopes[account_key].target_scopes[target].selector_scopes
-                                [selector]
+                            self.key_scopes[account_key].targets[target].selectors[selector]
                                 .recipients
                                 .write(Set::from(recipients))?;
                         }

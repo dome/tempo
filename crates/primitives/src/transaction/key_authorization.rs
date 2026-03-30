@@ -117,6 +117,9 @@ impl Encodable for TokenLimit {
 /// - `None` => allow any selector for this target
 /// - `Some([])` => deny all selectors for this target
 /// - `Some([..])` => allow exactly the listed selector rules
+///
+/// On the raw protocol model, `Some([])` is a no-match scope. The Solidity
+/// keychain mutator normalizes that form as delete-equivalent for the target.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, alloy_rlp::RlpEncodable, alloy_rlp::RlpDecodable)]
 #[rlp(trailing)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

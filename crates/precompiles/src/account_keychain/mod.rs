@@ -251,6 +251,74 @@ impl AccountKeychain {
         Ok(limit.to::<u128>())
     }
 
+    #[inline]
+    fn indexed_target_mode(&self, account_key: B256, target: Address) -> Result<u8> {
+        if !self.key_scopes[account_key]
+            .targets
+            .read()?
+            .contains(&target)
+        {
+            return Ok(0);
+        }
+
+        self.key_scopes[account_key].target_scopes[target]
+            .mode
+            .read()
+    }
+
+    #[inline]
+    fn indexed_selector_mode(
+        &self,
+        account_key: B256,
+        target: Address,
+        selector: SelectorKey,
+    ) -> Result<u8> {
+        if !self.key_scopes[account_key].target_scopes[target]
+            .selectors
+            .read()?
+            .contains(&selector)
+        {
+            return Ok(0);
+        }
+
+        self.key_scopes[account_key].target_scopes[target].selector_scopes[selector]
+            .mode
+            .read()
+    }
+
+    #[inline]
+    fn push_unique_target(&mut self, account_key: B256, target: Address) -> Result<()> {
+        if !self.key_scopes[account_key]
+            .targets
+            .read()?
+            .contains(&target)
+        {
+            self.key_scopes[account_key].targets.push(target)?;
+        }
+
+        Ok(())
+    }
+
+    #[inline]
+    fn push_unique_selector(
+        &mut self,
+        account_key: B256,
+        target: Address,
+        selector: SelectorKey,
+    ) -> Result<()> {
+        if !self.key_scopes[account_key].target_scopes[target]
+            .selectors
+            .read()?
+            .contains(&selector)
+        {
+            self.key_scopes[account_key].target_scopes[target]
+                .selectors
+                .push(selector)?;
+        }
+
+        Ok(())
+    }
+
     /// Initializes the account keychain precompile.
     pub fn initialize(&mut self) -> Result<()> {
         self.__initialize()
@@ -786,9 +854,7 @@ impl AccountKeychain {
             TxKind::Create => return Err(AccountKeychainError::call_not_allowed().into()),
         };
 
-        let target_mode = self.key_scopes[key_hash].target_scopes[target]
-            .mode
-            .read()?;
+        let target_mode = self.indexed_target_mode(key_hash, target)?;
         if target_mode == 1 {
             return Ok(());
         }
@@ -802,18 +868,7 @@ impl AccountKeychain {
         }
 
         let selector: SelectorKey = [input[0], input[1], input[2], input[3]].into();
-        if !self.key_scopes[key_hash].target_scopes[target]
-            .selectors
-            .read()?
-            .contains(&selector)
-        {
-            return Err(AccountKeychainError::call_not_allowed().into());
-        }
-
-        let selector_mode = self.key_scopes[key_hash].target_scopes[target].selector_scopes
-            [selector]
-            .mode
-            .read()?;
+        let selector_mode = self.indexed_selector_mode(key_hash, target, selector)?;
         if selector_mode == 1 {
             return Ok(());
         }
@@ -848,8 +903,8 @@ impl AccountKeychain {
     ) -> Result<()> {
         // Fresh authorizations should not have any pre-existing call-scope rows because
         // `authorize_key` rejects both existing and previously revoked keys before reaching this
-        // path. We still clear the scope tree first as a defense-in-depth measure against stale or
-        // out-of-band state, and keep it because the valid-path cost is low (empty target set).
+        // path. We still clear the indexed scope tree first as a defense-in-depth measure against
+        // stale state. Off-index rows are inert because validation fails closed on vec membership.
         self.clear_all_target_scopes(account_key)?;
 
         match allowed_calls {
@@ -958,13 +1013,7 @@ impl AccountKeychain {
                 return Err(AccountKeychainError::scope_limit_exceeded().into());
             }
 
-            if !self.key_scopes[account_key]
-                .targets
-                .read()?
-                .contains(&target)
-            {
-                self.key_scopes[account_key].targets.push(target)?;
-            }
+            self.push_unique_target(account_key, target)?;
         }
 
         self.clear_target_selectors(account_key, target)?;
@@ -982,9 +1031,7 @@ impl AccountKeychain {
 
                 for rule in rules {
                     let selector: SelectorKey = rule.selector.into();
-                    self.key_scopes[account_key].target_scopes[target]
-                        .selectors
-                        .push(selector)?;
+                    self.push_unique_selector(account_key, target, selector)?;
 
                     match rule.recipients {
                         None => {
@@ -3773,6 +3820,51 @@ mod tests {
                     &calldata,
                 )
                 .expect_err("unexpected success for selector missing from vec index");
+            assert_call_not_allowed(err);
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_t3_validate_call_scope_rejects_target_not_listed_in_vec() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T3);
+        let account = Address::random();
+        let key_id = Address::random();
+        let target = DEFAULT_FEE_TOKEN;
+
+        StorageCtx::enter(&mut storage, || {
+            let mut keychain = AccountKeychain::new();
+            keychain.initialize()?;
+            keychain.set_transaction_key(Address::ZERO)?;
+            keychain.set_tx_origin(account)?;
+            TIP20Setup::path_usd(account).apply()?;
+
+            keychain.authorize_key(
+                account,
+                authorizeKeyCall {
+                    keyId: key_id,
+                    signatureType: SignatureType::Secp256k1,
+                    config: KeyRestrictions {
+                        expiry: u64::MAX,
+                        enforceLimits: false,
+                        limits: vec![],
+                        enforceAllowedCalls: false,
+                        allowedCalls: vec![],
+                    },
+                },
+            )?;
+
+            let key_hash = AccountKeychain::spending_limit_key(account, key_id);
+            keychain.key_scopes[key_hash].mode.write(1)?;
+            keychain.key_scopes[key_hash].targets.write(vec![])?;
+            keychain.key_scopes[key_hash].target_scopes[target]
+                .mode
+                .write(1)?;
+
+            let err = keychain
+                .validate_call_scope_for_transaction(account, key_id, &TxKind::Call(target), &[])
+                .expect_err("unexpected success for target missing from vec index");
             assert_call_not_allowed(err);
 
             Ok(())

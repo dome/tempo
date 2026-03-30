@@ -40,7 +40,8 @@ use tracing::trace;
 /// u128::MAX as U256
 pub const U128_MAX: U256 = uint!(0xffffffffffffffffffffffffffffffff_U256);
 
-use tempo_contracts::precompiles::DECIMALS as TIP20_DECIMALS;
+/// Decimal precision for TIP-20 tokens.
+const TIP20_DECIMALS: u8 = 6;
 
 /// TIP20 token address prefix (12 bytes)
 /// The full address is: TIP20_TOKEN_PREFIX (12 bytes) || derived_bytes (8 bytes)

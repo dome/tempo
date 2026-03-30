@@ -142,6 +142,17 @@ pub struct SpendingLimitState {
     pub period_end: u64,
 }
 
+impl SpendingLimitState {
+    /// Computes the period end for the current rollover window, saturating on
+    /// all intermediate operations to avoid overflow in extreme timestamps.
+    fn compute_next_period_end(&self, current_timestamp: u64) -> u64 {
+        let elapsed = current_timestamp.saturating_sub(self.period_end);
+        let periods_elapsed = (elapsed / self.period).saturating_add(1);
+        let advance = self.period.saturating_mul(periods_elapsed);
+        self.period_end.saturating_add(advance)
+    }
+}
+
 // TODO(rusowsky): remove this and create a read-only wrapper that is callable from read-only ctx with db access
 impl AuthorizedKey {
     /// Decode AuthorizedKey from a storage slot value
@@ -328,14 +339,16 @@ impl AccountKeychain {
                 None
             };
 
+            let limits = config
+                .enforceLimits
+                .then_some(config.limits.iter())
+                .into_iter()
+                .flatten();
+
             self.apply_key_authorization_t3(
                 msg_sender,
                 call.keyId,
-                if config.enforceLimits {
-                    &config.limits
-                } else {
-                    &[]
-                },
+                limits,
                 allowed_call_configs.as_deref(),
             )?;
         } else {
@@ -703,11 +716,11 @@ impl AccountKeychain {
     }
 
     /// Applies T3 key-authorization extensions: periodic token limits and call scopes.
-    pub fn apply_key_authorization_t3(
+    pub fn apply_key_authorization_t3<'a>(
         &mut self,
         account: Address,
         key_id: Address,
-        limits: &[TokenLimit],
+        limits: impl IntoIterator<Item = &'a TokenLimit>,
         allowed_calls: Option<&[CallScopeConfig]>,
     ) -> Result<()> {
         if !self.storage.spec().is_t3() {
@@ -737,8 +750,7 @@ impl AccountKeychain {
             })?;
         }
 
-        let key_hash = Self::spending_limit_key(account, key_id);
-        self.replace_allowed_calls(key_hash, allowed_calls)
+        self.replace_allowed_calls(limit_key, allowed_calls)
     }
 
     /// Validates a top-level call against scoped permissions for this key.
@@ -1184,22 +1196,9 @@ impl AccountKeychain {
             return Ok((remaining, limit_state.period_end));
         }
 
-        let next_end = Self::compute_next_period_end(
-            limit_state.period_end,
-            limit_state.period,
-            current_timestamp,
-        );
+        let next_end = limit_state.compute_next_period_end(current_timestamp);
 
         Ok((U256::from(limit_state.max), next_end))
-    }
-
-    /// Computes the period end for the current rollover window, saturating on
-    /// all intermediate operations to avoid overflow in extreme timestamps.
-    fn compute_next_period_end(period_end: u64, period: u64, current_timestamp: u64) -> u64 {
-        let elapsed = current_timestamp.saturating_sub(period_end);
-        let periods_elapsed = (elapsed / period).saturating_add(1);
-        let advance = period.saturating_mul(periods_elapsed);
-        period_end.saturating_add(advance)
     }
 
     /// Deducts `amount` from the key's remaining spending limit for `token`, failing if exceeded.
@@ -1237,11 +1236,7 @@ impl AccountKeychain {
             if limit_state.period > 0 {
                 let now = self.storage.timestamp().saturating_to::<u64>();
                 if now >= limit_state.period_end {
-                    let next_end = Self::compute_next_period_end(
-                        limit_state.period_end,
-                        limit_state.period,
-                        now,
-                    );
+                    let next_end = limit_state.compute_next_period_end(now);
 
                     remaining = U256::from(limit_state.max);
                     limit_state.remaining = remaining;

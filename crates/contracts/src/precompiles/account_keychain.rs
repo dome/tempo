@@ -170,6 +170,7 @@ crate::sol! {
         error KeyNotFound();
         error KeyExpired();
         error SpendingLimitExceeded();
+        error InvalidSpendingLimit();
         error InvalidSignatureType();
         error ZeroPublicKey();
         error ExpiryInPast();
@@ -212,6 +213,11 @@ impl AccountKeychainError {
     /// Creates an error for spending limit exceeded.
     pub const fn spending_limit_exceeded() -> Self {
         Self::SpendingLimitExceeded(IAccountKeychain::SpendingLimitExceeded {})
+    }
+
+    /// Creates an error for spending limits that exceed the TIP-20 u128 supply cap.
+    pub const fn invalid_spending_limit() -> Self {
+        Self::InvalidSpendingLimit(IAccountKeychain::InvalidSpendingLimit {})
     }
 
     /// Creates an error for invalid signature type.

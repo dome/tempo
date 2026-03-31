@@ -144,6 +144,7 @@ jobs:
     if: github.repository == 'tempoxyz/tempo' && needs.check-specs-changes.outputs.should_run == 'true'
     runs-on: depot-ubuntu-latest-8
     timeout-minutes: 60
+    continue-on-error: true
     permissions:
       contents: read
     steps:

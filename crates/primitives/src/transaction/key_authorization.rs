@@ -29,50 +29,6 @@ pub struct TokenLimit {
     pub period: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, alloy_rlp::RlpEncodable, alloy_rlp::RlpDecodable)]
-#[rlp(trailing)]
-struct TokenLimitWire {
-    token: Address,
-    limit: U256,
-    period: Option<u64>,
-}
-
-impl From<TokenLimitWire> for TokenLimit {
-    fn from(value: TokenLimitWire) -> Self {
-        Self {
-            token: value.token,
-            limit: value.limit,
-            period: value.period.unwrap_or(0),
-        }
-    }
-}
-
-impl From<&TokenLimit> for TokenLimitWire {
-    fn from(value: &TokenLimit) -> Self {
-        Self {
-            token: value.token,
-            limit: value.limit,
-            period: (value.period != 0).then_some(value.period),
-        }
-    }
-}
-
-impl Decodable for TokenLimit {
-    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        Ok(TokenLimitWire::decode(buf)?.into())
-    }
-}
-
-impl Encodable for TokenLimit {
-    fn encode(&self, out: &mut dyn alloy_rlp::BufMut) {
-        TokenLimitWire::from(self).encode(out)
-    }
-
-    fn length(&self) -> usize {
-        TokenLimitWire::from(self).length()
-    }
-}
-
 /// Per-target call scope for an access key.
 ///
 /// `selector_rules` uses tri-state semantics:
@@ -706,5 +662,57 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.expected, expected);
         assert_eq!(err.got, 999);
+    }
+}
+
+mod rlp {
+    use super::TokenLimit;
+    use alloy_primitives::{Address, U256};
+    use alloy_rlp::{Decodable, Encodable};
+
+    #[derive(
+        Clone, Debug, PartialEq, Eq, Hash, alloy_rlp::RlpEncodable, alloy_rlp::RlpDecodable,
+    )]
+    #[rlp(trailing)]
+    struct TokenLimitWire {
+        token: Address,
+        limit: U256,
+        period: Option<u64>,
+    }
+
+    impl From<TokenLimitWire> for TokenLimit {
+        fn from(value: TokenLimitWire) -> Self {
+            Self {
+                token: value.token,
+                limit: value.limit,
+                period: value.period.unwrap_or(0),
+            }
+        }
+    }
+
+    impl From<&TokenLimit> for TokenLimitWire {
+        fn from(value: &TokenLimit) -> Self {
+            Self {
+                token: value.token,
+                limit: value.limit,
+                period: (value.period != 0).then_some(value.period),
+            }
+        }
+    }
+
+    impl Decodable for TokenLimit {
+        fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+            Ok(TokenLimitWire::decode(buf)?.into())
+        }
+    }
+
+    impl Encodable for TokenLimit {
+        fn encode(&self, out: &mut dyn alloy_rlp::BufMut) {
+            TokenLimitWire::from(self).encode(out)
+        }
+
+        fn length(&self) -> usize {
+            TokenLimitWire::from(self).length()
+        }
     }
 }

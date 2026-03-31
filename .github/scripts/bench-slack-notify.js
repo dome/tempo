@@ -78,12 +78,12 @@ function fmtDelta(pct) {
   return `${sign}${pct.toFixed(2)}% ${emoji}`;
 }
 
-function fmtDeltaWithUncertainty(pct, uncertaintyPct) {
+function fmtTimingDelta(pct, relativeStddevPct) {
   if (pct == null) return '';
   const sign = pct >= 0 ? '+' : '';
   const emoji = classifyDelta(pct);
-  const uncertainty = uncertaintyPct != null ? ` (±${uncertaintyPct.toFixed(2)}%)` : '';
-  return `${sign}${pct.toFixed(2)}%${uncertainty} ${emoji}`;
+  const spread = relativeStddevPct != null ? ` (±${relativeStddevPct.toFixed(2)}%)` : '';
+  return `${sign}${pct.toFixed(2)}%${spread} ${emoji}`;
 }
 
 // For latency: negative = good (faster), positive = bad (slower)
@@ -143,7 +143,7 @@ function buildMetricRows(summary) {
   const f = summary.results.feature;
   const d = summary.results.deltas;
   return [
-    { label: 'Wall Clock',      baseline: fmtSeconds(b.wall_clock_s), feature: fmtSeconds(f.wall_clock_s), change: fmtDeltaWithUncertainty(d.wall_clock_s, d.wall_clock_uncertainty_pct) },
+    { label: 'Wall Clock',      baseline: fmtSeconds(b.wall_clock_s), feature: fmtSeconds(f.wall_clock_s), change: fmtTimingDelta(d.wall_clock_s, d.wall_clock_uncertainty_pct) },
     { label: 'TPS P50',         baseline: fmtVal(b.tps_p50, '', 1), feature: fmtVal(f.tps_p50, '', 1), change: fmtDeltaInverse(d.tps_p50) },
     { label: 'TPS P90',         baseline: fmtVal(b.tps_p90, '', 1), feature: fmtVal(f.tps_p90, '', 1), change: fmtDeltaInverse(d.tps_p90) },
     { label: 'TPS P99',         baseline: fmtVal(b.tps_p99, '', 1), feature: fmtVal(f.tps_p99, '', 1), change: fmtDeltaInverse(d.tps_p99) },

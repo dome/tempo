@@ -4,7 +4,7 @@ use alloy_evm::{
     Database, Evm, RecoveredTx,
     block::{
         BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockValidationError,
-        ExecutableTx, OnStateHook, TxResult,
+        ExecutableTx, OnStateHook, StateChangePreBlockSource, StateChangeSource, TxResult,
     },
     eth::{
         EthBlockExecutor, EthTxResult,
@@ -22,7 +22,6 @@ use reth_evm::block::StateDB;
 use reth_revm::{
     Inspector,
     context::result::ResultAndState,
-    context_interface::JournalTr,
     state::{Account, Bytecode, EvmState},
 };
 use std::collections::{HashMap, HashSet};
@@ -372,8 +371,10 @@ where
         // Deploy 0xEF marker bytecode to ValidatorConfigV2 when T2 activates.
         let timestamp = self.evm().block().timestamp.to::<u64>();
         if self.inner.spec.is_t2_active_at_timestamp(timestamp) {
-            let db = self.evm_mut().ctx_mut().journaled_state.db_mut();
-            let mut info = db
+            let mut info = self
+                .inner
+                .evm
+                .db_mut()
                 .basic(VALIDATOR_CONFIG_V2_ADDRESS)
                 .map_err(BlockExecutionError::other)?
                 .unwrap_or_default();
@@ -383,10 +384,17 @@ where
                 info.code = Some(code);
                 let mut account: Account = info.into();
                 account.mark_touch();
-                db.commit(EvmState::from_iter([(
+                let state = EvmState::from_iter([(
                     VALIDATOR_CONFIG_V2_ADDRESS,
                     account,
-                )]));
+                )]);
+                self.inner.system_caller.on_state(
+                    StateChangeSource::PreBlock(
+                        StateChangePreBlockSource::BlockHashesContract,
+                    ),
+                    &state,
+                );
+                self.inner.evm.db_mut().commit(state);
             }
         }
 

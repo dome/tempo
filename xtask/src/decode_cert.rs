@@ -1,6 +1,6 @@
 //! Decode a hex-encoded consensus certificate and print its JSON representation to stdout.
 //!
-//! Certificates are encoded via `commonware_codec::Encode` and hex-encoded. This tool decodes
+//! Certificates are assumed to be encoded via [`commonware_codec::Encode`] and hex-encoded. This tool decodes
 //! them back into structured JSON for inspection.
 
 use alloy_primitives::B256;
@@ -95,8 +95,7 @@ struct ProposalJson {
 #[derive(Serialize)]
 struct CertJson {
     proposal: ProposalJson,
-    /// The inner threshold BLS certificate (not the full notarization/finalization encoding).
-    threshold_certificate: String,
+    recovered_certificate: String,
 }
 
 impl DecodeCert {
@@ -113,7 +112,7 @@ impl DecodeCert {
                 parent_view: f.proposal.parent.get(),
                 payload: const_hex::encode_prefixed(f.proposal.payload.0),
             },
-            threshold_certificate: const_hex::encode_prefixed(f.certificate.encode()),
+            recovered_certificate: const_hex::encode_prefixed(f.certificate.encode()),
         };
 
         println!(

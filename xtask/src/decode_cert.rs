@@ -1,0 +1,157 @@
+//! Decode a hex-encoded consensus certificate (notarization or finalization) and write JSON to
+//! disk.
+//!
+//! Certificates are encoded via `commonware_codec::Encode` and hex-encoded. This tool decodes
+//! them back into structured JSON for inspection.
+
+use alloy_primitives::B256;
+use commonware_codec::{DecodeExt as _, Encode as _, FixedSize, Read, ReadExt as _, Write};
+use commonware_consensus::simplex::{
+    scheme::bls12381_threshold::vrf::Scheme,
+    types::{Finalization, Notarization},
+};
+use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
+use commonware_utils::{Array, Span};
+use eyre::{Context, eyre};
+use serde::Serialize;
+use std::path::PathBuf;
+
+/// Minimal re-implementation of `tempo-commonware-node`'s `Digest` to avoid pulling in the full
+/// crate. A 32-byte wrapper around [`B256`] implementing the commonware codec + crypto traits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[repr(transparent)]
+struct Digest(B256);
+
+impl Array for Digest {}
+impl Span for Digest {}
+
+impl AsRef<[u8]> for Digest {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+impl std::ops::Deref for Digest {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
+
+impl std::fmt::Display for Digest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl commonware_math::algebra::Random for Digest {
+    fn random(mut rng: impl rand_core::CryptoRngCore) -> Self {
+        let mut array = B256::ZERO;
+        rng.fill_bytes(&mut *array);
+        Self(array)
+    }
+}
+
+impl commonware_cryptography::Digest for Digest {
+    const EMPTY: Self = Self(B256::ZERO);
+}
+
+impl FixedSize for Digest {
+    const SIZE: usize = 32;
+}
+
+impl Read for Digest {
+    type Cfg = ();
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        _cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let array = <[u8; 32]>::read(buf)?;
+        Ok(Self(B256::new(array)))
+    }
+}
+
+impl Write for Digest {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.0.write(buf)
+    }
+}
+
+/// The type of certificate to decode.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub(crate) enum CertKind {
+    Notarization,
+    Finalization,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct DecodeCert {
+    /// Hex-encoded certificate bytes (with or without 0x prefix).
+    #[arg(long)]
+    hex: String,
+
+    /// Type of certificate to decode.
+    #[arg(long, value_enum)]
+    kind: CertKind,
+
+    /// Output file path for the JSON representation.
+    #[arg(long, short)]
+    output: PathBuf,
+}
+
+type TempoScheme = Scheme<PublicKey, MinSig>;
+
+/// JSON-serializable representation of a decoded certificate.
+#[derive(Serialize)]
+struct CertJson {
+    kind: &'static str,
+    epoch: u64,
+    view: u64,
+    parent_view: u64,
+    payload: String,
+    /// The inner threshold BLS certificate (not the full notarization/finalization encoding).
+    threshold_certificate: String,
+}
+
+impl DecodeCert {
+    pub(crate) async fn run(self) -> eyre::Result<()> {
+        let bytes = const_hex::decode(&self.hex).wrap_err("invalid hex input")?;
+
+        let json = match self.kind {
+            CertKind::Notarization => {
+                let n = Notarization::<TempoScheme, Digest>::decode(&bytes[..])
+                    .map_err(|e| eyre!("failed to decode notarization: {e}"))?;
+
+                CertJson {
+                    kind: "notarization",
+                    epoch: n.proposal.round.epoch().get(),
+                    view: n.proposal.round.view().get(),
+                    parent_view: n.proposal.parent.get(),
+                    payload: const_hex::encode_prefixed(n.proposal.payload.0),
+                    threshold_certificate: const_hex::encode_prefixed(n.certificate.encode()),
+                }
+            }
+            CertKind::Finalization => {
+                let f = Finalization::<TempoScheme, Digest>::decode(&bytes[..])
+                    .map_err(|e| eyre!("failed to decode finalization: {e}"))?;
+
+                CertJson {
+                    kind: "finalization",
+                    epoch: f.proposal.round.epoch().get(),
+                    view: f.proposal.round.view().get(),
+                    parent_view: f.proposal.parent.get(),
+                    payload: const_hex::encode_prefixed(f.proposal.payload.0),
+                    threshold_certificate: const_hex::encode_prefixed(f.certificate.encode()),
+                }
+            }
+        };
+
+        let output = serde_json::to_string_pretty(&json)?;
+        std::fs::write(&self.output, &output)
+            .wrap_err_with(|| format!("failed to write {}", self.output.display()))?;
+
+        println!("Wrote {} cert to {}", json.kind, self.output.display());
+
+        Ok(())
+    }
+}

@@ -12438,6 +12438,7 @@ version = "1.5.1"
 dependencies = [
  "alloy",
  "alloy-primitives",
+ "bytes",
  "clap",
  "coins-bip32",
  "commonware-codec",
@@ -12450,6 +12451,7 @@ dependencies = [
  "indicatif",
  "itertools 0.14.0",
  "rand 0.8.5",
+ "rand_core 0.6.4",
  "rayon",
  "reth-evm",
  "reth-network-peers",

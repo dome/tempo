@@ -14,7 +14,6 @@ use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::Pu
 use commonware_utils::{Array, Span};
 use eyre::{Context, eyre};
 use serde::Serialize;
-use std::path::PathBuf;
 
 /// Minimal re-implementation of `tempo-commonware-node`'s `Digest` to avoid pulling in the full
 /// crate. A 32-byte wrapper around [`B256`] implementing the commonware codec + crypto traits.
@@ -82,10 +81,6 @@ pub(crate) struct DecodeCert {
     /// Hex-encoded certificate bytes (with or without 0x prefix).
     #[arg(long)]
     hex: String,
-
-    /// Output file path for the JSON representation.
-    #[arg(long, short)]
-    output: PathBuf,
 }
 
 type TempoScheme = Scheme<PublicKey, MinSig>;
@@ -116,11 +111,7 @@ impl DecodeCert {
             threshold_certificate: const_hex::encode_prefixed(f.certificate.encode()),
         };
 
-        let output = serde_json::to_string_pretty(&json)?;
-        std::fs::write(&self.output, &output)
-            .wrap_err_with(|| format!("failed to write {}", self.output.display()))?;
-
-        println!("Wrote cert to {}", self.output.display());
+        println!("{}", serde_json::to_string_pretty(&json)?);
 
         Ok(())
     }

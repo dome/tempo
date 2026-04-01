@@ -285,7 +285,7 @@ impl AccountKeychain {
             msg_sender,
             call.keyId,
             limits,
-            allowed_call_configs.as_deref(),
+            allowed_call_configs,
         )?;
 
         // Emit event

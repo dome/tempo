@@ -141,7 +141,10 @@ mod tests {
         storage::{Handler, StorageCtx, hashmap::HashMapStorageProvider},
         test_util::{assert_full_coverage, check_selector_coverage},
     };
-    use alloy::{primitives::U256, sol_types::{SolCall, SolError}};
+    use alloy::{
+        primitives::U256,
+        sol_types::{SolCall, SolError},
+    };
     use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_contracts::precompiles::legacyAuthorizeKeyCall;
 
@@ -259,7 +262,7 @@ mod tests {
             let result = keychain.call(&calldata, account)?;
             assert!(result.reverted);
             let decoded = tempo_contracts::precompiles::IAccountKeychain::LegacyAuthorizeKeySelectorChanged::abi_decode(&result.bytes)?;
-            assert_eq!(decoded.newSelector, authorizeKeyCall::SELECTOR.into());
+            assert_eq!(decoded.newSelector, authorizeKeyCall::SELECTOR);
 
             Ok(())
         })

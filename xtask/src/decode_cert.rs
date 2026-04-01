@@ -12,7 +12,7 @@ use commonware_consensus::simplex::{
 };
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
 use commonware_utils::{Array, Span};
-use eyre::{Context, eyre};
+use eyre::Context;
 use serde::Serialize;
 
 /// Minimal re-implementation of `tempo-commonware-node`'s `Digest` to avoid pulling in the full
@@ -101,7 +101,7 @@ impl DecodeCert {
         let bytes = const_hex::decode(&self.hex).wrap_err("invalid hex input")?;
 
         let f = Finalization::<TempoScheme, Digest>::decode(&bytes[..])
-            .map_err(|e| eyre!("failed to decode finalization: {e}"))?;
+            .wrap_err("failed to decode certificate")?;
 
         let json = CertJson {
             epoch: f.proposal.round.epoch().get(),
@@ -111,7 +111,10 @@ impl DecodeCert {
             threshold_certificate: const_hex::encode_prefixed(f.certificate.encode()),
         };
 
-        println!("{}", serde_json::to_string_pretty(&json)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json).wrap_err("failed to encode certificate as json")?
+        );
 
         Ok(())
     }

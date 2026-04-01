@@ -8,7 +8,7 @@ use alloy_primitives::B256;
 use commonware_codec::{DecodeExt as _, Encode as _, FixedSize, Read, ReadExt as _, Write};
 use commonware_consensus::simplex::{
     scheme::bls12381_threshold::vrf::Scheme,
-    types::{Finalization, Notarization},
+    types::Finalization,
 };
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
 use commonware_utils::{Array, Span};
@@ -77,22 +77,11 @@ impl Write for Digest {
     }
 }
 
-/// The type of certificate to decode.
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
-pub(crate) enum CertKind {
-    Notarization,
-    Finalization,
-}
-
 #[derive(Debug, clap::Args)]
 pub(crate) struct DecodeCert {
     /// Hex-encoded certificate bytes (with or without 0x prefix).
     #[arg(long)]
     hex: String,
-
-    /// Type of certificate to decode.
-    #[arg(long, value_enum)]
-    kind: CertKind,
 
     /// Output file path for the JSON representation.
     #[arg(long, short)]
@@ -104,7 +93,6 @@ type TempoScheme = Scheme<PublicKey, MinSig>;
 /// JSON-serializable representation of a decoded certificate.
 #[derive(Serialize)]
 struct CertJson {
-    kind: &'static str,
     epoch: u64,
     view: u64,
     parent_view: u64,
@@ -117,40 +105,22 @@ impl DecodeCert {
     pub(crate) async fn run(self) -> eyre::Result<()> {
         let bytes = const_hex::decode(&self.hex).wrap_err("invalid hex input")?;
 
-        let json = match self.kind {
-            CertKind::Notarization => {
-                let n = Notarization::<TempoScheme, Digest>::decode(&bytes[..])
-                    .map_err(|e| eyre!("failed to decode notarization: {e}"))?;
+        let f = Finalization::<TempoScheme, Digest>::decode(&bytes[..])
+            .map_err(|e| eyre!("failed to decode finalization: {e}"))?;
 
-                CertJson {
-                    kind: "notarization",
-                    epoch: n.proposal.round.epoch().get(),
-                    view: n.proposal.round.view().get(),
-                    parent_view: n.proposal.parent.get(),
-                    payload: const_hex::encode_prefixed(n.proposal.payload.0),
-                    threshold_certificate: const_hex::encode_prefixed(n.certificate.encode()),
-                }
-            }
-            CertKind::Finalization => {
-                let f = Finalization::<TempoScheme, Digest>::decode(&bytes[..])
-                    .map_err(|e| eyre!("failed to decode finalization: {e}"))?;
-
-                CertJson {
-                    kind: "finalization",
-                    epoch: f.proposal.round.epoch().get(),
-                    view: f.proposal.round.view().get(),
-                    parent_view: f.proposal.parent.get(),
-                    payload: const_hex::encode_prefixed(f.proposal.payload.0),
-                    threshold_certificate: const_hex::encode_prefixed(f.certificate.encode()),
-                }
-            }
+        let json = CertJson {
+            epoch: f.proposal.round.epoch().get(),
+            view: f.proposal.round.view().get(),
+            parent_view: f.proposal.parent.get(),
+            payload: const_hex::encode_prefixed(f.proposal.payload.0),
+            threshold_certificate: const_hex::encode_prefixed(f.certificate.encode()),
         };
 
         let output = serde_json::to_string_pretty(&json)?;
         std::fs::write(&self.output, &output)
             .wrap_err_with(|| format!("failed to write {}", self.output.display()))?;
 
-        println!("Wrote {} cert to {}", json.kind, self.output.display());
+        println!("Wrote cert to {}", self.output.display());
 
         Ok(())
     }

@@ -40,6 +40,7 @@ pub struct TokenLimit {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 #[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
+#[cfg_attr(test, reth_codecs::add_arbitrary_tests(rlp))]
 pub struct CallScope {
     /// Target contract address.
     pub target: Address,
@@ -67,6 +68,7 @@ impl CallScope {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 #[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
+#[cfg_attr(test, reth_codecs::add_arbitrary_tests(rlp))]
 pub struct SelectorRule {
     /// 4-byte function selector.
     pub selector: [u8; 4],

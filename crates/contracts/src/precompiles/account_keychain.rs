@@ -3,7 +3,8 @@
 pub use IAccountKeychain::{
     IAccountKeychainErrors as AccountKeychainError, IAccountKeychainEvents as AccountKeychainEvent,
     authorizeKey_0Call as legacyAuthorizeKeyCall, authorizeKey_1Call as authorizeKeyCall,
-    getRemainingLimitWithPeriodCall, getRemainingLimitWithPeriodReturn as getRemainingLimitReturn,
+    getAllowedCallsReturn, getRemainingLimitWithPeriodCall,
+    getRemainingLimitWithPeriodReturn as getRemainingLimitReturn,
 };
 
 crate::sol! {
@@ -122,13 +123,13 @@ crate::sol! {
             uint256 newLimit
         ) external;
 
-        /// Set or replace allowed calls for a key+target pair.
+        /// Set or replace allowed calls for one or more key+target pairs.
         /// @dev `scope.selectorRules = []` does NOT block the target; it allows any selector on that target.
         /// @dev To block the target entirely, call `removeAllowedCalls`. To block one selector,
         ///      omit that selector rule from `scope.selectorRules`.
         function setAllowedCalls(
             address keyId,
-            CallScope calldata scope
+            CallScope[] calldata scopes
         ) external;
 
         /// Remove any configured call scope for a key+target pair.
@@ -162,8 +163,13 @@ crate::sol! {
             address token
         ) external view returns (uint256 remaining, uint64 periodEnd);
 
-        /// Returns configured call scopes for an account key.
-        function getAllowedCalls(address account, address keyId) external view returns (CallScope[] memory);
+        /// Returns whether an account key is call-scoped and, if so, the configured call scopes.
+        /// @dev `isScoped = false` means unrestricted. `isScoped = true && scopes.length == 0`
+        ///      means scoped deny-all.
+        function getAllowedCalls(
+            address account,
+            address keyId
+        ) external view returns (bool isScoped, CallScope[] memory scopes);
 
         /// Get the key used in the current transaction
         /// @return The keyId used in the current transaction
@@ -186,6 +192,7 @@ crate::sol! {
         error ScopeLimitExceeded();
         error SelectorLimitExceeded();
         error RecipientLimitExceeded();
+        error LegacyAuthorizeKeySelectorChanged(bytes4 newSelector);
     }
 }
 
@@ -270,5 +277,14 @@ impl AccountKeychainError {
     /// Creates an error for recipient count limit violations.
     pub const fn recipient_limit_exceeded() -> Self {
         Self::RecipientLimitExceeded(IAccountKeychain::RecipientLimitExceeded {})
+    }
+
+    /// Creates an error for the legacy authorize-key selector being unavailable on T3+.
+    pub fn legacy_authorize_key_selector_changed(new_selector: [u8; 4]) -> Self {
+        Self::LegacyAuthorizeKeySelectorChanged(
+            IAccountKeychain::LegacyAuthorizeKeySelectorChanged {
+                newSelector: new_selector.into(),
+            },
+        )
     }
 }

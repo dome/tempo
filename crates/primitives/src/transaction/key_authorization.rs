@@ -3,7 +3,7 @@ use crate::transaction::PrimitiveSignature;
 use alloc::vec::Vec;
 use alloy_consensus::crypto::RecoveryError;
 use alloy_primitives::{Address, B256, U256, keccak256};
-use alloy_rlp::{Decodable, EMPTY_STRING_CODE, Encodable};
+use alloy_rlp::{Decodable, Encodable};
 
 /// Token spending limit for access keys
 ///
@@ -31,10 +31,10 @@ pub struct TokenLimit {
 
 /// Per-target call scope for an access key.
 ///
-/// `selector_rules` uses tri-state semantics:
+/// `selector_rules` semantics:
 /// - `None` => allow any selector for this target
-/// - `Some([])` => deny all selectors for this target
 /// - `Some([..])` => allow exactly the listed selector rules
+/// - `Some([])` => invalid and rejected during validation
 #[derive(Clone, Debug, PartialEq, Eq, Hash, alloy_rlp::RlpEncodable, alloy_rlp::RlpDecodable)]
 #[rlp(trailing)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -61,6 +61,7 @@ impl CallScope {
 /// `recipients` semantics:
 /// - `None` => no recipient constraint
 /// - `Some([..])` => first ABI address argument must be in this list
+/// - `Some([])` => invalid and rejected during validation
 #[derive(Clone, Debug, PartialEq, Eq, Hash, alloy_rlp::RlpEncodable, alloy_rlp::RlpDecodable)]
 #[rlp(trailing)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -91,7 +92,7 @@ impl SelectorRule {
 /// - `expiry`: `None` (omitted or 0x80) = key never expires, `Some(timestamp)` = expires at timestamp
 /// - `limits`: `None` (omitted or 0x80) = unlimited spending, `Some([])` = no spending, `Some([...])` = specific limits
 /// - `allowed_calls`: `None` (canonically omitted, explicit 0x80 accepted) = unrestricted,
-///   `Some([])` = deny-all, `Some([...])` = scoped calls
+///   `Some([])` = scoped with no allowed calls, `Some([...])` = scoped calls
 #[derive(Clone, Debug, PartialEq, Eq, Hash, alloy_rlp::RlpEncodable, alloy_rlp::RlpDecodable)]
 #[rlp(trailing)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -123,7 +124,7 @@ pub struct KeyAuthorization {
 
     /// Optional call scopes for this key.
     /// - `None` (canonically omitted, explicit 0x80 accepted) = unrestricted calls
-    /// - `Some([])` = scoped mode with no allowed calls (deny-all)
+    /// - `Some([])` = scoped mode with no allowed calls
     /// - `Some([CallScope{...}])` = explicit target/selector scope list
     pub allowed_calls: Option<Vec<CallScope>>,
 }
@@ -588,7 +589,11 @@ mod tests {
         chain_id.encode(&mut payload);
         key_type.encode(&mut payload);
         key_id.encode(&mut payload);
-        payload.extend_from_slice(&[EMPTY_STRING_CODE, EMPTY_STRING_CODE, EMPTY_STRING_CODE]);
+        payload.extend_from_slice(&[
+            alloy_rlp::EMPTY_STRING_CODE,
+            alloy_rlp::EMPTY_STRING_CODE,
+            alloy_rlp::EMPTY_STRING_CODE,
+        ]);
 
         let mut encoded = Vec::new();
         alloy_rlp::Header {

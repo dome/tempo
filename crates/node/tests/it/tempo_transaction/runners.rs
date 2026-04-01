@@ -318,6 +318,13 @@ fn gas_estimation_cases() -> Vec<GasCase> {
 
     for auth_def in &auths {
         for &(payload_name, ref payload) in payloads {
+            // T3 keychain validation rejects CREATE for access-key-backed transactions.
+            if matches!(payload, GasPayload::ContractCreation)
+                && matches!(&auth_def.auth, AuthKind::Keychain { .. } | AuthKind::KeyAuth { .. })
+            {
+                continue;
+            }
+
             let expected = if payload_name == "noop" {
                 // Auth-specific assertion against baseline.
                 auth_def.noop_expected.clone()

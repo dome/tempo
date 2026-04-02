@@ -4375,6 +4375,503 @@ mod tests {
             );
         }
 
+        // =====================================================================
+        // call_scope_allows_call — pure function, exhaustive branch coverage
+        // =====================================================================
+
+        /// Shorthand to build a `CallScope`.
+        fn scope(target: Address, rules: Vec<SelectorRule>) -> CallScope {
+            CallScope {
+                target,
+                selector_rules: rules,
+            }
+        }
+
+        /// Shorthand to build a `SelectorRule`.
+        fn rule(sel: [u8; 4], recipients: Vec<Address>) -> SelectorRule {
+            SelectorRule {
+                selector: sel,
+                recipients,
+            }
+        }
+
+        const SEL_A: [u8; 4] = [0xaa, 0xbb, 0xcc, 0xdd];
+        const SEL_B: [u8; 4] = [0x11, 0x22, 0x33, 0x44];
+
+        #[test]
+        fn test_call_scope_none_allows_any_call() {
+            let target = Address::repeat_byte(1);
+            let to = TxKind::Call(target);
+            assert!(TempoTransactionValidator::<
+                MockEthProvider<TempoPrimitives, TempoChainSpec>,
+            >::call_scope_allows_call(None, &to, &[]));
+        }
+
+        #[test]
+        fn test_call_scope_empty_denies_all() {
+            let scopes: Vec<CallScope> = vec![];
+            let to = TxKind::Call(Address::repeat_byte(1));
+            assert!(!TempoTransactionValidator::<
+                MockEthProvider<TempoPrimitives, TempoChainSpec>,
+            >::call_scope_allows_call(
+                Some(&scopes), &to, &[]
+            ));
+        }
+
+        #[test]
+        fn test_call_scope_create_always_denied() {
+            let scopes = vec![scope(Address::repeat_byte(1), vec![])];
+            assert!(!TempoTransactionValidator::<
+                MockEthProvider<TempoPrimitives, TempoChainSpec>,
+            >::call_scope_allows_call(
+                Some(&scopes), &TxKind::Create, &[]
+            ));
+            assert!(!TempoTransactionValidator::<
+                MockEthProvider<TempoPrimitives, TempoChainSpec>,
+            >::call_scope_allows_call(
+                None, &TxKind::Create, &[]
+            ));
+        }
+
+        #[test]
+        fn test_call_scope_target_mismatch_denied() {
+            let target_a = Address::repeat_byte(1);
+            let target_b = Address::repeat_byte(2);
+            let scopes = vec![scope(target_a, vec![])];
+            assert!(!TempoTransactionValidator::<
+                MockEthProvider<TempoPrimitives, TempoChainSpec>,
+            >::call_scope_allows_call(
+                Some(&scopes),
+                &TxKind::Call(target_b),
+                &[],
+            ));
+        }
+
+        #[test]
+        fn test_call_scope_empty_selector_rules_allows_any_input() {
+            let target = Address::repeat_byte(1);
+            let scopes = vec![scope(target, vec![])];
+            // Any input (including empty) should be allowed when selector_rules is empty
+            for input in [&[][..], &[0xaa, 0xbb, 0xcc, 0xdd, 0x00]] {
+                assert!(TempoTransactionValidator::<
+                    MockEthProvider<TempoPrimitives, TempoChainSpec>,
+                >::call_scope_allows_call(
+                    Some(&scopes),
+                    &TxKind::Call(target),
+                    input,
+                ));
+            }
+        }
+
+        #[test]
+        fn test_call_scope_selector_match_and_mismatch() {
+            let target = Address::repeat_byte(1);
+            let scopes = vec![scope(target, vec![rule(SEL_A, vec![])])];
+            let call = |sel: [u8; 4]| {
+                TempoTransactionValidator::<
+                    MockEthProvider<TempoPrimitives, TempoChainSpec>,
+                >::call_scope_allows_call(
+                    Some(&scopes), &TxKind::Call(target), &sel
+                )
+            };
+            assert!(call(SEL_A));
+            assert!(!call(SEL_B));
+        }
+
+        #[test]
+        fn test_call_scope_input_too_short_for_selector() {
+            let target = Address::repeat_byte(1);
+            let scopes = vec![scope(target, vec![rule(SEL_A, vec![])])];
+            // Less than 4 bytes → denied
+            assert!(!TempoTransactionValidator::<
+                MockEthProvider<TempoPrimitives, TempoChainSpec>,
+            >::call_scope_allows_call(
+                Some(&scopes),
+                &TxKind::Call(target),
+                &[0xaa, 0xbb, 0xcc],
+            ));
+        }
+
+        #[test]
+        fn test_call_scope_recipient_check() {
+            let target = Address::repeat_byte(1);
+            let allowed = Address::repeat_byte(0x11);
+            let denied = Address::repeat_byte(0x22);
+            let scopes = vec![scope(target, vec![rule(SEL_A, vec![allowed])])];
+
+            let call = |recipient: Address| {
+                // ABI-encode: selector + left-padded address (32 bytes)
+                let mut input = Vec::from(SEL_A);
+                input.extend_from_slice(&[0u8; 12]);
+                input.extend_from_slice(recipient.as_slice());
+                TempoTransactionValidator::<
+                    MockEthProvider<TempoPrimitives, TempoChainSpec>,
+                >::call_scope_allows_call(
+                    Some(&scopes), &TxKind::Call(target), &input
+                )
+            };
+            assert!(call(allowed));
+            assert!(!call(denied));
+        }
+
+        #[test]
+        fn test_call_scope_input_too_short_for_recipient() {
+            let target = Address::repeat_byte(1);
+            let allowed = Address::repeat_byte(0x11);
+            let scopes = vec![scope(target, vec![rule(SEL_A, vec![allowed])])];
+            // Selector present but < 36 bytes total → denied
+            let input = [SEL_A[0], SEL_A[1], SEL_A[2], SEL_A[3], 0x00];
+            assert!(!TempoTransactionValidator::<
+                MockEthProvider<TempoPrimitives, TempoChainSpec>,
+            >::call_scope_allows_call(
+                Some(&scopes),
+                &TxKind::Call(target),
+                &input,
+            ));
+        }
+
+        #[test]
+        fn test_call_scope_dirty_recipient_word_rejected() {
+            let target = Address::repeat_byte(1);
+            let allowed = Address::repeat_byte(0x11);
+            let scopes = vec![scope(target, vec![rule(SEL_A, vec![allowed])])];
+            // Non-zero padding in the first 12 bytes of the address word
+            let mut input = Vec::from(SEL_A);
+            input.extend_from_slice(&[0x01; 12]); // dirty padding
+            input.extend_from_slice(allowed.as_slice());
+            assert!(!TempoTransactionValidator::<
+                MockEthProvider<TempoPrimitives, TempoChainSpec>,
+            >::call_scope_allows_call(
+                Some(&scopes),
+                &TxKind::Call(target),
+                &input,
+            ));
+        }
+
+        // =====================================================================
+        // validate_t3_key_authorization_restrictions — gap coverage
+        // =====================================================================
+
+        #[test]
+        fn test_t3_rejects_too_many_selector_rules_per_scope() {
+            let (access_key_signer, access_key_address) = generate_keypair();
+            let (user_signer, user_address) = generate_keypair();
+
+            let rules: Vec<SelectorRule> = (0..=MAX_SELECTOR_RULES_PER_SCOPE as u32)
+                .map(|i| rule([(i >> 24) as u8, (i >> 16) as u8, (i >> 8) as u8, i as u8], vec![]))
+                .collect();
+
+            let signed = sign_key_authorization(
+                KeyAuthorization {
+                    chain_id: 42431,
+                    key_type: SignatureType::Secp256k1,
+                    key_id: access_key_address,
+                    expiry: None,
+                    limits: None,
+                    allowed_calls: Some(vec![scope(Address::repeat_byte(1), rules)]),
+                },
+                &user_signer,
+            );
+
+            let tx = create_aa_with_keychain_signature(
+                user_address,
+                &access_key_signer,
+                Some(signed),
+            );
+            let result = validate_t3_key_authorization_result(
+                &tx,
+                user_address,
+                access_key_address,
+                |_| {},
+            )
+            .expect("no provider error");
+            assert!(
+                matches!(
+                    result,
+                    Err(TempoPoolTransactionError::Keychain(
+                        "too many selector rules in call scope"
+                    ))
+                ),
+                "got: {result:?}"
+            );
+        }
+
+        #[test]
+        fn test_t3_rejects_duplicate_selectors_in_scope() {
+            let (access_key_signer, access_key_address) = generate_keypair();
+            let (user_signer, user_address) = generate_keypair();
+
+            let signed = sign_key_authorization(
+                KeyAuthorization {
+                    chain_id: 42431,
+                    key_type: SignatureType::Secp256k1,
+                    key_id: access_key_address,
+                    expiry: None,
+                    limits: None,
+                    allowed_calls: Some(vec![scope(
+                        Address::repeat_byte(1),
+                        vec![rule(SEL_A, vec![]), rule(SEL_A, vec![])],
+                    )]),
+                },
+                &user_signer,
+            );
+
+            let tx = create_aa_with_keychain_signature(
+                user_address,
+                &access_key_signer,
+                Some(signed),
+            );
+            let result = validate_t3_key_authorization_result(
+                &tx,
+                user_address,
+                access_key_address,
+                |_| {},
+            )
+            .expect("no provider error");
+            assert!(
+                matches!(
+                    result,
+                    Err(TempoPoolTransactionError::Keychain(
+                        "duplicate selector rules are not allowed"
+                    ))
+                ),
+                "got: {result:?}"
+            );
+        }
+
+        #[test]
+        fn test_t3_rejects_too_many_recipients_per_selector() {
+            let (access_key_signer, access_key_address) = generate_keypair();
+            let (user_signer, user_address) = generate_keypair();
+
+            let recipients: Vec<Address> = (0..=MAX_RECIPIENTS_PER_SELECTOR as u16)
+                .map(|i| Address::repeat_byte(i as u8 + 1))
+                .collect();
+
+            let signed = sign_key_authorization(
+                KeyAuthorization {
+                    chain_id: 42431,
+                    key_type: SignatureType::Secp256k1,
+                    key_id: access_key_address,
+                    expiry: None,
+                    limits: None,
+                    allowed_calls: Some(vec![scope(
+                        PATH_USD_ADDRESS,
+                        vec![rule(ITIP20::transferCall::SELECTOR, recipients)],
+                    )]),
+                },
+                &user_signer,
+            );
+
+            let tx = create_aa_with_keychain_signature(
+                user_address,
+                &access_key_signer,
+                Some(signed),
+            );
+            let result = validate_t3_key_authorization_result(
+                &tx,
+                user_address,
+                access_key_address,
+                |_| {},
+            )
+            .expect("no provider error");
+            assert!(
+                matches!(
+                    result,
+                    Err(TempoPoolTransactionError::Keychain(
+                        "too many recipients in selector rule"
+                    ))
+                ),
+                "got: {result:?}"
+            );
+        }
+
+        #[test]
+        fn test_t3_rejects_zero_address_recipient() {
+            let (access_key_signer, access_key_address) = generate_keypair();
+            let (user_signer, user_address) = generate_keypair();
+
+            let signed = sign_key_authorization(
+                KeyAuthorization {
+                    chain_id: 42431,
+                    key_type: SignatureType::Secp256k1,
+                    key_id: access_key_address,
+                    expiry: None,
+                    limits: None,
+                    allowed_calls: Some(vec![scope(
+                        PATH_USD_ADDRESS,
+                        vec![rule(ITIP20::transferCall::SELECTOR, vec![Address::ZERO])],
+                    )]),
+                },
+                &user_signer,
+            );
+
+            let tx = create_aa_with_keychain_signature(
+                user_address,
+                &access_key_signer,
+                Some(signed),
+            );
+            let result = validate_t3_key_authorization_result(
+                &tx,
+                user_address,
+                access_key_address,
+                |_| {},
+            )
+            .expect("no provider error");
+            assert!(
+                matches!(
+                    result,
+                    Err(TempoPoolTransactionError::Keychain(
+                        "selector rule recipients must be non-zero and unique"
+                    ))
+                ),
+                "got: {result:?}"
+            );
+        }
+
+        #[test]
+        fn test_t3_rejects_non_constrained_selector_with_recipients() {
+            let (access_key_signer, access_key_address) = generate_keypair();
+            let (user_signer, user_address) = generate_keypair();
+            // 0xdeadbeef is not a constrained TIP-20 selector
+            let non_tip20_selector = [0xde, 0xad, 0xbe, 0xef];
+
+            let signed = sign_key_authorization(
+                KeyAuthorization {
+                    chain_id: 42431,
+                    key_type: SignatureType::Secp256k1,
+                    key_id: access_key_address,
+                    expiry: None,
+                    limits: None,
+                    allowed_calls: Some(vec![scope(
+                        PATH_USD_ADDRESS,
+                        vec![rule(
+                            non_tip20_selector,
+                            vec![Address::repeat_byte(0x11)],
+                        )],
+                    )]),
+                },
+                &user_signer,
+            );
+
+            let tx = create_aa_with_keychain_signature(
+                user_address,
+                &access_key_signer,
+                Some(signed),
+            );
+            let result = validate_t3_key_authorization_result(
+                &tx,
+                user_address,
+                access_key_address,
+                |_| {},
+            )
+            .expect("no provider error");
+            assert!(
+                matches!(
+                    result,
+                    Err(TempoPoolTransactionError::Keychain(
+                        "recipient-constrained selector rules require TIP-20 target and constrained selector"
+                    ))
+                ),
+                "got: {result:?}"
+            );
+        }
+
+        // =====================================================================
+        // pre-T3 gates: periodic limits and call scopes rejected
+        // =====================================================================
+
+        #[test]
+        fn test_pre_t3_rejects_periodic_limits() {
+            let (access_key_signer, access_key_address) = generate_keypair();
+            let (user_signer, user_address) = generate_keypair();
+
+            let signed = sign_key_authorization(
+                KeyAuthorization {
+                    chain_id: 42431,
+                    key_type: SignatureType::Secp256k1,
+                    key_id: access_key_address,
+                    expiry: None,
+                    limits: Some(vec![TokenLimit {
+                        token: address!("0000000000000000000000000000000000000002"),
+                        limit: U256::from(1000),
+                        period: 3600, // periodic
+                    }]),
+                    allowed_calls: None,
+                },
+                &user_signer,
+            );
+
+            let tx = create_aa_with_keychain_signature(
+                user_address,
+                &access_key_signer,
+                Some(signed),
+            );
+            // Use T1C spec (pre-T3)
+            let validator = setup_validator_with_keychain_storage(
+                &tx,
+                user_address,
+                access_key_address,
+                None,
+            );
+            let mut sp = validator.inner.client().latest().unwrap();
+            let result =
+                validate_against_keychain_default_fee_context(&validator, &tx, &mut sp)
+                    .expect("no provider error");
+            assert!(
+                matches!(
+                    result,
+                    Err(TempoPoolTransactionError::Keychain(
+                        "periodic token limits are not active before T3"
+                    ))
+                ),
+                "got: {result:?}"
+            );
+        }
+
+        #[test]
+        fn test_pre_t3_rejects_call_scopes() {
+            let (access_key_signer, access_key_address) = generate_keypair();
+            let (user_signer, user_address) = generate_keypair();
+
+            let signed = sign_key_authorization(
+                KeyAuthorization {
+                    chain_id: 42431,
+                    key_type: SignatureType::Secp256k1,
+                    key_id: access_key_address,
+                    expiry: None,
+                    limits: None,
+                    allowed_calls: Some(vec![scope(Address::repeat_byte(1), vec![])]),
+                },
+                &user_signer,
+            );
+
+            let tx = create_aa_with_keychain_signature(
+                user_address,
+                &access_key_signer,
+                Some(signed),
+            );
+            let validator = setup_validator_with_keychain_storage(
+                &tx,
+                user_address,
+                access_key_address,
+                None,
+            );
+            let mut sp = validator.inner.client().latest().unwrap();
+            let result =
+                validate_against_keychain_default_fee_context(&validator, &tx, &mut sp)
+                    .expect("no provider error");
+            assert!(
+                matches!(
+                    result,
+                    Err(TempoPoolTransactionError::Keychain(
+                        "call scopes are not active before T3"
+                    ))
+                ),
+                "got: {result:?}"
+            );
+        }
+
         /// Setup a validator using the DEV chain spec (T1C active at genesis).
         fn setup_validator_with_keychain_storage_t1c(
             transaction: &TempoPooledTransaction,

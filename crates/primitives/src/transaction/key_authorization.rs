@@ -412,6 +412,73 @@ mod tests {
     }
 
     #[test]
+    fn test_has_periodic_limits() {
+        // None → no periodic
+        assert!(!make_auth(None, None).has_periodic_limits());
+        // Empty vec → no periodic
+        assert!(!make_auth(None, Some(vec![])).has_periodic_limits());
+        // period=0 → non-periodic
+        assert!(
+            !make_auth(
+                None,
+                Some(vec![TokenLimit {
+                    token: Address::ZERO,
+                    limit: U256::from(100),
+                    period: 0,
+                }])
+            )
+            .has_periodic_limits()
+        );
+        // period>0 → periodic
+        assert!(
+            make_auth(
+                None,
+                Some(vec![TokenLimit {
+                    token: Address::ZERO,
+                    limit: U256::from(100),
+                    period: 3600,
+                }])
+            )
+            .has_periodic_limits()
+        );
+        // mixed: one periodic is enough
+        assert!(
+            make_auth(
+                None,
+                Some(vec![
+                    TokenLimit {
+                        token: Address::ZERO,
+                        limit: U256::from(50),
+                        period: 0,
+                    },
+                    TokenLimit {
+                        token: Address::repeat_byte(1),
+                        limit: U256::from(100),
+                        period: 86400,
+                    },
+                ])
+            )
+            .has_periodic_limits()
+        );
+    }
+
+    #[test]
+    fn test_has_call_scopes() {
+        // None → no scopes
+        let mut auth = make_auth(None, None);
+        assert!(!auth.has_call_scopes());
+        // Some(empty) → has scopes
+        auth.allowed_calls = Some(vec![]);
+        assert!(auth.has_call_scopes());
+        // Some(non-empty) → has scopes
+        auth.allowed_calls = Some(vec![CallScope {
+            target: Address::ZERO,
+            selector_rules: vec![],
+        }]);
+        assert!(auth.has_call_scopes());
+    }
+
+    #[test]
     fn test_size_does_not_double_count_call_scope_structs() {
         let recipients = vec![Address::repeat_byte(0x11), Address::repeat_byte(0x22)];
         let mut rules = Vec::with_capacity(3);

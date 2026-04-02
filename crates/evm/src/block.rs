@@ -116,6 +116,7 @@ pub(crate) struct TempoBlockExecutor<'a, DB: Database, I> {
     pub(crate) inner:
         EthBlockExecutor<'a, TempoEvm<DB, I>, &'a TempoChainSpec, TempoReceiptBuilder>,
 
+    hardfork: TempoHardfork,
     section: BlockSection,
     seen_subblocks: Vec<(PartialValidatorKey, Vec<TempoTxEnvelope>)>,
     validator_set: Option<Vec<B256>>,
@@ -139,6 +140,7 @@ where
     ) -> Self {
         Self {
             incentive_gas_used: 0,
+            hardfork: chain_spec.tempo_hardfork_at(evm.block().timestamp.to::<u64>()),
             validator_set: ctx.validator_set,
             non_payment_gas_left: ctx.general_gas_limit,
             non_shared_gas_left: evm.block().gas_limit - ctx.shared_gas_limit,
@@ -153,13 +155,6 @@ where
             seen_subblocks: Vec::new(),
             subblock_fee_recipients: ctx.subblock_fee_recipients,
         }
-    }
-
-    /// Returns the [`TempoHardfork`] for this block.
-    fn hardfork(&self) -> TempoHardfork {
-        self.inner
-            .spec
-            .tempo_hardfork_at(self.evm().block().timestamp.to::<u64>())
     }
 
     /// Validates a system transaction.
@@ -381,7 +376,7 @@ where
         self.inner.apply_pre_execution_changes()?;
 
         // Deploy 0xEF marker bytecode to ValidatorConfigV2 when T2 activates.
-        if self.hardfork().is_t2() {
+        if self.hardfork.is_t2() {
             let db = self.evm_mut().ctx_mut().journaled_state.db_mut();
             let mut info = db
                 .basic(VALIDATOR_CONFIG_V2_ADDRESS)
@@ -431,7 +426,7 @@ where
 
         let inner = result?;
 
-        let is_payment = if self.hardfork().is_t3() {
+        let is_payment = if self.hardfork.is_t3() {
             recovered.tx().is_payment_v2()
         } else {
             recovered.tx().is_payment_v1()

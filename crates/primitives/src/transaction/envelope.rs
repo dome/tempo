@@ -665,7 +665,13 @@ mod codec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transaction::{Call, TempoTransaction};
+    use crate::transaction::{
+        Call, TempoSignedAuthorization, TempoTransaction,
+        key_authorization::{KeyAuthorization, SignedKeyAuthorization},
+        tt_signature::PrimitiveSignature,
+    };
+    use alloy_consensus::TxEip7702;
+    use alloy_eips::eip7702::SignedAuthorization;
     use alloy_primitives::{Bytes, Signature, TxKind, U256, address};
     use alloy_sol_types::SolCall;
 
@@ -965,9 +971,6 @@ mod tests {
 
     #[test]
     fn test_payment_v2_eip7702_rejects_authorization_list() {
-        use alloy_consensus::TxEip7702;
-        use alloy_eips::eip7702::SignedAuthorization;
-
         let calldata = ITIP20::transferCall {
             to: Address::random(),
             amount: U256::from(1),
@@ -1002,11 +1005,6 @@ mod tests {
 
     #[test]
     fn test_payment_v2_aa_rejects_key_authorization() {
-        use crate::transaction::{
-            key_authorization::{KeyAuthorization, SignedKeyAuthorization},
-            tt_signature::PrimitiveSignature,
-        };
-
         let calldata = ITIP20::transferCall {
             to: Address::random(),
             amount: U256::from(1),
@@ -1044,8 +1042,6 @@ mod tests {
 
     #[test]
     fn test_payment_v2_aa_rejects_tempo_authorization_list() {
-        use crate::transaction::TempoSignedAuthorization;
-
         let calldata = ITIP20::transferCall {
             to: Address::random(),
             amount: U256::from(1),

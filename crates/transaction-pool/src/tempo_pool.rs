@@ -289,7 +289,7 @@ where
             if !updates.spending_limit_spends.is_empty()
                 && let Some(ref subject) = keychain_subject
                 && subject.matches_spending_limit_update(&updates.spending_limit_spends)
-                && tx.transaction.sender_pays_own_fees()
+                && tx.transaction.sender_is_fee_payer()
                 && let Some(ref mut provider) = state_provider
                 && exceeds_spending_limit(
                     provider,

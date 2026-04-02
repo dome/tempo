@@ -226,7 +226,7 @@ impl PausedFeeTokenPool {
                 let matches_limit_spend =
                     subject.matches_spending_limit_update(spending_limit_spends);
                 let sender_paid = if matches_limit_update || matches_limit_spend {
-                    entry.tx.transaction.sender_pays_own_fees()
+                    entry.tx.transaction.sender_is_fee_payer()
                 } else {
                     false
                 };

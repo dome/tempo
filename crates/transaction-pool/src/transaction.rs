@@ -155,8 +155,8 @@ impl TempoPooledTransaction {
         })
     }
 
-    /// Returns whether this transaction pays its own fees.
-    pub fn sender_pays_own_fees(&self) -> bool {
+    /// Returns whether the sender is the fee payer for this transaction.
+    pub fn sender_is_fee_payer(&self) -> bool {
         let sender = self.sender();
         self.inner()
             .fee_payer(sender)

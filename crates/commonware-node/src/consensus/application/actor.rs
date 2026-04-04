@@ -325,7 +325,7 @@ impl Inner<Init> {
 
         let proposal = select!(
             () = response.closed() => {
-                // If we got intrrupted, fetch payload resolve future and drop it 
+                // If we got interrupted, fetch payload resolve future and drop it
                 // to make sure that payload building is canceled.
                 let payload_id = payload_id_from_block_hash(&parent_digest.0);
                 let fut = self

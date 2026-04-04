@@ -28,13 +28,14 @@ use commonware_runtime::{
     ContextCell, FutureExt as _, Handle, Metrics as _, Pacer, Spawner, Storage, spawn_cell,
 };
 use prometheus_client::metrics::counter::Counter;
+use tempo_payload_types::payload_id_from_block_hash;
 
 use commonware_utils::{SystemTimeExt, channel::oneshot};
 use eyre::{OptionExt as _, WrapErr as _, bail, ensure, eyre};
 use futures::{StreamExt as _, TryFutureExt as _, channel::mpsc, future::try_join};
 use rand_08::{CryptoRng, Rng};
 use reth_ethereum::chainspec::EthChainSpec as _;
-use reth_node_builder::{Block as _, BuiltPayload, ConsensusEngineHandle};
+use reth_node_builder::{Block as _, BuiltPayload, ConsensusEngineHandle, PayloadKind};
 use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
 use tempo_node::{TempoExecutionData, TempoFullNode, TempoPayloadTypes};
 use tempo_telemetry_util::display_duration;
@@ -324,6 +325,16 @@ impl Inner<Init> {
 
         let proposal = select!(
             () = response.closed() => {
+                // If we got intrrupted, fetch payload resolve future and drop it 
+                // to make sure that payload building is canceled.
+                let payload_id = payload_id_from_block_hash(&parent_digest.0);
+                let fut = self
+                    .execution_node
+                    .payload_builder_handle
+                    .resolve_kind_fut(payload_id, PayloadKind::WaitForPending)
+                    .await
+                    .wrap_err("failed resolving payload")?;
+                drop(fut);
                 Err(eyre!(
                     "proposal return channel was closed by consensus \
                     engine before block could be proposed; aborting"

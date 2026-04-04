@@ -238,6 +238,16 @@ where
             payload_id: _,
         } = config;
 
+        macro_rules! check_cancel {
+            () => {
+                if cancel.is_cancelled() {
+                    return Ok(BuildOutcome::Cancelled);
+                }
+            };
+        }
+
+        check_cancel!();
+
         let start = Instant::now();
 
         let block_time_millis =
@@ -266,6 +276,8 @@ where
         self.metrics
             .state_setup_duration_seconds
             .record(state_setup_start.elapsed());
+
+        check_cancel!();
 
         let chain_spec = self.provider.chain_spec();
         let is_osaka = self
@@ -358,6 +370,8 @@ where
             )
             .map_err(PayloadBuilderError::other)?;
 
+        check_cancel!();
+
         // Override the fee recipient with the on-chain value from the V2
         // validator config contract, if available.
         maybe_override_fee_recipient(&mut builder, &attributes);
@@ -366,6 +380,8 @@ where
             warn!(%err, "failed to apply pre-execution changes");
             PayloadBuilderError::Internal(err.into())
         })?;
+
+        check_cancel!();
 
         debug!("building new payload");
 
@@ -436,10 +452,7 @@ where
                 break;
             }
 
-            // check if the job was cancelled, if so we can exit early
-            if cancel.is_cancelled() {
-                return Ok(BuildOutcome::Cancelled);
-            }
+            check_cancel!();
 
             let is_payment = pool_tx.transaction.is_payment();
             if is_payment {
@@ -521,6 +534,8 @@ where
         self.metrics
             .payment_transactions_last
             .set(payment_transactions as f64);
+
+        check_cancel!();
 
         // check if we have a better block or received more subblocks
         if !is_better_payload(best_payload.as_ref(), total_fees)
@@ -616,6 +631,9 @@ where
             inner: &*state_provider,
             metrics: self.metrics.clone(),
         };
+
+        check_cancel!();
+
         let BlockBuilderOutcome {
             execution_result,
             block,

@@ -147,19 +147,16 @@ impl<TContext: Spawner + Clone + Send + 'static, U: UpstreamNode> FollowResolver
         Ok(Some((finalization, consensus_block).encode()))
     }
 
+    // We don't fallback to the upstream and rely on EL pipeline sync for any
+    // intermediary blocks that the marshal doesn't have to be resolved.
     async fn resolve_block(&self, commitment: Digest) -> eyre::Result<Option<Bytes>> {
-        let block = self
+        let Some(block) = self
             .execution_node
             .provider
             .find_block_by_hash(commitment.0, BlockSource::Any)
-            .map_err(|e| eyre::eyre!("local provider error: {e}"))?;
-
-        let block = match block {
-            Some(b) => b,
-            None => match self.upstream.get_block_by_hash(commitment.0).await? {
-                Some(b) => b,
-                None => return Ok(None),
-            },
+            .map_err(|e| eyre::eyre!("local provider error: {e}"))?
+        else {
+            return Ok(None);
         };
 
         let consensus_block = Block::from_execution_block(SealedBlock::seal_slow(block));

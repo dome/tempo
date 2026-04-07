@@ -119,7 +119,8 @@ pub struct KeyAuthorization {
     /// - `None` (RLP 0x80) = key never expires (stored as u64::MAX in precompile)
     /// - `Some(timestamp)` = key expires at this timestamp
     ///
-    /// Note: Some(0) will get decoded as None after RLP roundtrip.
+    /// `Some(0)` is invalid and is rejected during encoding so it cannot silently normalize to
+    /// `None` on the wire.
     #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity::opt"))]
     pub expiry: Option<u64>,
 
@@ -281,6 +282,10 @@ mod rlp {
     use alloy_rlp::{Decodable, Encodable};
     use core::num::NonZeroU64;
 
+    fn checked_nonzero_u64(value: u64, field_name: &'static str) -> NonZeroU64 {
+        NonZeroU64::new(value).unwrap_or_else(|| panic!("{field_name} cannot be 0"))
+    }
+
     #[derive(
         Clone, Debug, PartialEq, Eq, Hash, alloy_rlp::RlpEncodable, alloy_rlp::RlpDecodable,
     )]
@@ -358,7 +363,7 @@ mod rlp {
                 chain_id: *chain_id,
                 key_type: *key_type,
                 key_id: *key_id,
-                expiry: expiry.and_then(NonZeroU64::new),
+                expiry: expiry.map(|expiry| checked_nonzero_u64(expiry, "KeyAuthorization.expiry")),
                 limits: limits.as_ref().map(Cow::Borrowed),
                 allowed_calls: allowed_calls.as_ref().map(Cow::Borrowed),
             }
@@ -517,6 +522,15 @@ mod tests {
             + recipients.capacity() * size_of::<Address>();
 
         assert_eq!(auth.size(), expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "KeyAuthorization.expiry cannot be 0")]
+    fn test_key_authorization_encoding_rejects_zero_expiry() {
+        let auth = make_auth(Some(0), None);
+
+        let mut encoded = Vec::new();
+        auth.encode(&mut encoded);
     }
 
     fn make_auth_with_chain_id(chain_id: u64) -> KeyAuthorization {

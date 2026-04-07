@@ -91,20 +91,6 @@ fn checked_nonzero_u64(value: u64, field_name: &str) -> NonZeroU64 {
 }
 
 #[inline]
-fn optional_nonzero_u64_length(value: Option<u64>, field_name: &str) -> usize {
-    value.map_or(1, |value| checked_nonzero_u64(value, field_name).length())
-}
-
-#[inline]
-fn encode_optional_nonzero_u64(value: Option<u64>, out: &mut dyn BufMut, field_name: &str) {
-    if let Some(value) = value {
-        checked_nonzero_u64(value, field_name).encode(out);
-    } else {
-        out.put_u8(EMPTY_STRING_CODE);
-    }
-}
-
-#[inline]
 fn decode_optional_nonzero_u64(buf: &mut &[u8]) -> alloy_rlp::Result<Option<u64>> {
     if let Some(first) = buf.first() {
         if *first == EMPTY_STRING_CODE {
@@ -435,9 +421,13 @@ impl TempoTransaction {
             self.access_list.length() +
             self.nonce_key.length() +
             self.nonce.length() +
-            optional_nonzero_u64_length(self.valid_before, "valid_before") +
+            self.valid_before.map_or(1, |value| {
+                checked_nonzero_u64(value, "valid_before").length()
+            }) +
             // valid_after (optional u64)
-            optional_nonzero_u64_length(self.valid_after, "valid_after") +
+            self.valid_after.map_or(1, |value| {
+                checked_nonzero_u64(value, "valid_after").length()
+            }) +
             // fee_token (optional Address)
             if !skip_fee_token && let Some(addr) = self.fee_token {
                 addr.length()
@@ -470,8 +460,17 @@ impl TempoTransaction {
         self.nonce_key.encode(out);
         self.nonce.encode(out);
 
-        encode_optional_nonzero_u64(self.valid_before, out, "valid_before");
-        encode_optional_nonzero_u64(self.valid_after, out, "valid_after");
+        if let Some(value) = self.valid_before {
+            checked_nonzero_u64(value, "valid_before").encode(out);
+        } else {
+            out.put_u8(EMPTY_STRING_CODE);
+        }
+
+        if let Some(value) = self.valid_after {
+            checked_nonzero_u64(value, "valid_after").encode(out);
+        } else {
+            out.put_u8(EMPTY_STRING_CODE);
+        }
 
         if !skip_fee_token && let Some(addr) = self.fee_token {
             addr.encode(out);

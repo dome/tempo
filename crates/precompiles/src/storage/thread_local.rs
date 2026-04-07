@@ -1,7 +1,9 @@
-use alloy::primitives::{Address, LogData, U256};
+use alloy::primitives::{Address, B256, LogData, U256};
 use alloy_evm::{Database, EvmInternals};
 use revm::{
-    context::{Block, CfgEnv, JournalTr, Transaction, journaled_state::JournalCheckpoint},
+    context::{
+        Block, CfgEnv, ContextTr, JournalTr, Transaction, journaled_state::JournalCheckpoint,
+    },
     state::{AccountInfo, Bytecode},
 };
 use scoped_tls::scoped_thread_local;
@@ -161,11 +163,6 @@ impl StorageCtx {
         Self::try_with_storage(|s| s.emit_event(address, event))
     }
 
-    /// Deducts gas from the remaining gas and returns an error if insufficient.
-    pub fn deduct_gas(&mut self, gas: u64) -> Result<()> {
-        Self::try_with_storage(|s| s.deduct_gas(gas))
-    }
-
     /// Adds refund to the gas refund counter.
     pub fn refund_gas(&mut self, gas: i64) {
         Self::with_storage(|s| s.refund_gas(gas))
@@ -211,6 +208,28 @@ impl StorageCtx {
         });
 
         CheckpointGuard { checkpoint }
+    }
+
+    /// Deducts gas from the remaining gas and returns an error if insufficient.
+    pub fn deduct_gas(&mut self, gas: u64) -> Result<()> {
+        Self::try_with_storage(|s| s.deduct_gas(gas))
+    }
+
+    /// Computes keccak256 and charges the appropriate gas.
+    ///
+    /// Prefer this over naked `keccak256` to ensure gas is accounted for.
+    pub fn keccak256(&self, data: &[u8]) -> Result<B256> {
+        Self::try_with_storage(|s| s.keccak256(data))
+    }
+
+    /// Recovers the signer address from an ECDSA signature and charges ecrecover gas.
+    /// As per [TIP-1004], it only accepts `v` values of `27` or `28` (no `0`/`1` normalization).
+    ///
+    /// Returns `Ok(None)` on invalid signatures; callers map to domain-specific errors.
+    ///
+    /// [TIP-1004]: <https://github.com/tempoxyz/tempo/blob/main/tips/tip-1004.md#signature-validation>
+    pub fn recover_signer(&self, digest: B256, v: u8, r: B256, s: B256) -> Result<Option<Address>> {
+        Self::try_with_storage(|storage| storage.recover_signer(digest, v, r, s))
     }
 }
 
@@ -269,6 +288,16 @@ impl<'evm> StorageCtx {
 
         // The core logic of setting up thread-local storage is here.
         Self::enter(&mut provider, f)
+    }
+
+    /// Like [`enter_evm`](Self::enter_evm), but takes a `&mut impl ContextTr`
+    /// directly instead of requiring the caller to destructure the context.
+    pub fn enter_ctx<C, R>(ctx: &mut C, f: impl FnOnce() -> R) -> R
+    where
+        C: ContextTr<Cfg = CfgEnv<TempoHardfork>, Journal: Debug, Db: Database>,
+    {
+        let (tx, block, cfg, journal) = ctx.tx_block_cfg_journal_mut();
+        Self::enter_evm(journal, block, cfg, tx, f)
     }
 
     /// Entry point for a "canonical" precompile (with unique known address).
@@ -353,8 +382,8 @@ impl StorageCtx {
 
     /// NOTE: assumes storage tests always use the `HashMapStorageProvider`
     ///
-    /// USAGE: `TIP20Setup` automatically clears events of the configured
-    /// contract when `apply()` is called, unless explicitly asked no to.
+    /// USAGE: `TIP20Setup` clears events of the configured contract when
+    /// `apply()` is called only if `clear_events()` was explicitly set.
     pub fn clear_events(&mut self, address: Address) {
         self.as_hashmap().clear_events(address);
     }

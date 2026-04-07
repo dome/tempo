@@ -10,6 +10,7 @@ use alloy_consensus::{SignableTransaction, Transaction, crypto::RecoveryError};
 use alloy_eips::{Typed2718, eip2930::AccessList, eip7702::SignedAuthorization};
 use alloy_primitives::{Address, B256, Bytes, ChainId, Signature, TxKind, U256, keccak256};
 use alloy_rlp::{Buf, BufMut, Decodable, EMPTY_STRING_CODE, Encodable};
+use core::num::NonZeroU64;
 
 /// Tempo transaction type byte (0x76)
 pub const TEMPO_TX_TYPE_ID: u8 = 0x76;
@@ -79,6 +80,41 @@ fn rlp_header(payload_length: usize) -> alloy_rlp::Header {
     alloy_rlp::Header {
         list: true,
         payload_length,
+    }
+}
+
+#[inline]
+fn checked_nonzero_u64(value: u64, field_name: &str) -> NonZeroU64 {
+    NonZeroU64::new(value).unwrap_or_else(|| {
+        panic!("{field_name} cannot be 0 in canonical RLP; use None for an absent field")
+    })
+}
+
+#[inline]
+fn optional_nonzero_u64_length(value: Option<u64>, field_name: &str) -> usize {
+    value.map_or(1, |value| checked_nonzero_u64(value, field_name).length())
+}
+
+#[inline]
+fn encode_optional_nonzero_u64(value: Option<u64>, out: &mut dyn BufMut, field_name: &str) {
+    if let Some(value) = value {
+        checked_nonzero_u64(value, field_name).encode(out);
+    } else {
+        out.put_u8(EMPTY_STRING_CODE);
+    }
+}
+
+#[inline]
+fn decode_optional_nonzero_u64(buf: &mut &[u8]) -> alloy_rlp::Result<Option<u64>> {
+    if let Some(first) = buf.first() {
+        if *first == EMPTY_STRING_CODE {
+            buf.advance(1);
+            Ok(None)
+        } else {
+            Ok(Some(NonZeroU64::decode(buf)?.get()))
+        }
+    } else {
+        Err(alloy_rlp::Error::InputTooShort)
     }
 }
 
@@ -295,6 +331,14 @@ impl TempoTransaction {
         // Validate calls list structure using the shared function
         validate_calls(&self.calls, !self.tempo_authorization_list.is_empty())?;
 
+        if self.valid_before == Some(0) {
+            return Err("valid_before cannot be 0");
+        }
+
+        if self.valid_after == Some(0) {
+            return Err("valid_after cannot be 0");
+        }
+
         // validBefore must be greater than validAfter if both are set
         if let Some(valid_after) = self.valid_after
             && let Some(valid_before) = self.valid_before
@@ -391,17 +435,9 @@ impl TempoTransaction {
             self.access_list.length() +
             self.nonce_key.length() +
             self.nonce.length() +
-            if let Some(valid_before) = self.valid_before {
-                valid_before.length()
-            } else {
-                1 // EMPTY_STRING_CODE
-            } +
+            optional_nonzero_u64_length(self.valid_before, "valid_before") +
             // valid_after (optional u64)
-            if let Some(valid_after) = self.valid_after {
-                valid_after.length()
-            } else {
-                1 // EMPTY_STRING_CODE
-            } +
+            optional_nonzero_u64_length(self.valid_after, "valid_after") +
             // fee_token (optional Address)
             if !skip_fee_token && let Some(addr) = self.fee_token {
                 addr.length()
@@ -434,17 +470,8 @@ impl TempoTransaction {
         self.nonce_key.encode(out);
         self.nonce.encode(out);
 
-        if let Some(valid_before) = self.valid_before {
-            valid_before.encode(out);
-        } else {
-            out.put_u8(EMPTY_STRING_CODE);
-        }
-
-        if let Some(valid_after) = self.valid_after {
-            valid_after.encode(out);
-        } else {
-            out.put_u8(EMPTY_STRING_CODE);
-        }
+        encode_optional_nonzero_u64(self.valid_before, out, "valid_before");
+        encode_optional_nonzero_u64(self.valid_after, out, "valid_after");
 
         if !skip_fee_token && let Some(addr) = self.fee_token {
             addr.encode(out);
@@ -504,27 +531,8 @@ impl TempoTransaction {
         let nonce_key = Decodable::decode(buf)?;
         let nonce = Decodable::decode(buf)?;
 
-        let valid_before = if let Some(first) = buf.first() {
-            if *first == EMPTY_STRING_CODE {
-                buf.advance(1);
-                None
-            } else {
-                Some(Decodable::decode(buf)?)
-            }
-        } else {
-            return Err(alloy_rlp::Error::InputTooShort);
-        };
-
-        let valid_after = if let Some(first) = buf.first() {
-            if *first == EMPTY_STRING_CODE {
-                buf.advance(1);
-                None
-            } else {
-                Some(Decodable::decode(buf)?)
-            }
-        } else {
-            return Err(alloy_rlp::Error::InputTooShort);
-        };
+        let valid_before = decode_optional_nonzero_u64(buf)?;
+        let valid_after = decode_optional_nonzero_u64(buf)?;
 
         let fee_token = if let Some(first) = buf.first() {
             if *first == EMPTY_STRING_CODE {
@@ -842,10 +850,8 @@ impl<'a> arbitrary::Arbitrary<'a> for TempoTransaction {
         let nonce = u.arbitrary()?;
         let fee_payer_signature = u.arbitrary()?;
 
-        // Ensure valid_before > valid_after if both are set
-        // Note: We avoid generating Some(0) for valid_after because in RLP encoding,
-        // 0 encodes as 0x80 (EMPTY_STRING_CODE), which is indistinguishable from None.
-        // This is a known limitation of RLP for optional integer fields.
+        // Ensure valid_before > valid_after if both are set.
+        // Canonical RLP uses a NonZeroU64 wire type for both fields, so 0 is invalid.
         let valid_after: Option<u64> = u.arbitrary::<Option<u64>>()?.filter(|v| *v != 0);
         let valid_before: Option<u64> = match valid_after {
             Some(after) => {
@@ -854,7 +860,7 @@ impl<'a> arbitrary::Arbitrary<'a> for TempoTransaction {
                 Some(after.saturating_add(offset))
             }
             None => {
-                // Similarly avoid Some(0) for valid_before
+                // Similarly avoid Some(0) for valid_before.
                 u.arbitrary::<Option<u64>>()?.filter(|v| *v != 0)
             }
         };
@@ -984,6 +990,30 @@ mod tests {
             ..Default::default()
         };
         assert!(tx4.validate().is_ok());
+
+        let tx_zero_before = TempoTransaction {
+            valid_before: Some(0),
+            tempo_authorization_list: vec![],
+            calls: vec![Call {
+                to: TxKind::Create,
+                value: U256::ZERO,
+                input: Bytes::new(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(tx_zero_before.validate(), Err("valid_before cannot be 0"));
+
+        let tx_zero_after = TempoTransaction {
+            valid_after: Some(0),
+            tempo_authorization_list: vec![],
+            calls: vec![Call {
+                to: TxKind::Create,
+                value: U256::ZERO,
+                input: Bytes::new(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(tx_zero_after.validate(), Err("valid_after cannot be 0"));
 
         // Invalid: empty calls
         let tx5 = TempoTransaction {

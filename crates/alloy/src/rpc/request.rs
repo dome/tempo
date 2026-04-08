@@ -4,6 +4,7 @@ use alloy_eips::Typed2718;
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_provider::Provider;
 use alloy_rpc_types_eth::{TransactionRequest, TransactionTrait};
+use core::num::NonZeroU64;
 use serde::{Deserialize, Serialize};
 use tempo_primitives::{
     AASigned, SignatureType, TempoTransaction, TempoTxEnvelope,
@@ -258,6 +259,28 @@ impl TempoTransactionRequest {
             ));
         };
 
+        let valid_before = match self.valid_before {
+            Some(0) => {
+                return Err(ValueError::new(
+                    self,
+                    "'valid_before' cannot be 0; omit the field when no upper bound is intended.",
+                ));
+            }
+            Some(value) => Some(NonZeroU64::new(value).unwrap()),
+            None => None,
+        };
+
+        let valid_after = match self.valid_after {
+            Some(0) => {
+                return Err(ValueError::new(
+                    self,
+                    "'valid_after' cannot be 0; omit the field when no lower bound is intended.",
+                ));
+            }
+            Some(value) => Some(NonZeroU64::new(value).unwrap()),
+            None => None,
+        };
+
         let mut calls = self.calls;
         if let Some(to) = self.inner.to {
             calls.push(Call {
@@ -271,8 +294,8 @@ impl TempoTransactionRequest {
             chain_id: self.inner.chain_id.unwrap_or(4217),
             nonce,
             fee_payer_signature: self.fee_payer_signature,
-            valid_before: self.valid_before,
-            valid_after: self.valid_after,
+            valid_before,
+            valid_after,
             gas_limit,
             max_fee_per_gas,
             max_priority_fee_per_gas,
@@ -402,8 +425,8 @@ impl From<TempoTransaction> for TempoTransactionRequest {
             key_id: None,
             nonce_key: Some(tx.nonce_key),
             key_authorization: tx.key_authorization,
-            valid_before: tx.valid_before,
-            valid_after: tx.valid_after,
+            valid_before: tx.valid_before.map(NonZeroU64::get),
+            valid_after: tx.valid_after.map(NonZeroU64::get),
             fee_payer_signature: tx.fee_payer_signature,
         }
     }
@@ -560,10 +583,43 @@ mod tests {
         request.inner.to = Some(address!("0x86A2EE8FAf9A840F7a2c64CA3d51209F9A02081D").into());
 
         let tx = request.build_aa().expect("should build transaction");
-        assert_eq!(tx.valid_before, Some(1234567890));
-        assert_eq!(tx.valid_after, Some(1234567800));
+        assert_eq!(tx.valid_before, Some(NonZeroU64::new(1234567890).unwrap()));
+        assert_eq!(tx.valid_after, Some(NonZeroU64::new(1234567800).unwrap()));
         assert_eq!(tx.nonce_key, TEMPO_EXPIRING_NONCE_KEY);
         assert_eq!(tx.nonce, 0);
+    }
+
+    #[test]
+    fn test_build_aa_rejects_zero_validity_window_bounds() {
+        let mut request = TempoTransactionRequest::default()
+            .with_nonce_key(TEMPO_EXPIRING_NONCE_KEY)
+            .with_valid_before(0)
+            .with_valid_after(1234567800);
+        request.inner.nonce = Some(0);
+        request.inner.gas = Some(21000);
+        request.inner.max_fee_per_gas = Some(1000000000);
+        request.inner.max_priority_fee_per_gas = Some(1000000);
+        request.inner.to = Some(address!("0x86A2EE8FAf9A840F7a2c64CA3d51209F9A02081D").into());
+
+        let err = request
+            .build_aa()
+            .expect_err("zero valid_before must be rejected");
+        assert!(err.to_string().contains("'valid_before' cannot be 0"));
+
+        let mut request = TempoTransactionRequest::default()
+            .with_nonce_key(TEMPO_EXPIRING_NONCE_KEY)
+            .with_valid_before(1234567890)
+            .with_valid_after(0);
+        request.inner.nonce = Some(0);
+        request.inner.gas = Some(21000);
+        request.inner.max_fee_per_gas = Some(1000000000);
+        request.inner.max_priority_fee_per_gas = Some(1000000);
+        request.inner.to = Some(address!("0x86A2EE8FAf9A840F7a2c64CA3d51209F9A02081D").into());
+
+        let err = request
+            .build_aa()
+            .expect_err("zero valid_after must be rejected");
+        assert!(err.to_string().contains("'valid_after' cannot be 0"));
     }
 
     #[test]
@@ -572,8 +628,8 @@ mod tests {
             chain_id: 1,
             nonce: 0,
             fee_payer_signature: None,
-            valid_before: Some(1234567890),
-            valid_after: Some(1234567800),
+            valid_before: Some(NonZeroU64::new(1234567890).unwrap()),
+            valid_after: Some(NonZeroU64::new(1234567800).unwrap()),
             gas_limit: 21000,
             max_fee_per_gas: 1000000000,
             max_priority_fee_per_gas: 1000000,

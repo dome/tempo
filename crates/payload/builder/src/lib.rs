@@ -68,8 +68,11 @@ use tracing::{Level, debug, debug_span, error, info, instrument, trace, warn};
 /// Returns true if a subblock has any expired transactions for the given timestamp.
 fn has_expired_transactions(subblock: &RecoveredSubBlock, timestamp: u64) -> bool {
     subblock.transactions.iter().any(|tx| {
-        tx.as_aa()
-            .is_some_and(|tx| tx.tx().valid_before.is_some_and(|valid| valid <= timestamp))
+        tx.as_aa().is_some_and(|tx| {
+            tx.tx()
+                .valid_before
+                .is_some_and(|valid| valid.get() <= timestamp)
+        })
     })
 }
 

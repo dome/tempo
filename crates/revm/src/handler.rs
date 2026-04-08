@@ -760,7 +760,12 @@ where
 
         // add additional gas for CREATE tx with 2d nonce and account nonce is 0.
         // This case would create a new account for caller.
-        if !nonce_key.is_zero() && tx.kind().is_create() && caller_account.nonce() == 0 {
+        // We only check first call of the transaction because CREATE is only allowed
+        // to appear as the first call in the batch (validated in `validate_calls`)
+        if !nonce_key.is_zero()
+            && tx.first_call().is_some_and(|(kind, _)| kind.is_create())
+            && caller_account.nonce() == 0
+        {
             evm.initial_gas += cfg.gas_params().get(GasId::new_account_cost());
 
             // do the gas limit check again.

@@ -327,16 +327,10 @@ async function failure({ core, context, failedStep }) {
   const blocks = buildFailureBlocks({ prNumber, actor, actorSlackId, jobUrl, repo, failedStep });
   const text = `Bench failed while ${failedStep}`;
 
-  // Post to public channel so @ai can investigate
-  const channel = process.env.SLACK_BENCH_CHANNEL;
-  if (channel) {
-    await postToSlack(token, channel, blocks, text, core);
-  }
-
-  // DM the actor on failure (skip if already posted to channel)
-  if (!channel && actorSlackId) {
+  // DM the actor on failure
+  if (actorSlackId) {
     await postToSlack(token, actorSlackId, blocks, text, core);
-  } else if (!channel) {
+  } else {
     core.info(`No Slack user mapping for GitHub user '${actor}', skipping DM`);
   }
 }

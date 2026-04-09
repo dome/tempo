@@ -63,6 +63,7 @@ pub(super) struct RpcEnv {
     provider: alloy::providers::RootProvider,
     chain_id: u64,
     hardfork: TempoHardfork,
+    supports_scoped_key_auth_rpc: bool,
 }
 
 impl RpcEnv {
@@ -95,12 +96,17 @@ impl RpcEnv {
             .get_block_by_number(Default::default())
             .await?
             .ok_or_else(|| eyre::eyre!("latest block missing"))?;
-        let hardfork = chain_spec.tempo_hardfork_at(latest_block.header.timestamp());
+        let latest_timestamp = latest_block.header.timestamp();
+        let hardfork = chain_spec.tempo_hardfork_at(latest_timestamp);
+        let supports_scoped_key_auth_rpc =
+            TempoHardfork::from_chain_and_timestamp(chain_id, latest_timestamp)
+                .is_some_and(|fork| fork.is_t3());
 
         Ok(Self {
             provider,
             chain_id,
             hardfork,
+            supports_scoped_key_auth_rpc,
         })
     }
 
@@ -135,7 +141,7 @@ impl super::types::TestEnv for RpcEnv {
     }
 
     fn supports_scoped_key_auth_rpc(&self) -> bool {
-        self.hardfork.is_t3()
+        self.supports_scoped_key_auth_rpc
     }
 
     async fn fund_account(&mut self, addr: Address) -> eyre::Result<U256> {

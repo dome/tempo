@@ -80,7 +80,6 @@ async fn run_all_matrices(env: &mut impl TestEnv) -> eyre::Result<()> {
     check(env.run_nonce_rejection_scenario().await)?;
     check(env.run_fee_payer_negative_scenario().await)?;
     check(env.run_gas_fee_boundary_scenario().await)?;
-    check(env.run_fill_transaction_error_decoding_scenario().await)?;
     Ok(())
 }
 
@@ -89,7 +88,9 @@ async fn run_all_matrices(env: &mut impl TestEnv) -> eyre::Result<()> {
 #[test_case(ForkSchedule::Mainnet ; "mainnet")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_matrices_local(schedule: ForkSchedule) -> eyre::Result<()> {
-    run_all_matrices(&mut local::Localnet::with_schedule(schedule).await?).await
+    let mut env = local::Localnet::with_schedule(schedule).await?;
+    run_all_matrices(&mut env).await?;
+    env.run_fill_transaction_error_decoding_scenario().await
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -2054,17 +2054,10 @@ mod compact_tests {
     use alloy_primitives::{Signature, U256, address, b256, bytes, hex};
     use reth_codecs::Compact;
 
-    /// Ensures backwards compatibility of compact bitflags.
-    ///
-    /// See reth's `HeaderExt` pattern:
-    /// <https://github.com/paradigmxyz/reth-core/blob/0476d1bc4b71f3c3b080622be297edd91ee4e70c/crates/codecs/src/alloy/header.rs>
+    /// `TempoTransaction` uses a handwritten compact codec that delegates to the RLP encoding,
+    /// while `Call` still uses derived compact bitflags.
     #[test]
-    fn compact_types_have_unused_bits() {
-        assert_ne!(
-            TempoTransaction::bitflag_unused_bits(),
-            0,
-            "TempoTransaction"
-        );
+    fn derived_compact_types_have_unused_bits() {
         assert_ne!(Call::bitflag_unused_bits(), 0, "Call");
     }
 
@@ -2102,7 +2095,7 @@ mod compact_tests {
                     input: bytes!("cafe"),
                 },
                 Call {
-                    to: TxKind::Create,
+                    to: TxKind::Call(address!("0x0000000000000000000000000000000000000002")),
                     value: U256::ZERO,
                     input: bytes!("6080604052"),
                 },
@@ -2114,8 +2107,8 @@ mod compact_tests {
             nonce_key: U256::from(7u64),
             nonce: 42,
             fee_payer_signature: Some(Signature::new(U256::from(1u64), U256::from(2u64), false)),
-            valid_before: Some(1_700_001_000),
-            valid_after: Some(1_700_000_000),
+            valid_before: Some(NonZeroU64::new(1_700_001_000).unwrap()),
+            valid_after: Some(NonZeroU64::new(1_700_000_000).unwrap()),
             key_authorization: Some(SignedKeyAuthorization {
                 authorization: KeyAuthorization {
                     chain_id: 42170,
@@ -2155,9 +2148,7 @@ mod compact_tests {
             )],
         };
 
-        let expected = hex!(
-            "921409e201a4ba0000000000000000000000000000000000000abc3b9aca000ba43b74005208021905000000000000000000000000000000000000000103e8cafe0600608060405201350000000000000000000000000000000000000001010000000000000000000000000000000000000000000000000000000000000000072a0001000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000046553f4e8046553f100c501f8c3f83d82a4ba0194000000000000000000000000000000000000dead84655577a0dedd940000000000000000000000000000000000000042830f424083015180b88201111111111111111111111111111111111111111111111111111111111111111122222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333444444444444444444444444444444444444444444444444444444444444444400015ef85c82a4ba94000000000000000000000000000000000000009901b841000000000000000000000000000000000000000000000000000000000000000300000000000000000000000000000000000000000000000000000000000000041c"
-        );
+        let expected = alloy_rlp::encode(&tx);
 
         let mut buf = vec![];
         let len = tx.to_compact(&mut buf);

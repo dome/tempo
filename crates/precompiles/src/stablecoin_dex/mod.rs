@@ -12,18 +12,6 @@ pub use orderbook::{
 use tempo_contracts::precompiles::PATH_USD_ADDRESS;
 pub use tempo_contracts::precompiles::{IStablecoinDEX, StablecoinDEXError, StablecoinDEXEvents};
 
-/// Fill mode for the shared fill engine (TIP-1024).
-///
-/// Both quote and swap use the same per-order fill logic. The mode controls
-/// whether state mutations are applied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FillMode {
-    /// Read-only simulation: identical traversal and rounding, no state writes.
-    Simulate,
-    /// Normal swap execution with state mutations.
-    Execute,
-}
-
 use crate::{
     STABLECOIN_DEX_ADDRESS,
     error::{Result, TempoPrecompileError},
@@ -218,7 +206,7 @@ impl StablecoinDEX {
     }
 
     pub fn quote_swap_exact_amount_out(
-        &mut self,
+        &self,
         token_in: Address,
         token_out: Address,
         amount_out: u128,
@@ -226,23 +214,17 @@ impl StablecoinDEX {
         // Find and validate the trade route (book keys + direction for each hop)
         let route = self.find_trade_path(token_in, token_out)?;
 
-        // Simulate fill backwards from output to input (TIP-1024: shared fill engine)
+        // Execute quotes backwards from output to input
         let mut current_amount = amount_out;
         for (book_key, base_for_quote) in route.iter().rev() {
-            current_amount = self.fill_orders_exact_out(
-                *book_key,
-                *base_for_quote,
-                current_amount,
-                Address::ZERO,
-                FillMode::Simulate,
-            )?;
+            current_amount = self.quote_exact_out(*book_key, current_amount, *base_for_quote)?;
         }
 
         Ok(current_amount)
     }
 
     pub fn quote_swap_exact_amount_in(
-        &mut self,
+        &self,
         token_in: Address,
         token_out: Address,
         amount_in: u128,
@@ -250,16 +232,10 @@ impl StablecoinDEX {
         // Find and validate the trade route (book keys + direction for each hop)
         let route = self.find_trade_path(token_in, token_out)?;
 
-        // Simulate fill for each hop (TIP-1024: shared fill engine)
+        // Execute quotes for each hop using precomputed book keys and directions
         let mut current_amount = amount_in;
         for (book_key, base_for_quote) in route {
-            current_amount = self.fill_orders_exact_in(
-                book_key,
-                base_for_quote,
-                current_amount,
-                Address::ZERO,
-                FillMode::Simulate,
-            )?;
+            current_amount = self.quote_exact_in(book_key, current_amount, base_for_quote)?;
         }
 
         Ok(current_amount)
@@ -283,13 +259,7 @@ impl StablecoinDEX {
         let mut amount = amount_in;
         for (book_key, base_for_quote) in route {
             // Fill orders for this hop - no min check on intermediate hops
-            amount = self.fill_orders_exact_in(
-                book_key,
-                base_for_quote,
-                amount,
-                sender,
-                FillMode::Execute,
-            )?;
+            amount = self.fill_orders_exact_in(book_key, base_for_quote, amount, sender)?;
         }
 
         // Check final output meets minimum requirement
@@ -316,13 +286,7 @@ impl StablecoinDEX {
         // Work backwards from output to calculate input needed - intermediate amounts are TRANSITORY
         let mut amount = amount_out;
         for (book_key, base_for_quote) in route.iter().rev() {
-            amount = self.fill_orders_exact_out(
-                *book_key,
-                *base_for_quote,
-                amount,
-                sender,
-                FillMode::Execute,
-            )?;
+            amount = self.fill_orders_exact_out(*book_key, *base_for_quote, amount, sender)?;
         }
 
         if amount > max_amount_in {
@@ -338,39 +302,15 @@ impl StablecoinDEX {
         Ok(amount)
     }
 
-    /// Get price level information.
-    ///
-    /// `total_liquidity` is computed on demand by summing the `remaining` amounts of all
-    /// orders in the tick's linked list (TIP-1024). The stored `total_liquidity` field is
-    /// no longer maintained by swap execution.
+    /// Get price level information
     pub fn get_price_level(&self, base: Address, tick: i16, is_bid: bool) -> Result<TickLevel> {
         let quote = TIP20Token::from_address(base)?.quote_token()?;
         let book_key = compute_book_key(base, quote);
-        let mut level = if is_bid {
-            self.books[book_key].bids[tick].read()?
+        if is_bid {
+            self.books[book_key].bids[tick].read()
         } else {
-            self.books[book_key].asks[tick].read()?
-        };
-
-        // Compute total_liquidity on demand by walking the order linked list
-        level.total_liquidity = self.compute_tick_liquidity(level.head)?;
-
-        Ok(level)
-    }
-
-    /// Compute total liquidity at a tick by summing `remaining` across all orders in
-    /// the linked list starting from `head_order_id`.
-    fn compute_tick_liquidity(&self, head_order_id: u128) -> Result<u128> {
-        let mut total: u128 = 0;
-        let mut current_id = head_order_id;
-        while current_id != 0 {
-            let order = self.orders[current_id].read()?;
-            total = total
-                .checked_add(order.remaining())
-                .ok_or(TempoPrecompileError::under_overflow())?;
-            current_id = order.next();
+            self.books[book_key].asks[tick].read()
         }
-        Ok(total)
     }
 
     /// Get orderbook by pair key
@@ -560,8 +500,11 @@ impl StablecoinDEX {
             level.tail = order.order_id();
         }
 
-        // Note: total_liquidity is no longer maintained here (TIP-1024).
-        // It is computed on demand by get_price_level.
+        let new_liquidity = level
+            .total_liquidity
+            .checked_add(order.remaining())
+            .ok_or(TempoPrecompileError::under_overflow())?;
+        level.total_liquidity = new_liquidity;
 
         self.books[order.book_key()]
             .tick_level_handler_mut(order.tick(), order.is_bid())
@@ -693,16 +636,22 @@ impl StablecoinDEX {
     }
 
     /// Partially fill an order with the specified amount.
-    /// Fill amount is denominated in base token.
-    ///
-    /// In `Simulate` mode, computes the output amount without writing state.
+    /// Fill amount is denominated in base token
     fn partial_fill_order(
         &mut self,
         order: &mut Order,
+        level: &mut TickLevel,
         fill_amount: u128,
         taker: Address,
-        mode: FillMode,
     ) -> Result<u128> {
+        let orderbook = self.books[order.book_key()].read()?;
+
+        // Update order remaining amount
+        let new_remaining = order.remaining() - fill_amount;
+        self.orders[order.order_id()]
+            .remaining
+            .write(new_remaining)?;
+
         // Calculate quote amount for this fill (used by both maker settlement and taker output)
         let quote_amount = base_to_quote(
             fill_amount,
@@ -715,6 +664,14 @@ impl StablecoinDEX {
         )
         .ok_or(TempoPrecompileError::under_overflow())?;
 
+        if order.is_bid() {
+            // Bid order maker receives base tokens (exact amount)
+            self.increment_balance(order.maker(), orderbook.base, fill_amount)?;
+        } else {
+            // Ask order maker receives quote tokens
+            self.increment_balance(order.maker(), orderbook.quote, quote_amount)?;
+        }
+
         // Taker output: bid→quote, ask→base (zero-sum with maker)
         let amount_out = if order.is_bid() {
             quote_amount
@@ -722,159 +679,144 @@ impl StablecoinDEX {
             fill_amount
         };
 
-        if mode == FillMode::Execute {
-            let orderbook = self.books[order.book_key()].read()?;
+        // Update price level total liquidity
+        let new_liquidity = level
+            .total_liquidity
+            .checked_sub(fill_amount)
+            .ok_or(TempoPrecompileError::under_overflow())?;
+        level.total_liquidity = new_liquidity;
 
-            // Update order remaining amount
-            let new_remaining = order.remaining() - fill_amount;
-            self.orders[order.order_id()]
-                .remaining
-                .write(new_remaining)?;
+        self.books[order.book_key()]
+            .tick_level_handler_mut(order.tick(), order.is_bid())
+            .write(*level)?;
 
-            if order.is_bid() {
-                // Bid order maker receives base tokens (exact amount)
-                self.increment_balance(order.maker(), orderbook.base, fill_amount)?;
-            } else {
-                // Ask order maker receives quote tokens
-                self.increment_balance(order.maker(), orderbook.quote, quote_amount)?;
-            }
-
-            // Emit OrderFilled event for partial fill
-            self.emit_order_filled(order.order_id(), order.maker(), taker, fill_amount, true)?;
-        }
+        // Emit OrderFilled event for partial fill
+        self.emit_order_filled(order.order_id(), order.maker(), taker, fill_amount, true)?;
 
         Ok(amount_out)
     }
 
-    /// Fully fill an order. In `Execute` mode, mutates storage (settlements, deletions,
-    /// flip orders, tick advancement). In `Simulate` mode, computes output and next-cursor
-    /// from read-only state.
-    ///
-    /// Returns `(amount_out, next_order_info)` where `next_order_info` is `None` when no
-    /// more liquidity exists.
+    /// Fill an order and delete from storage. Returns the next best order and price level.
     fn fill_order(
         &mut self,
         book_key: B256,
         order: &mut Order,
+        mut level: TickLevel,
         taker: Address,
-        mode: FillMode,
-    ) -> Result<(u128, Option<Order>)> {
+    ) -> Result<(u128, Option<(TickLevel, Order)>)> {
         debug_assert_eq!(order.book_key(), book_key);
 
+        let orderbook = self.books[book_key].read()?;
         let fill_amount = order.remaining();
 
         // Settlement: bid rounds DOWN (taker receives less), ask rounds UP (maker receives more)
         let amount_out = if order.is_bid() {
+            // Bid maker receives base tokens (exact amount)
+            self.increment_balance(order.maker(), orderbook.base, fill_amount)?;
+            // Taker receives quote tokens - round DOWN
             base_to_quote(fill_amount, order.tick(), RoundingDirection::Down)
                 .ok_or(TempoPrecompileError::under_overflow())?
         } else {
-            let _quote_amount = base_to_quote(fill_amount, order.tick(), RoundingDirection::Up)
+            // Ask maker receives quote tokens - round UP to favor maker
+            let quote_amount = base_to_quote(fill_amount, order.tick(), RoundingDirection::Up)
                 .ok_or(TempoPrecompileError::under_overflow())?;
+
+            self.increment_balance(order.maker(), orderbook.quote, quote_amount)?;
+
+            // Taker receives base tokens (exact amount)
             fill_amount
         };
 
-        if mode == FillMode::Execute {
-            let orderbook = self.books[book_key].read()?;
+        // Emit OrderFilled event for complete fill
+        self.emit_order_filled(order.order_id(), order.maker(), taker, fill_amount, false)?;
 
-            // Maker settlements
-            if order.is_bid() {
-                self.increment_balance(order.maker(), orderbook.base, fill_amount)?;
-            } else {
-                let quote_amount = base_to_quote(fill_amount, order.tick(), RoundingDirection::Up)
-                    .ok_or(TempoPrecompileError::under_overflow())?;
-                self.increment_balance(order.maker(), orderbook.quote, quote_amount)?;
-            }
-
-            // Emit OrderFilled event for complete fill
-            self.emit_order_filled(order.order_id(), order.maker(), taker, fill_amount, false)?;
-
-            if order.is_flip()
-                && let Err(e) = self.place_flip(
-                    order.maker(),
-                    orderbook.base,
-                    order.amount(),
-                    !order.is_bid(),
-                    order.flip_tick(),
-                    order.tick(),
-                    true,
-                )
-                && e.is_system_error()
+        if order.is_flip() {
+            // Create a new flip order with flipped side and swapped ticks.
+            // Bid becomes Ask, Ask becomes Bid.
+            // The current tick becomes the new flip_tick, and flip_tick becomes the new tick.
+            // Uses internal balance only, does not transfer from wallet.
+            //
+            // Business logic errors are ignored so that flip failure does not block the swap.
+            // System errors (OOG, DB errors, panics) propagate because state may be inconsistent.
+            if let Err(e) = self.place_flip(
+                order.maker(),
+                orderbook.base,
+                order.amount(),
+                !order.is_bid(),
+                order.flip_tick(),
+                order.tick(),
+                true,
+            ) && e.is_system_error()
                 && self.storage.spec().is_t1a()
             {
                 return Err(e);
             }
-
-            // Delete the filled order
-            self.orders[order.order_id()].delete()?;
         }
 
-        // Determine next order — use read-only state (order.next / tick bitmap)
-        // In simulate mode, storage hasn't changed, so reads are correct.
-        // In execute mode, the order was deleted but next pointers were captured before.
-        let next_order_info = if order.next() == 0 {
-            // Last order at this tick — advance to next initialized tick
-            if mode == FillMode::Execute {
-                self.books[book_key]
-                    .tick_level_handler_mut(order.tick(), order.is_bid())
-                    .delete()?;
-                self.books[book_key].delete_tick_bit(order.tick(), order.is_bid())?;
-            }
+        // Delete the filled order
+        self.orders[order.order_id()].delete()?;
+
+        // Advance tick if liquidity is exhausted
+        let next_tick_info = if order.next() == 0 {
+            self.books[book_key]
+                .tick_level_handler_mut(order.tick(), order.is_bid())
+                .delete()?;
+            self.books[book_key].delete_tick_bit(order.tick(), order.is_bid())?;
 
             let (tick, has_liquidity) =
                 self.books[book_key].next_initialized_tick(order.tick(), order.is_bid())?;
 
-            if mode == FillMode::Execute {
-                if order.is_bid() {
-                    let new_best = if has_liquidity { tick } else { i16::MIN };
-                    self.books[book_key].best_bid_tick.write(new_best)?;
-                } else {
-                    let new_best = if has_liquidity { tick } else { i16::MAX };
-                    self.books[book_key].best_ask_tick.write(new_best)?;
-                }
+            // Update best_tick when tick is exhausted
+            if order.is_bid() {
+                let new_best = if has_liquidity { tick } else { i16::MIN };
+                self.books[book_key].best_bid_tick.write(new_best)?;
+            } else {
+                let new_best = if has_liquidity { tick } else { i16::MAX };
+                self.books[book_key].best_ask_tick.write(new_best)?;
             }
 
             if !has_liquidity {
+                // No more liquidity at better prices - return None to signal completion
                 None
             } else {
                 let new_level = self.books[book_key]
                     .tick_level_handler(tick, order.is_bid())
                     .read()?;
                 let new_order = self.orders[new_level.head].read()?;
-                Some(new_order)
+
+                Some((new_level, new_order))
             }
         } else {
-            // More orders at this tick — advance to next order
-            if mode == FillMode::Execute {
-                // Update linked list head
-                let mut level = self.books[book_key]
-                    .tick_level_handler(order.tick(), order.is_bid())
-                    .read()?;
-                level.head = order.next();
-                self.books[book_key]
-                    .tick_level_handler_mut(order.tick(), order.is_bid())
-                    .write(level)?;
-                self.orders[order.next()].prev.delete()?;
-            }
+            // If there are subsequent orders at tick, advance to next order
+            level.head = order.next();
+            self.orders[order.next()].prev.delete()?;
+
+            let new_liquidity = level
+                .total_liquidity
+                .checked_sub(fill_amount)
+                .ok_or(TempoPrecompileError::under_overflow())?;
+            level.total_liquidity = new_liquidity;
+
+            self.books[book_key]
+                .tick_level_handler_mut(order.tick(), order.is_bid())
+                .write(level)?;
 
             let new_order = self.orders[order.next()].read()?;
-            Some(new_order)
+            Some((level, new_order))
         };
 
-        Ok((amount_out, next_order_info))
+        Ok((amount_out, next_tick_info))
     }
 
-    /// Fill orders for exact output amount.
-    ///
-    /// Shared by both swap (Execute) and quote (Simulate) paths (TIP-1024).
+    /// Fill orders for exact output amount
     fn fill_orders_exact_out(
         &mut self,
         book_key: B256,
         bid: bool,
         mut amount_out: u128,
         taker: Address,
-        mode: FillMode,
     ) -> Result<u128> {
-        let level = self.get_best_price_level(book_key, bid)?;
+        let mut level = self.get_best_price_level(book_key, bid)?;
         let mut order = self.orders[level.head].read()?;
 
         let mut total_amount_in: u128 = 0;
@@ -899,14 +841,14 @@ impl StablecoinDEX {
             };
 
             if fill_amount < order.remaining() {
-                self.partial_fill_order(&mut order, fill_amount, taker, mode)?;
+                self.partial_fill_order(&mut order, &mut level, fill_amount, taker)?;
                 total_amount_in = total_amount_in
                     .checked_add(amount_in)
                     .ok_or(TempoPrecompileError::under_overflow())?;
                 break;
             } else {
                 let (amount_out_received, next_order_info) =
-                    self.fill_order(book_key, &mut order, taker, mode)?;
+                    self.fill_order(book_key, &mut order, level, taker)?;
                 total_amount_in = total_amount_in
                     .checked_add(amount_in)
                     .ok_or(TempoPrecompileError::under_overflow())?;
@@ -931,7 +873,8 @@ impl StablecoinDEX {
                     amount_out = 0;
                 }
 
-                if let Some(new_order) = next_order_info {
+                if let Some((new_level, new_order)) = next_order_info {
+                    level = new_level;
                     order = new_order;
                 } else {
                     if amount_out > 0 {
@@ -945,18 +888,15 @@ impl StablecoinDEX {
         Ok(total_amount_in)
     }
 
-    /// Fill orders with exact amount in.
-    ///
-    /// Shared by both swap (Execute) and quote (Simulate) paths (TIP-1024).
+    /// Fill orders with exact amount in
     fn fill_orders_exact_in(
         &mut self,
         book_key: B256,
         bid: bool,
         mut amount_in: u128,
         taker: Address,
-        mode: FillMode,
     ) -> Result<u128> {
-        let level = self.get_best_price_level(book_key, bid)?;
+        let mut level = self.get_best_price_level(book_key, bid)?;
         let mut order = self.orders[level.head].read()?;
 
         let mut total_amount_out: u128 = 0;
@@ -976,14 +916,15 @@ impl StablecoinDEX {
             };
 
             if fill_amount < order.remaining() {
-                let amount_out = self.partial_fill_order(&mut order, fill_amount, taker, mode)?;
+                let amount_out =
+                    self.partial_fill_order(&mut order, &mut level, fill_amount, taker)?;
                 total_amount_out = total_amount_out
                     .checked_add(amount_out)
                     .ok_or(TempoPrecompileError::under_overflow())?;
                 break;
             } else {
                 let (amount_out, next_order_info) =
-                    self.fill_order(book_key, &mut order, taker, mode)?;
+                    self.fill_order(book_key, &mut order, level, taker)?;
                 total_amount_out = total_amount_out
                     .checked_add(amount_out)
                     .ok_or(TempoPrecompileError::under_overflow())?;
@@ -1014,7 +955,8 @@ impl StablecoinDEX {
                     }
                 }
 
-                if let Some(new_order) = next_order_info {
+                if let Some((new_level, new_order)) = next_order_info {
+                    level = new_level;
                     order = new_order;
                 } else {
                     if amount_in > 0 {
@@ -1088,7 +1030,12 @@ impl StablecoinDEX {
             level.tail = order.prev();
         }
 
-        // Note: total_liquidity is no longer maintained here (TIP-1024).
+        // Update level liquidity
+        let new_liquidity = level
+            .total_liquidity
+            .checked_sub(order.remaining())
+            .ok_or(TempoPrecompileError::under_overflow())?;
+        level.total_liquidity = new_liquidity;
 
         // If this was the last order at this tick, clear the bitmap bit
         if level.head == 0 {
@@ -1186,6 +1133,99 @@ impl StablecoinDEX {
         self.transfer(token, user, amount)?;
 
         Ok(())
+    }
+
+    /// Quote exact output amount without executing trades
+    fn quote_exact_out(&self, book_key: B256, amount_out: u128, is_bid: bool) -> Result<u128> {
+        let mut remaining_out = amount_out;
+        let mut amount_in = 0u128;
+        let orderbook = self.books[book_key].read()?;
+
+        let mut current_tick = if is_bid {
+            orderbook.best_bid_tick
+        } else {
+            orderbook.best_ask_tick
+        };
+        // Check for no liquidity: i16::MIN means no bids, i16::MAX means no asks
+        if current_tick == i16::MIN || current_tick == i16::MAX {
+            return Err(StablecoinDEXError::insufficient_liquidity().into());
+        }
+
+        while remaining_out > 0 {
+            let level = self.books[book_key]
+                .tick_level_handler(current_tick, is_bid)
+                .read()?;
+
+            // If no liquidity at this level, move to next tick
+            if level.total_liquidity == 0 {
+                let (next_tick, initialized) =
+                    self.books[book_key].next_initialized_tick(current_tick, is_bid)?;
+
+                if !initialized {
+                    return Err(StablecoinDEXError::insufficient_liquidity().into());
+                }
+                current_tick = next_tick;
+                continue;
+            }
+
+            let (fill_amount, amount_in_tick) = if is_bid {
+                // For bids: remaining_out is in quote, amount_in is in base
+                // Round UP to ensure we collect enough base to cover exact output.
+                // Note: this quote iterates per-tick, but execution iterates per-order.
+                // If multiple orders exist at a tick, execution may charge slightly more
+                // due to ceiling accumulation across order boundaries.
+                let base_needed = quote_to_base(remaining_out, current_tick, RoundingDirection::Up)
+                    .ok_or(TempoPrecompileError::under_overflow())?;
+                let fill_amount = if base_needed > level.total_liquidity {
+                    level.total_liquidity
+                } else {
+                    base_needed
+                };
+                (fill_amount, fill_amount)
+            } else {
+                // For asks: remaining_out is in base, amount_in is in quote
+                // Taker pays quote, maker receives quote - round UP to favor maker
+                let fill_amount = if remaining_out > level.total_liquidity {
+                    level.total_liquidity
+                } else {
+                    remaining_out
+                };
+                let quote_needed = base_to_quote(fill_amount, current_tick, RoundingDirection::Up)
+                    .ok_or(TempoPrecompileError::under_overflow())?;
+                (fill_amount, quote_needed)
+            };
+
+            let amount_out_tick = if is_bid {
+                // Round down amount_out_tick (user receives less quote).
+                // Cap at remaining_out to avoid underflow from round-trip rounding:
+                // when tick > 0, base_to_quote(quote_to_base(x, Up), Down) can exceed x by 1.
+                base_to_quote(fill_amount, current_tick, RoundingDirection::Down)
+                    .ok_or(TempoPrecompileError::under_overflow())?
+                    .min(remaining_out)
+            } else {
+                fill_amount
+            };
+
+            remaining_out = remaining_out.saturating_sub(amount_out_tick);
+            amount_in = amount_in
+                .checked_add(amount_in_tick)
+                .ok_or(TempoPrecompileError::under_overflow())?;
+
+            // If we exhausted this level or filled our requirement, move to next tick
+            if fill_amount == level.total_liquidity {
+                let (next_tick, initialized) =
+                    self.books[book_key].next_initialized_tick(current_tick, is_bid)?;
+
+                if !initialized && remaining_out > 0 {
+                    return Err(StablecoinDEXError::insufficient_liquidity().into());
+                }
+                current_tick = next_tick;
+            } else {
+                break;
+            }
+        }
+
+        Ok(amount_in)
     }
 
     /// Find the trade path between two tokens
@@ -1298,6 +1338,84 @@ impl StablecoinDEX {
         }
 
         Ok(path)
+    }
+
+    /// Quote exact input amount without executing trades
+    fn quote_exact_in(&self, book_key: B256, amount_in: u128, is_bid: bool) -> Result<u128> {
+        let mut remaining_in = amount_in;
+        let mut amount_out = 0u128;
+        let orderbook = self.books[book_key].read()?;
+
+        let mut current_tick = if is_bid {
+            orderbook.best_bid_tick
+        } else {
+            orderbook.best_ask_tick
+        };
+
+        // Check for no liquidity: i16::MIN means no bids, i16::MAX means no asks
+        if current_tick == i16::MIN || current_tick == i16::MAX {
+            return Err(StablecoinDEXError::insufficient_liquidity().into());
+        }
+
+        while remaining_in > 0 {
+            let level = self.books[book_key]
+                .tick_level_handler(current_tick, is_bid)
+                .read()?;
+
+            // If no liquidity at this level, move to next tick
+            if level.total_liquidity == 0 {
+                let (next_tick, initialized) =
+                    self.books[book_key].next_initialized_tick(current_tick, is_bid)?;
+
+                if !initialized {
+                    return Err(StablecoinDEXError::insufficient_liquidity().into());
+                }
+                current_tick = next_tick;
+                continue;
+            }
+
+            // Compute (fill_amount, amount_out_tick, amount_consumed) based on hardfork
+            let (fill_amount, amount_out_tick, amount_consumed) = if is_bid {
+                // For bids: remaining_in is base, amount_out is quote
+                let fill = remaining_in.min(level.total_liquidity);
+                // Round down quote_out (user receives less quote)
+                let quote_out = base_to_quote(fill, current_tick, RoundingDirection::Down)
+                    .ok_or(TempoPrecompileError::under_overflow())?;
+                (fill, quote_out, fill)
+            } else {
+                // For asks: remaining_in is quote, amount_out is base
+                // Taker pays quote, maker receives quote - round UP (zero-sum with maker)
+                let base_to_get =
+                    quote_to_base(remaining_in, current_tick, RoundingDirection::Down)
+                        .ok_or(TempoPrecompileError::under_overflow())?;
+                let fill = base_to_get.min(level.total_liquidity);
+                let quote_consumed = base_to_quote(fill, current_tick, RoundingDirection::Up)
+                    .ok_or(TempoPrecompileError::under_overflow())?;
+                (fill, fill, quote_consumed)
+            };
+
+            remaining_in = remaining_in
+                .checked_sub(amount_consumed)
+                .ok_or(TempoPrecompileError::under_overflow())?;
+            amount_out = amount_out
+                .checked_add(amount_out_tick)
+                .ok_or(TempoPrecompileError::under_overflow())?;
+
+            // If we exhausted this level, move to next tick
+            if fill_amount == level.total_liquidity {
+                let (next_tick, initialized) =
+                    self.books[book_key].next_initialized_tick(current_tick, is_bid)?;
+
+                if !initialized && remaining_in > 0 {
+                    return Err(StablecoinDEXError::insufficient_liquidity().into());
+                }
+                current_tick = next_tick;
+            } else {
+                break;
+            }
+        }
+
+        Ok(amount_out)
     }
 }
 
@@ -1658,10 +1776,7 @@ mod tests {
             let level = book_handler.tick_level_handler(tick, true).read()?;
             assert_eq!(level.head, order_id);
             assert_eq!(level.tail, order_id);
-            assert_eq!(
-                exchange.compute_tick_liquidity(level.head)?,
-                min_order_amount
-            );
+            assert_eq!(level.total_liquidity, min_order_amount);
 
             // Verify balance was reduced by the escrow amount
             let quote_tip20 = TIP20Token::from_address(quote_token)?;
@@ -1721,10 +1836,7 @@ mod tests {
             let level = book_handler.tick_level_handler(tick, false).read()?;
             assert_eq!(level.head, order_id);
             assert_eq!(level.tail, order_id);
-            assert_eq!(
-                exchange.compute_tick_liquidity(level.head)?,
-                min_order_amount
-            );
+            assert_eq!(level.total_liquidity, min_order_amount);
 
             // Verify balance was reduced by the escrow amount
             let base_tip20 = TIP20Token::from_address(base_token)?;
@@ -1895,10 +2007,7 @@ mod tests {
             let level = book_handler.tick_level_handler(tick, true).read()?;
             assert_eq!(level.head, order_id);
             assert_eq!(level.tail, order_id);
-            assert_eq!(
-                exchange.compute_tick_liquidity(level.head)?,
-                min_order_amount
-            );
+            assert_eq!(level.total_liquidity, min_order_amount);
 
             // Verify balance was reduced by the escrow amount
             let quote_tip20 = TIP20Token::from_address(quote_token)?;
@@ -3404,42 +3513,30 @@ mod tests {
             // Place a bid order (alice wants to buy base with quote)
             exchange.place(alice, base_token, amount, true, tick)?;
 
-            // Test is_bid == true: base -> quote (via unified fill engine in Simulate mode)
-            let quoted_out_bid = exchange.fill_orders_exact_in(
-                book_key,
-                true,
-                amount,
-                Address::ZERO,
-                FillMode::Simulate,
-            )?;
+            // Test is_bid == true: base -> quote
+            let quoted_out_bid = exchange.quote_exact_in(book_key, amount, true)?;
             let expected_quote_out = amount
                 .checked_mul(price as u128)
                 .and_then(|v| v.checked_div(orderbook::PRICE_SCALE as u128))
                 .expect("calculation");
             assert_eq!(
                 quoted_out_bid, expected_quote_out,
-                "fill_orders_exact_in(Simulate) with is_bid=true should return quote amount"
+                "quote_exact_in with is_bid=true should return quote amount"
             );
 
             // Place an ask order (alice wants to sell base for quote)
             exchange.place(alice, base_token, amount, false, tick)?;
 
-            // Test is_bid == false: quote -> base (via unified fill engine in Simulate mode)
+            // Test is_bid == false: quote -> base
             let quote_in = (amount * price as u128) / orderbook::PRICE_SCALE as u128;
-            let quoted_out_ask = exchange.fill_orders_exact_in(
-                book_key,
-                false,
-                quote_in,
-                Address::ZERO,
-                FillMode::Simulate,
-            )?;
+            let quoted_out_ask = exchange.quote_exact_in(book_key, quote_in, false)?;
             let expected_base_out = quote_in
                 .checked_mul(orderbook::PRICE_SCALE as u128)
                 .and_then(|v| v.checked_div(price as u128))
                 .expect("calculation");
             assert_eq!(
                 quoted_out_ask, expected_base_out,
-                "fill_orders_exact_in(Simulate) with is_bid=false should return base amount"
+                "quote_exact_in with is_bid=false should return base amount"
             );
 
             Ok(())
@@ -3566,8 +3663,7 @@ mod tests {
             assert_eq!(level.head, order_id, "Order should be head of tick level");
             assert_eq!(level.tail, order_id, "Order should be tail of tick level");
             assert_eq!(
-                exchange.compute_tick_liquidity(level.head)?,
-                min_order_amount,
+                level.total_liquidity, min_order_amount,
                 "Tick level should have order's liquidity"
             );
 
@@ -3628,8 +3724,7 @@ mod tests {
             assert_eq!(level.head, order_id, "Order should be head of tick level");
             assert_eq!(level.tail, order_id, "Order should be tail of tick level");
             assert_eq!(
-                exchange.compute_tick_liquidity(level.head)?,
-                min_order_amount,
+                level.total_liquidity, min_order_amount,
                 "Tick level should have order's liquidity"
             );
 
@@ -3693,10 +3788,7 @@ mod tests {
                 .read()?;
             assert_eq!(level.head, order_id);
             assert_eq!(level.tail, order_id);
-            assert_eq!(
-                exchange.compute_tick_liquidity(level.head)?,
-                min_order_amount
-            );
+            assert_eq!(level.total_liquidity, min_order_amount);
 
             let book = exchange.books[book_key].read()?;
             assert_eq!(book.best_bid_tick, tick);
@@ -4331,8 +4423,7 @@ mod tests {
                     .tick_level_handler(flip_tick, false)
                     .read()?;
                 assert_eq!(
-                    exchange.compute_tick_liquidity(level.head)?,
-                    0,
+                    level.total_liquidity, 0,
                     "[{spec:?}] No flipped order should exist"
                 );
 
@@ -4343,9 +4434,8 @@ mod tests {
     }
 
     #[test]
-    fn test_flip_order_fill_succeeds_with_poisoned_total_liquidity() -> eyre::Result<()> {
-        // TIP-1024: total_liquidity is no longer maintained in storage, so poisoning it
-        // no longer causes a system error. The flip order placement succeeds regardless.
+    fn test_flip_order_fill_reverts_on_system_error_post_t1a() -> eyre::Result<()> {
+        // System errors during flip propagate only on T1A+. Pre-T1A all errors are ignored.
         for spec in [TempoHardfork::T1, TempoHardfork::T1A, TempoHardfork::T2] {
             let mut storage = HashMapStorageProvider::new_with_spec(1, spec);
             StorageCtx::enter(&mut storage, || {
@@ -4361,8 +4451,9 @@ mod tests {
                     ..
                 } = setup_flip_order_test()?;
 
-                // Poison the total_liquidity field — this no longer has any effect
-                // since TIP-1024 stopped maintaining it.
+                let alice_quote_before = exchange.balance_of(alice, quote_token)?;
+
+                // Poison the flip target tick so commit_order_to_book overflows on checked_add
                 let poisoned_level = TickLevel::with_values(0, 0, u128::MAX);
                 exchange.books[book_key]
                     .tick_level_handler_mut(flip_tick, false)
@@ -4372,10 +4463,28 @@ mod tests {
                 exchange.set_balance(bob, base_token, amount)?;
 
                 let result = exchange.swap_exact_amount_in(bob, base_token, quote_token, amount, 0);
-                assert!(
-                    result.is_ok(),
-                    "[{spec:?}] Swap should succeed — poisoned total_liquidity has no effect"
-                );
+
+                if spec.is_t1a() {
+                    // T1A+: system errors propagate — swap must revert
+                    assert!(
+                        result.is_err(),
+                        "Swap should revert when flip hits a system error"
+                    );
+                    assert!(
+                        result.unwrap_err().is_system_error(),
+                        "Error must be classified as a system error",
+                    );
+
+                    // Maker balance must be unchanged — no funds lost
+                    let alice_quote_after = exchange.balance_of(alice, quote_token)?;
+                    assert_eq!(alice_quote_before, alice_quote_after);
+                } else {
+                    // Pre-T1A: all flip errors are ignored — swap succeeds
+                    assert!(
+                        result.is_ok(),
+                        "[{spec:?}] Swap should succeed when system error is pre-T1A"
+                    );
+                }
 
                 Ok::<_, eyre::Report>(())
             })?;
@@ -4460,8 +4569,7 @@ mod tests {
             assert_eq!(bid_level.head, 0, "bid level head must be 0 after drain");
             assert_eq!(bid_level.tail, 0, "bid level tail must be 0 after drain");
             assert_eq!(
-                exchange.compute_tick_liquidity(bid_level.head)?,
-                0,
+                bid_level.total_liquidity, 0,
                 "bid level liquidity must be 0 after drain"
             );
 
@@ -4471,8 +4579,7 @@ mod tests {
             assert_eq!(ask_level.head, 0, "ask level head must be 0 after drain");
             assert_eq!(ask_level.tail, 0, "ask level tail must be 0 after drain");
             assert_eq!(
-                exchange.compute_tick_liquidity(ask_level.head)?,
-                0,
+                ask_level.total_liquidity, 0,
                 "ask level liquidity must be 0 after drain"
             );
 
@@ -4563,22 +4670,14 @@ mod tests {
                 .read()?;
             assert_eq!(bid_level.head, 0, "bid level head must be 0");
             assert_eq!(bid_level.tail, 0, "bid level tail must be 0");
-            assert_eq!(
-                exchange.compute_tick_liquidity(bid_level.head)?,
-                0,
-                "bid liquidity must be 0"
-            );
+            assert_eq!(bid_level.total_liquidity, 0, "bid liquidity must be 0");
 
             let ask_level = exchange.books[book_key]
                 .tick_level_handler(tick, false)
                 .read()?;
             assert_eq!(ask_level.head, 0, "ask level head must be 0");
             assert_eq!(ask_level.tail, 0, "ask level tail must be 0");
-            assert_eq!(
-                exchange.compute_tick_liquidity(ask_level.head)?,
-                0,
-                "ask liquidity must be 0"
-            );
+            assert_eq!(ask_level.total_liquidity, 0, "ask liquidity must be 0");
 
             // Verify swap against drained book fails
             let result = exchange.swap_exact_amount_in(alice, base_token, quote_token, amount, 0);
@@ -4627,9 +4726,12 @@ mod tests {
     }
 
     #[test]
-    fn test_flip_succeeds_with_poisoned_total_liquidity_post_tip1024() -> eyre::Result<()> {
-        // TIP-1024: total_liquidity is no longer maintained in storage, so poisoning it
-        // no longer causes commit_order_to_book to fail. Flip orders succeed regardless.
+    fn test_flip_checkpoint_reverts_partial_state_post_t1c() -> eyre::Result<()> {
+        // When commit_order_to_book fails inside place_flip:
+        // - T1C+: checkpoint reverts sub_balance + next_order_id
+        // - Pre-T1C: partial state leaks (balance debited, id bumped)
+        //
+        // All specs are T1A+ so system errors propagate and the swap itself fails.
         for spec in [TempoHardfork::T1A, TempoHardfork::T1C] {
             let mut storage = HashMapStorageProvider::new_with_spec(1, spec);
             StorageCtx::enter(&mut storage, || {
@@ -4645,7 +4747,10 @@ mod tests {
                     ..
                 } = setup_flip_order_test()?;
 
-                // Poison the total_liquidity field — no longer has any effect
+                let next_id_before = exchange.next_order_id()?;
+
+                // Poison the flip target tick so commit_order_to_book
+                // overflows on checked_add — a system error.
                 let poisoned = TickLevel::with_values(0, 0, u128::MAX);
                 exchange.books[book_key]
                     .tick_level_handler_mut(flip_tick, false)
@@ -4655,9 +4760,29 @@ mod tests {
                 exchange.set_balance(bob, base_token, amount)?;
 
                 let result = exchange.swap_exact_amount_in(bob, base_token, quote_token, amount, 0);
+                assert!(result.is_err(), "[{spec:?}] swap should fail");
+
+                // 1. `fill_order` credited alice `amount` base before `place_flip`
+                // 2. `sub_balance` debited it back
+                // 3. `commit_order_to_book` failed
+                let alice_base = exchange.balance_of(alice, base_token)?;
+                let next_id_after = exchange.next_order_id()?;
+
+                if spec.is_t1c() {
+                    // Checkpoint reverts both sub_balance and order_id
+                    assert_eq!(alice_base, amount);
+                    assert_eq!(next_id_after, next_id_before);
+                } else {
+                    // No checkpoint — partial state leaks
+                    assert_eq!(alice_base, 0);
+                    assert_eq!(next_id_after, next_id_before + 1);
+                }
+
+                // verify that `OrderPlaced` event was never emitted due to poisoned tick's revert
                 assert!(
-                    result.is_ok(),
-                    "[{spec:?}] swap should succeed — total_liquidity poison has no effect"
+                    exchange.emitted_events().last().is_some_and(
+                        |e| e.topics()[0] != IStablecoinDEX::OrderPlaced::SIGNATURE_HASH
+                    )
                 );
 
                 Ok::<_, eyre::Report>(())

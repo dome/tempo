@@ -8,7 +8,10 @@ use core::num::NonZeroU64;
 use serde::{Deserialize, Serialize};
 use tempo_primitives::{
     AASigned, SignatureType, TempoTransaction, TempoTxEnvelope,
-    transaction::{Call, SignedKeyAuthorization, TempoSignedAuthorization, TempoTypedTransaction},
+    transaction::{
+        Call, SignedKeyAuthorization, TempoSignedAuthorization, TempoTypedTransaction,
+        key_authorization::serde_nonzero_quantity_opt,
+    },
 };
 
 use crate::TempoNetwork;
@@ -84,9 +87,9 @@ pub struct TempoTransactionRequest {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "alloy_serde::quantity::opt"
+        with = "serde_nonzero_quantity_opt"
     )]
-    pub valid_before: Option<u64>,
+    pub valid_before: Option<NonZeroU64>,
 
     /// Transaction valid after timestamp in seconds (for expiring nonces, [TIP-1009]).
     /// Transaction can only be included in a block after this timestamp.
@@ -95,9 +98,9 @@ pub struct TempoTransactionRequest {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "alloy_serde::quantity::opt"
+        with = "serde_nonzero_quantity_opt"
     )]
-    pub valid_after: Option<u64>,
+    pub valid_after: Option<NonZeroU64>,
 
     /// Fee payer signature for sponsored transactions.
     /// The sponsor signs fee_payer_signature_hash(sender) to commit to paying gas.
@@ -191,12 +194,12 @@ impl TempoTransactionRequest {
     /// Set the valid_before timestamp for expiring nonces ([TIP-1009]).
     ///
     /// [TIP-1009]: <https://docs.tempo.xyz/protocol/tips/tip-1009>
-    pub fn set_valid_before(&mut self, valid_before: u64) {
+    pub fn set_valid_before(&mut self, valid_before: NonZeroU64) {
         self.valid_before = Some(valid_before);
     }
 
     /// Builder-pattern method for setting valid_before timestamp.
-    pub fn with_valid_before(mut self, valid_before: u64) -> Self {
+    pub fn with_valid_before(mut self, valid_before: NonZeroU64) -> Self {
         self.valid_before = Some(valid_before);
         self
     }
@@ -204,12 +207,12 @@ impl TempoTransactionRequest {
     /// Set the valid_after timestamp for expiring nonces ([TIP-1009]).
     ///
     /// [TIP-1009]: <https://docs.tempo.xyz/protocol/tips/tip-1009>
-    pub fn set_valid_after(&mut self, valid_after: u64) {
+    pub fn set_valid_after(&mut self, valid_after: NonZeroU64) {
         self.valid_after = Some(valid_after);
     }
 
     /// Builder-pattern method for setting valid_after timestamp.
-    pub fn with_valid_after(mut self, valid_after: u64) -> Self {
+    pub fn with_valid_after(mut self, valid_after: NonZeroU64) -> Self {
         self.valid_after = Some(valid_after);
         self
     }
@@ -259,28 +262,6 @@ impl TempoTransactionRequest {
             ));
         };
 
-        let valid_before = match self.valid_before {
-            Some(0) => {
-                return Err(ValueError::new(
-                    self,
-                    "'valid_before' cannot be 0; omit the field when no upper bound is intended.",
-                ));
-            }
-            Some(value) => Some(NonZeroU64::new(value).unwrap()),
-            None => None,
-        };
-
-        let valid_after = match self.valid_after {
-            Some(0) => {
-                return Err(ValueError::new(
-                    self,
-                    "'valid_after' cannot be 0; omit the field when no lower bound is intended.",
-                ));
-            }
-            Some(value) => Some(NonZeroU64::new(value).unwrap()),
-            None => None,
-        };
-
         let mut calls = self.calls;
         if let Some(to) = self.inner.to {
             calls.push(Call {
@@ -294,8 +275,8 @@ impl TempoTransactionRequest {
             chain_id: self.inner.chain_id.unwrap_or(4217),
             nonce,
             fee_payer_signature: self.fee_payer_signature,
-            valid_before,
-            valid_after,
+            valid_before: self.valid_before,
+            valid_after: self.valid_after,
             gas_limit,
             max_fee_per_gas,
             max_priority_fee_per_gas,
@@ -425,8 +406,8 @@ impl From<TempoTransaction> for TempoTransactionRequest {
             key_id: None,
             nonce_key: Some(tx.nonce_key),
             key_authorization: tx.key_authorization,
-            valid_before: tx.valid_before.map(NonZeroU64::get),
-            valid_after: tx.valid_after.map(NonZeroU64::get),
+            valid_before: tx.valid_before,
+            valid_after: tx.valid_after,
             fee_payer_signature: tx.fee_payer_signature,
         }
     }
@@ -475,10 +456,10 @@ pub trait TempoCallBuilderExt {
     fn nonce_key(self, nonce_key: U256) -> Self;
 
     /// Sets the `valid_before` field in the [`TempoTransaction`] transaction.
-    fn valid_before(self, valid_before: u64) -> Self;
+    fn valid_before(self, valid_before: NonZeroU64) -> Self;
 
     /// Sets the `valid_after` field in the [`TempoTransaction`] transaction.
-    fn valid_after(self, valid_after: u64) -> Self;
+    fn valid_after(self, valid_after: NonZeroU64) -> Self;
 
     /// Sets the `key_id` field in the [`TempoTransaction`] transaction.
     fn key_id(self, key_id: Address) -> Self;
@@ -504,11 +485,11 @@ impl<P: Provider<TempoNetwork>, D: CallDecoder> TempoCallBuilderExt
         self.map(|request| request.with_nonce_key(nonce_key))
     }
 
-    fn valid_before(self, valid_before: u64) -> Self {
+    fn valid_before(self, valid_before: NonZeroU64) -> Self {
         self.map(|request| request.with_valid_before(valid_before))
     }
 
-    fn valid_after(self, valid_after: u64) -> Self {
+    fn valid_after(self, valid_after: NonZeroU64) -> Self {
         self.map(|request| request.with_valid_after(valid_after))
     }
 
@@ -537,13 +518,17 @@ mod tests {
         Call, KeyAuthorization, PrimitiveSignature, TEMPO_EXPIRING_NONCE_KEY,
     };
 
+    fn nz(value: u64) -> NonZeroU64 {
+        NonZeroU64::new(value).expect("test timestamp must be non-zero")
+    }
+
     #[test]
     fn test_set_valid_before() {
         let mut request = TempoTransactionRequest::default();
         assert!(request.valid_before.is_none());
 
-        request.set_valid_before(1234567890);
-        assert_eq!(request.valid_before, Some(1234567890));
+        request.set_valid_before(nz(1234567890));
+        assert_eq!(request.valid_before, Some(nz(1234567890)));
     }
 
     #[test]
@@ -551,28 +536,28 @@ mod tests {
         let mut request = TempoTransactionRequest::default();
         assert!(request.valid_after.is_none());
 
-        request.set_valid_after(1234567800);
-        assert_eq!(request.valid_after, Some(1234567800));
+        request.set_valid_after(nz(1234567800));
+        assert_eq!(request.valid_after, Some(nz(1234567800)));
     }
 
     #[test]
     fn test_with_valid_before() {
-        let request = TempoTransactionRequest::default().with_valid_before(1234567890);
-        assert_eq!(request.valid_before, Some(1234567890));
+        let request = TempoTransactionRequest::default().with_valid_before(nz(1234567890));
+        assert_eq!(request.valid_before, Some(nz(1234567890)));
     }
 
     #[test]
     fn test_with_valid_after() {
-        let request = TempoTransactionRequest::default().with_valid_after(1234567800);
-        assert_eq!(request.valid_after, Some(1234567800));
+        let request = TempoTransactionRequest::default().with_valid_after(nz(1234567800));
+        assert_eq!(request.valid_after, Some(nz(1234567800)));
     }
 
     #[test]
     fn test_build_aa_with_validity_window() {
         let request = TempoTransactionRequest::default()
             .with_nonce_key(TEMPO_EXPIRING_NONCE_KEY)
-            .with_valid_before(1234567890)
-            .with_valid_after(1234567800);
+            .with_valid_before(nz(1234567890))
+            .with_valid_after(nz(1234567800));
 
         // Set required fields for build_aa
         let mut request = request;
@@ -583,43 +568,21 @@ mod tests {
         request.inner.to = Some(address!("0x86A2EE8FAf9A840F7a2c64CA3d51209F9A02081D").into());
 
         let tx = request.build_aa().expect("should build transaction");
-        assert_eq!(tx.valid_before, Some(NonZeroU64::new(1234567890).unwrap()));
-        assert_eq!(tx.valid_after, Some(NonZeroU64::new(1234567800).unwrap()));
+        assert_eq!(tx.valid_before, Some(nz(1234567890)));
+        assert_eq!(tx.valid_after, Some(nz(1234567800)));
         assert_eq!(tx.nonce_key, TEMPO_EXPIRING_NONCE_KEY);
         assert_eq!(tx.nonce, 0);
     }
 
     #[test]
-    fn test_build_aa_rejects_zero_validity_window_bounds() {
-        let mut request = TempoTransactionRequest::default()
-            .with_nonce_key(TEMPO_EXPIRING_NONCE_KEY)
-            .with_valid_before(0)
-            .with_valid_after(1234567800);
-        request.inner.nonce = Some(0);
-        request.inner.gas = Some(21000);
-        request.inner.max_fee_per_gas = Some(1000000000);
-        request.inner.max_priority_fee_per_gas = Some(1000000);
-        request.inner.to = Some(address!("0x86A2EE8FAf9A840F7a2c64CA3d51209F9A02081D").into());
+    fn test_deserialize_rejects_zero_validity_window_bounds() {
+        let err = serde_json::from_str::<TempoTransactionRequest>(r#"{"validBefore":"0x0"}"#)
+            .expect_err("zero valid_before must be rejected during deserialization");
+        assert!(err.to_string().contains("expected non-zero quantity"));
 
-        let err = request
-            .build_aa()
-            .expect_err("zero valid_before must be rejected");
-        assert!(err.to_string().contains("'valid_before' cannot be 0"));
-
-        let mut request = TempoTransactionRequest::default()
-            .with_nonce_key(TEMPO_EXPIRING_NONCE_KEY)
-            .with_valid_before(1234567890)
-            .with_valid_after(0);
-        request.inner.nonce = Some(0);
-        request.inner.gas = Some(21000);
-        request.inner.max_fee_per_gas = Some(1000000000);
-        request.inner.max_priority_fee_per_gas = Some(1000000);
-        request.inner.to = Some(address!("0x86A2EE8FAf9A840F7a2c64CA3d51209F9A02081D").into());
-
-        let err = request
-            .build_aa()
-            .expect_err("zero valid_after must be rejected");
-        assert!(err.to_string().contains("'valid_after' cannot be 0"));
+        let err = serde_json::from_str::<TempoTransactionRequest>(r#"{"validAfter":"0x0"}"#)
+            .expect_err("zero valid_after must be rejected during deserialization");
+        assert!(err.to_string().contains("expected non-zero quantity"));
     }
 
     #[test]
@@ -646,8 +609,8 @@ mod tests {
         };
 
         let request: TempoTransactionRequest = tx.into();
-        assert_eq!(request.valid_before, Some(1234567890));
-        assert_eq!(request.valid_after, Some(1234567800));
+        assert_eq!(request.valid_before, Some(nz(1234567890)));
+        assert_eq!(request.valid_after, Some(nz(1234567800)));
         assert_eq!(request.nonce_key, Some(TEMPO_EXPIRING_NONCE_KEY));
     }
 
@@ -655,13 +618,13 @@ mod tests {
     fn test_expiring_nonce_builder_chain() {
         let request = TempoTransactionRequest::default()
             .with_nonce_key(TEMPO_EXPIRING_NONCE_KEY)
-            .with_valid_before(1234567890)
-            .with_valid_after(1234567800)
+            .with_valid_before(nz(1234567890))
+            .with_valid_after(nz(1234567800))
             .with_fee_token(address!("0x20c0000000000000000000000000000000000000"));
 
         assert_eq!(request.nonce_key, Some(TEMPO_EXPIRING_NONCE_KEY));
-        assert_eq!(request.valid_before, Some(1234567890));
-        assert_eq!(request.valid_after, Some(1234567800));
+        assert_eq!(request.valid_before, Some(nz(1234567890)));
+        assert_eq!(request.valid_after, Some(nz(1234567800)));
         assert_eq!(
             request.fee_token,
             Some(address!("0x20c0000000000000000000000000000000000000"))

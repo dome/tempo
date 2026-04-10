@@ -110,16 +110,7 @@ fn rlp_header(payload_length: usize) -> alloy_rlp::Header {
 
 #[inline]
 fn decode_optional_nonzero_u64(buf: &mut &[u8]) -> alloy_rlp::Result<Option<NonZeroU64>> {
-    if let Some(first) = buf.first() {
-        if *first == EMPTY_STRING_CODE {
-            buf.advance(1);
-            Ok(None)
-        } else {
-            Ok(Some(NonZeroU64::decode(buf)?))
-        }
-    } else {
-        Err(alloy_rlp::Error::InputTooShort)
-    }
+    u64::decode(buf).map(NonZeroU64::new)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -251,11 +242,17 @@ pub struct TempoTransaction {
     pub fee_payer_signature: Option<Signature>,
 
     /// Transaction can only be included in a block before this timestamp
-    #[cfg_attr(feature = "serde", serde(with = "serde_nonzero_quantity_opt"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(with = "crate::transaction::key_authorization::serde_nonzero_quantity_opt")
+    )]
     pub valid_before: Option<NonZeroU64>,
 
     /// Transaction can only be included in a block after this timestamp
-    #[cfg_attr(feature = "serde", serde(with = "serde_nonzero_quantity_opt"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(with = "crate::transaction::key_authorization::serde_nonzero_quantity_opt")
+    )]
     pub valid_after: Option<NonZeroU64>,
 
     /// Optional key authorization for provisioning a new access key
@@ -880,34 +877,6 @@ impl<'a> arbitrary::Arbitrary<'a> for TempoTransaction {
             valid_after,
             key_authorization: u.arbitrary()?,
             tempo_authorization_list: vec![],
-        })
-    }
-}
-
-#[cfg(feature = "serde")]
-mod serde_nonzero_quantity_opt {
-    use core::num::NonZeroU64;
-
-    use serde::{Deserializer, Serializer, de::Error as _};
-
-    pub(super) fn serialize<S>(value: &Option<NonZeroU64>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        alloy_serde::quantity::opt::serialize(&value.map(NonZeroU64::get), serializer)
-    }
-
-    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Option<NonZeroU64>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        alloy_serde::quantity::opt::deserialize(deserializer).and_then(|value: Option<u64>| {
-            value
-                .map(|value| {
-                    NonZeroU64::new(value)
-                        .ok_or_else(|| D::Error::custom("expected non-zero quantity"))
-                })
-                .transpose()
         })
     }
 }

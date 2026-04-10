@@ -397,19 +397,19 @@ impl<'a> arbitrary::Arbitrary<'a> for KeyAuthorization {
 }
 
 #[cfg(feature = "serde")]
-mod serde_nonzero_quantity_opt {
+pub(crate) mod serde_nonzero_quantity_opt {
     use core::num::NonZeroU64;
 
     use serde::{Deserializer, Serializer, de::Error as _};
 
-    pub(super) fn serialize<S>(value: &Option<NonZeroU64>, serializer: S) -> Result<S::Ok, S::Error>
+    pub(crate) fn serialize<S>(value: &Option<NonZeroU64>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         alloy_serde::quantity::opt::serialize(&value.map(NonZeroU64::get), serializer)
     }
 
-    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Option<NonZeroU64>, D::Error>
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Option<NonZeroU64>, D::Error>
     where
         D: Deserializer<'de>,
     {

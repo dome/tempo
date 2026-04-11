@@ -242,6 +242,16 @@ fn main() -> eyre::Result<()> {
         }
     };
 
+    if let Commands::Node(node_cmd) = &cli.command
+        && node_cmd.engine.share_sparse_trie_with_payload_builder
+        && node_cmd.builder.max_payload_tasks != 1
+    {
+        eyre::bail!(
+            "--engine.share-sparse-trie-with-payload-builder requires --builder.max-tasks to be 1 (got {})",
+            node_cmd.builder.max_payload_tasks
+        );
+    }
+
     // If telemetry is enabled, set logs OTLP (conflicts_with in TelemetryArgs prevents both being set)
     let mut telemetry_config = None;
     if let Commands::Node(node_cmd) = &cli.command
@@ -430,26 +440,6 @@ fn main() -> eyre::Result<()> {
             .consensus
             .public_key()?
             .map(|key| B256::from_slice(key.as_ref()));
-
-        // Validators must not prune account or storage history — the consensus
-        // implementation relies on historical state to fetch the validator set.
-        if validator_key.is_some()
-            && let Some(prune_config) = builder.config().prune_config()
-        {
-            let modes = &prune_config.segments;
-            if let Some(mode) = &modes.account_history {
-                eyre::bail!(
-                    "validator nodes must not prune account history \
-                     (configured: {mode:?}). Remove --prune.account-history.* flags."
-                );
-            }
-            if let Some(mode) = &modes.storage_history {
-                eyre::bail!(
-                    "validator nodes must not prune storage history \
-                     (configured: {mode:?}). Remove --prune.storage-history.* flags."
-                );
-            }
-        }
 
         // Initialize Pyroscope profiling if enabled
         #[cfg(feature = "pyroscope")]

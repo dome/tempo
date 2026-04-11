@@ -17,6 +17,7 @@ use std::{
 
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{B256, Bytes};
+use alloy_rpc_types_engine::PayloadId;
 use commonware_codec::{Encode as _, ReadExt as _};
 use commonware_consensus::{
     Heightable as _,
@@ -34,7 +35,9 @@ use eyre::{OptionExt as _, WrapErr as _, bail, ensure, eyre};
 use futures::{StreamExt as _, TryFutureExt as _, channel::mpsc, future::try_join};
 use rand_08::{CryptoRng, Rng};
 use reth_ethereum::chainspec::EthChainSpec as _;
-use reth_node_builder::{Block as _, BuiltPayload, ConsensusEngineHandle};
+use reth_node_builder::{
+    Block as _, BuiltPayload, ConsensusEngineHandle, PayloadAttributes, PayloadKind,
+};
 use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
 use tempo_node::{TempoExecutionData, TempoFullNode, TempoPayloadTypes};
 use tempo_telemetry_util::display_duration;
@@ -322,8 +325,22 @@ impl Inner<Init> {
             round,
         } = request;
 
+        let (payload_id_tx, mut payload_id_rx) = oneshot::channel();
+
         let proposal = select!(
             () = response.closed() => {
+                // If we got interrupted, fetch payload resolve future and drop it
+                // to make sure that payload building is canceled.
+                if let Ok(payload_id) = payload_id_rx.try_recv() {
+                    let fut = self
+                        .execution_node
+                        .payload_builder_handle
+                        .resolve_kind_fut(payload_id, PayloadKind::WaitForPending)
+                        .await
+                        .wrap_err("failed resolving payload")?;
+                    drop(fut);
+                }
+
                 Err(eyre!(
                     "proposal return channel was closed by consensus \
                     engine before block could be proposed; aborting"
@@ -334,7 +351,8 @@ impl Inner<Init> {
                 context.clone(),
                 parent_view,
                 parent_digest,
-                round
+                round,
+                payload_id_tx,
             ) => {
                 res.wrap_err("failed creating a proposal")
             }
@@ -442,6 +460,7 @@ impl Inner<Init> {
         parent_view: View,
         parent_digest: Digest,
         round: Round,
+        payload_id_tx: oneshot::Sender<PayloadId>,
     ) -> eyre::Result<Block> {
         let propose_start = Instant::now();
 
@@ -453,14 +472,16 @@ impl Inner<Init> {
             &self.marshal,
         )
         .await?;
+
         debug!(height = %parent.height(), "retrieved parent block",);
 
         let parent_epoch_info = self
             .epoch_strategy
             .containing(parent.height())
             .expect("epoch strategy is for all heights");
-        // XXX: Re-propose the parent if the parent is the last height of the
-        // epoch. parent.height+1 should be proposed as the first block of the
+
+        // If in the same epoch, re-propose the parent if the parent is the last height
+        // of the epoch. parent.height+1 should be proposed as the first block of the
         // next epoch.
         if parent_epoch_info.last() == parent.height() && parent_epoch_info.epoch() == round.epoch()
         {
@@ -468,22 +489,30 @@ impl Inner<Init> {
             return Ok(parent);
         }
 
-        // Send the proposal parent to reth to cover edge cases when we were not asked to verify it directly.
-        if !verify_block(
-            context.clone(),
-            parent_epoch_info.epoch(),
-            &self.epoch_strategy,
-            self.execution_node
-                .add_ons_handle
-                .beacon_engine_handle
-                .clone(),
-            &parent,
-            // It is safe to not verify the parent of the parent because this block is already notarized.
-            parent.parent_digest(),
-            &self.scheme_provider,
-        )
-        .await
-        .wrap_err("failed verifying block against execution layer")?
+        let is_genesis_parent = parent.height().is_zero()
+            || parent_epoch_info.last() == parent.height()
+                && parent_epoch_info.epoch().next() == round.epoch();
+
+        // Send the proposal parent to execution layer to cover edge cases when we were not asked to
+        // to verify it (and hence are missing it in the EL).
+        //
+        // If proposing the first block of an epoch, its parent (genesis/boundary block) must exist and be finalized, so we can skip it.
+        if !is_genesis_parent
+            && !verify_block(
+                context.clone(),
+                parent_epoch_info.epoch(),
+                &self.epoch_strategy,
+                self.execution_node
+                    .add_ons_handle
+                    .beacon_engine_handle
+                    .clone(),
+                &parent,
+                // It is safe to not verify the parent of the parent because this block is already notarized.
+                parent.parent_digest(),
+                &self.scheme_provider,
+            )
+            .await
+            .wrap_err("failed verifying block against execution layer")?
         {
             eyre::bail!("the proposal parent block is not valid");
         }
@@ -565,10 +594,13 @@ impl Inner<Init> {
             },
         );
 
+        let payload_id = attrs.payload_id(&parent.digest().0);
+        payload_id_tx.send(payload_id).map_err(|_| {
+            eyre!("caller went away before payload job ID could be returned; aborting proposal")
+        })?;
         let interrupt_handle = attrs.interrupt_handle().clone();
 
-        let payload_id = self
-            .state
+        self.state
             .executor
             .canonicalize_and_build(parent.height(), parent.digest(), attrs)
             .await
@@ -809,24 +841,18 @@ async fn verify_block<TContext: Pacer>(
         return Ok(false);
     }
 
-    // FIXME: in cases where validate_block is called on the boundary block,
-    // the scheme might not be available.
-    //
-    // The fix is to track directly track notarizations and feed them to the
-    // EL that way, instead of doing this at the automaton/proposal level.
-    //
-    // https://github.com/tempoxyz/tempo/issues/1411
-    //
-    // let scheme = scheme_provider
-    //     .scoped(epoch)
-    //     .ok_or_eyre("cannot determine participants in the current epoch")?;
-    let validator_set = scheme_provider.scoped(epoch).map(|scheme| {
+    // Scheme registration precedes engine creation, so the scheme must exist
+    let scheme = scheme_provider
+        .scoped(epoch)
+        .ok_or_eyre("cannot determine participants in the current epoch")?;
+
+    let validator_set = Some(
         scheme
             .participants()
             .into_iter()
             .map(|p| B256::from_slice(p))
-            .collect()
-    });
+            .collect(),
+    );
     let block = block.clone().into_inner();
     let execution_data = TempoExecutionData {
         block: Arc::new(block),

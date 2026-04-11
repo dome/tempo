@@ -1,6 +1,6 @@
 use crate::{TempoBlockEnv, TempoTxEnv, instructions};
 use alloy_evm::{Database, precompiles::PrecompilesMap};
-use alloy_primitives::{Address, Log, U256};
+use alloy_primitives::{Address, U256};
 use revm::{
     Context, Inspector,
     context::{CfgEnv, ContextError, Evm, FrameStack},
@@ -29,8 +29,6 @@ pub struct TempoEvm<DB: Database, I> {
         PrecompilesMap,
         EthFrame<EthInterpreter>,
     >,
-    /// Preserved logs from the last transaction
-    pub logs: Vec<Log>,
     /// The fee collected in `collectFeePreTx` call.
     pub(crate) collected_fee: U256,
     /// Initial gas cost. Used for key_authorization validation in collectFeePreTx.
@@ -39,6 +37,19 @@ pub struct TempoEvm<DB: Database, I> {
     pub(crate) initial_gas: u64,
     /// The fee token used to pay fees for the current transaction.
     pub(crate) fee_token: Option<Address>,
+    /// The expiry timestamp of the access key used by the current transaction.
+    /// Populated during validation for keychain-signed transactions or transactions carrying a KeyAuthorization.
+    pub(crate) key_expiry: Option<u64>,
+    /// When true, skips the `valid_after` time-window check during validation.
+    ///
+    /// The transaction pool sets this because it intentionally accepts transactions
+    /// with a future `valid_after` (queued until executable).
+    pub skip_valid_after_check: bool,
+    /// When true, skips the AMM liquidity check in `collect_fee_pre_tx`.
+    ///
+    /// The transaction pool sets this because it performs its own liquidity
+    /// validation against a cached view of the AMM state.
+    pub skip_liquidity_check: bool,
 }
 
 impl<DB: Database, I> TempoEvm<DB, I> {
@@ -69,10 +80,12 @@ impl<DB: Database, I> TempoEvm<DB, I> {
     ) -> Self {
         Self {
             inner,
-            logs: Vec::new(),
             collected_fee: U256::ZERO,
             initial_gas: 0,
             fee_token: None,
+            key_expiry: None,
+            skip_valid_after_check: false,
+            skip_liquidity_check: false,
         }
     }
 }
@@ -93,10 +106,11 @@ impl<DB: Database, I> TempoEvm<DB, I> {
         self.inner.into_inspector()
     }
 
-    /// Take logs from the EVM.
-    #[inline]
-    pub fn take_logs(&mut self) -> Vec<Log> {
-        std::mem::take(&mut self.logs)
+    /// Clears all intermediate state from the EVM.
+    pub fn clear(&mut self) {
+        self.initial_gas = 0;
+        self.fee_token = None;
+        self.key_expiry = None;
     }
 }
 
@@ -194,7 +208,7 @@ mod tests {
     use crate::gas_params::tempo_gas_params;
     use alloy_eips::eip7702::Authorization;
     use alloy_evm::FromRecoveredTx;
-    use alloy_primitives::{Address, Bytes, Log, TxKind, U256, bytes};
+    use alloy_primitives::{Address, Bytes, TxKind, U256, bytes};
     use alloy_sol_types::SolCall;
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use p256::{
@@ -1677,32 +1691,6 @@ mod tests {
         );
     }
 
-    /// Test that take_logs clears logs and returns them.
-    #[test]
-    fn test_tempo_evm_take_logs() {
-        let mut evm = create_evm();
-
-        // Manually add some logs
-        evm.logs.push(Log::new_unchecked(
-            Address::repeat_byte(0x01),
-            vec![],
-            Bytes::new(),
-        ));
-        evm.logs.push(Log::new_unchecked(
-            Address::repeat_byte(0x02),
-            vec![],
-            Bytes::new(),
-        ));
-
-        assert_eq!(evm.logs.len(), 2);
-
-        // Take logs
-        let taken_logs = evm.take_logs();
-
-        assert_eq!(taken_logs.len(), 2, "Should return 2 logs");
-        assert!(evm.logs.is_empty(), "Logs should be cleared after take");
-    }
-
     /// Test AA transaction gas usage for simple identity precompile call.
     /// This establishes a baseline for gas comparison.
     /// Uses T1 hardfork for TIP-1000 gas costs.
@@ -2598,6 +2586,81 @@ mod tests {
         assert!(
             t1b_gas < t1_gas,
             "T1B fix: gas ({t1b_gas}) must be less than T1 double-charge ({t1_gas})"
+        );
+
+        Ok(())
+    }
+
+    /// Regression: `eth_estimateGas` must NOT add an extra 250k `new_account_cost` for AA
+    /// token transfers using the `calls` format when `nonce_key != 0` and
+    /// `caller.nonce == 0`.
+    ///
+    /// Root cause: `tx.kind()` reads `inner.to`, which is `None` for the
+    /// `calls` format, causing it to return `TxKind::Create` for a plain
+    /// transfer — incorrectly triggering a second 250k account-creation charge
+    /// on top of the legitimate 250k already charged by `validate_aa_initial_tx_gas`.
+    ///
+    /// The fix inspects `aa_calls[0].to` directly for AA transactions instead
+    /// of relying on `tx.kind()`.
+    #[test]
+    fn test_aa_tx_transfer_calls_format_no_extra_250k() -> eyre::Result<()> {
+        let key_pair = P256KeyPair::random();
+        let caller = key_pair.address;
+        let recipient = Address::with_last_byte(0xff);
+
+        // Baseline: calls-format transfer with nonce_key=0 (protocol nonce).
+        // validate_aa_initial_tx_gas charges 250k (nonce==0 branch).
+        // handler.rs does NOT fire because !nonce_key.is_zero() is false.
+        let mut evm_baseline = create_funded_evm_t1(caller);
+        let tx_baseline = TxBuilder::new()
+            .call(recipient, &[])
+            .nonce_key(U256::ZERO)
+            .nonce(0)
+            .gas_limit(500_000)
+            .build();
+        let result_baseline = evm_baseline.transact_commit(TempoTxEnv::from_recovered_tx(
+            &key_pair.sign_tx(tx_baseline)?,
+            caller,
+        ))?;
+        assert!(
+            result_baseline.is_success(),
+            "baseline transfer should succeed"
+        );
+        let gas_baseline = result_baseline.gas_used();
+
+        // Issue #3178 scenario: calls-format transfer with nonce_key != 0, caller.nonce == 0.
+        // validate_aa_initial_tx_gas still charges the same 250k (nonce==0 branch).
+        // Before fix: handler.rs also fired (tx.kind() wrongly returned Create) → extra 250k.
+        // After fix:  handler.rs does NOT fire (aa_calls[0].to is Call) → no extra 250k.
+        let nonce_key = U256::from(42);
+        let mut evm_2d = create_funded_evm_t1(caller);
+        let tx_2d = TxBuilder::new()
+            .call(recipient, &[])
+            .nonce_key(nonce_key)
+            .nonce(0)
+            .gas_limit(500_000)
+            .build();
+        let result_2d = evm_2d.transact_commit(TempoTxEnv::from_recovered_tx(
+            &key_pair.sign_tx(tx_2d)?,
+            caller,
+        ))?;
+        assert!(
+            result_2d.is_success(),
+            "calls-format transfer with 2D nonce should succeed"
+        );
+        let gas_2d = result_2d.gas_used();
+
+        // After the fix the gas should be nearly identical for both cases because
+        // both go through the same validate_aa_initial_tx_gas branch and handler.rs
+        // no longer fires for transfers.
+        // Before the fix gas_2d would have been ~250k higher than gas_baseline.
+        let diff = gas_2d.saturating_sub(gas_baseline);
+        assert!(
+            diff < 10_000,
+            "calls-format transfer with nonceKey={nonce_key} (gas={gas_2d}) must not cost \
+             ~250k more than baseline (gas={gas_baseline}, diff={diff}). \
+             A diff near 250_000 means new_account_cost is incorrectly added for \
+             transfers (issue #3178)."
         );
 
         Ok(())

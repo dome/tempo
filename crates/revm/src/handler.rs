@@ -640,14 +640,7 @@ where
         result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
         result_gas: ResultGas,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        evm.logs.clear();
-        // reset initial gas to 0 to avoid gas limit check errors
-        evm.initial_gas = 0;
-        evm.fee_token = None;
-
-        if !result.instruction_result().is_ok() {
-            evm.logs = evm.journal_mut().take_logs();
-        }
+        evm.clear();
 
         MainnetHandler::default()
             .execution_result(evm, result, result_gas)
@@ -767,7 +760,12 @@ where
 
         // add additional gas for CREATE tx with 2d nonce and account nonce is 0.
         // This case would create a new account for caller.
-        if !nonce_key.is_zero() && tx.kind().is_create() && caller_account.nonce() == 0 {
+        // We only check first call of the transaction because CREATE is only allowed
+        // to appear as the first call in the batch (validated in `validate_calls`)
+        if !nonce_key.is_zero()
+            && tx.first_call().is_some_and(|(kind, _)| kind.is_create())
+            && caller_account.nonce() == 0
+        {
             evm.initial_gas += cfg.gas_params().get(GasId::new_account_cost());
 
             // do the gas limit check again.
@@ -1024,7 +1022,7 @@ where
                 };
 
                 // Handle expiry: None means never expires (store as u64::MAX)
-                let expiry = key_auth.expiry.unwrap_or(u64::MAX);
+                let expiry = key_auth.expiry.map_or(u64::MAX, |expiry| expiry.get());
 
                 // Validate expiry is not in the past
                 let current_timestamp = block.timestamp().saturating_to::<u64>();
@@ -1088,6 +1086,11 @@ where
             let gas_used = provider.gas_used();
             drop(provider);
 
+            // Cache inline key authorization expiry.
+            if let Some(expiry) = key_auth.expiry {
+                evm.key_expiry = Some(expiry.get());
+            }
+
             // activated only on T1/T1A fork.
             // T1B+: Skip adding precompile gas to initial_gas since it is already
             // accounted for in intrinsic gas. The precompile runs with unlimited gas
@@ -1143,13 +1146,13 @@ where
                 .unwrap_or(false);
 
             // Always need to set the transaction key for Keychain signatures
-            let scope_validation_gas = StorageCtx::enter_precompile(
+            let (scope_validation_gas, stored_key_expiry) = StorageCtx::enter_precompile(
                 journal,
                 block,
                 cfg,
                 tx,
                 |mut keychain: AccountKeychain| {
-                    if is_authorizing_this_key {
+                    let key_expiry = if is_authorizing_this_key {
                         if spec.is_t3()
                             && tempo_tx_env
                                 .key_authorization
@@ -1164,6 +1167,11 @@ where
                             }
                             .into());
                         }
+                        // Same-tx auth+use: expiry comes from the inline KeyAuthorization
+                        tempo_tx_env
+                            .key_authorization
+                            .as_ref()
+                            .and_then(|ka| ka.expiry.map(|expiry| expiry.get()))
                     } else {
                         // Validate that user_address has authorized this access key in the keychain
                         let user_address = &keychain_sig.user_address;
@@ -1171,13 +1179,13 @@ where
                         // Extract the signature type from the inner signature to validate it matches
                         // the key_type stored in the keychain. This prevents using a signature of one
                         // type to authenticate as a key registered with a different type.
-                        // Only validate signature type on T3+ to maintain backward compatibility
+                        // Only validate signature type on T1+ to maintain backward compatibility
                         // with historical blocks during re-execution.
                         let sig_type = spec
-                            .is_t3()
+                            .is_t1()
                             .then_some(keychain_sig.signature.signature_type().into());
 
-                        keychain
+                        let key = keychain
                             .validate_keychain_authorization(
                                 *user_address,
                                 access_key_addr,
@@ -1187,7 +1195,10 @@ where
                             .map_err(|e| TempoInvalidTransaction::KeychainValidationFailed {
                                 reason: format!("{e:?}"),
                             })?;
-                    }
+
+                        // Surface stored key expiry
+                        Some(key.expiry)
+                    };
 
                     // Set the transaction key in the keychain precompile
                     // This marks that the current transaction is using an access key
@@ -1218,11 +1229,23 @@ where
                         0
                     };
 
-                    Ok::<u64, EVMError<DB::Error, TempoInvalidTransaction>>(scope_validation_gas)
+                    Ok::<_, EVMError<_, TempoInvalidTransaction>>((
+                        scope_validation_gas,
+                        key_expiry,
+                    ))
                 },
             )?;
 
+            evm.key_expiry = stored_key_expiry;
             evm.initial_gas += scope_validation_gas;
+
+            if spec.is_t3() && tx.gas_limit() < evm.initial_gas {
+                return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
+                    gas_limit: tx.gas_limit(),
+                    initial_gas: evm.initial_gas,
+                }
+                .into());
+            }
         }
 
         // Short-circuit if there is no spending for this transaction and `collectFeePreTx`
@@ -1233,12 +1256,14 @@ where
 
         let checkpoint = journal.checkpoint();
 
+        let skip_liquidity_check = evm.skip_liquidity_check;
         let result = StorageCtx::enter_evm(journal, &block, cfg, tx, || {
             TipFeeManager::new().collect_fee_pre_tx(
                 fee_payer,
                 fee_token,
                 gas_balance_spending,
                 block.beneficiary(),
+                skip_liquidity_check,
             )
         });
 
@@ -1420,7 +1445,8 @@ where
 
             // Validate time window for AA transactions
             let block_timestamp = evm.ctx_ref().block().timestamp().saturating_to();
-            validate_time_window(aa_env.valid_after, aa_env.valid_before, block_timestamp)?;
+            let valid_after = aa_env.valid_after.filter(|_| !evm.skip_valid_after_check);
+            validate_time_window(valid_after, aa_env.valid_before, block_timestamp)?;
         }
 
         Ok(())
@@ -1518,9 +1544,7 @@ where
         evm: &mut Self::Evm,
         error: Self::Error,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        // reset initial gas to 0 to avoid gas limit check errors
-        evm.initial_gas = 0;
-        evm.fee_token = None;
+        evm.clear();
 
         // For subblock transactions that failed `collectFeePreTx` call we catch error and treat such transactions as valid.
         if evm.ctx.tx.is_subblock_transaction()
@@ -1550,6 +1574,41 @@ where
                 .map(|result| result.map_haltreason(Into::into))
         }
     }
+}
+
+impl<DB, I> TempoEvmHandler<DB, I>
+where
+    DB: alloy_evm::Database,
+{
+    /// Runs the full transaction validation pipeline without executing the transaction.
+    ///
+    /// Returns a [`ValidationContext`] with context relevant for the transaction pool.
+    pub fn validate_transaction(
+        &mut self,
+        evm: &mut TempoEvm<DB, I>,
+    ) -> Result<ValidationContext, EVMError<DB::Error, TempoInvalidTransaction>> {
+        self.validate(evm)?;
+        self.pre_execution(evm)?;
+        let result = ValidationContext {
+            fee_token: evm
+                .fee_token
+                .expect("set in `validate_against_state_and_deduct_caller`"),
+            key_expiry: evm.key_expiry,
+        };
+        evm.clear();
+        Ok(result)
+    }
+}
+
+/// Context returned by [`TempoEvmHandler::validate_transaction`] with resolved
+/// fee token and key expiry information for use by the transaction pool.
+#[derive(Debug, Clone)]
+pub struct ValidationContext {
+    /// The resolved fee token address used to pay for this transaction.
+    pub fee_token: Address,
+    /// The expiry timestamp of the access key used by this transaction.
+    /// Populated for keychain-signed transactions or transactions carrying a KeyAuthorization.
+    pub key_expiry: Option<u64>,
 }
 
 /// Calculates intrinsic gas for an AA transaction batch using revm helpers.
@@ -2959,6 +3018,116 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_t3_scope_validation_gas_rechecked_against_gas_limit() {
+        const CALL_SCOPE_SELECTOR: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
+
+        let caller = Address::repeat_byte(0x11);
+        let access_key = Address::repeat_byte(0x22);
+        let target = DEFAULT_FEE_TOKEN;
+
+        let signature =
+            TempoSignature::Keychain(tempo_primitives::transaction::KeychainSignature::new(
+                caller,
+                tempo_primitives::transaction::PrimitiveSignature::Secp256k1(
+                    alloy_primitives::Signature::test_signature(),
+                ),
+            ));
+
+        let mut cfg = CfgEnv::<TempoHardfork>::default();
+        cfg.spec = TempoHardfork::T3;
+
+        let tx_env = TempoTxEnv {
+            inner: revm::context::TxEnv {
+                caller,
+                gas_limit: 1_000_000,
+                kind: TxKind::Call(target),
+                ..Default::default()
+            },
+            fee_token: Some(DEFAULT_FEE_TOKEN),
+            tempo_tx_env: Some(Box::new(TempoBatchCallEnv {
+                signature,
+                aa_calls: vec![Call {
+                    to: TxKind::Call(target),
+                    value: U256::ZERO,
+                    input: Bytes::from_static(&CALL_SCOPE_SELECTOR),
+                }],
+                signature_hash: B256::ZERO,
+                override_key_id: Some(access_key),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+
+        let ctx = Context::mainnet()
+            .with_db(CacheDB::new(EmptyDB::default()))
+            .with_block(TempoBlockEnv::default())
+            .with_cfg(cfg)
+            .with_tx(tx_env)
+            .with_new_journal(create_test_journal());
+
+        let mut evm: TempoEvm<_, ()> = TempoEvm::new(ctx, ());
+        let handler: TempoEvmHandler<CacheDB<EmptyDB>, ()> = TempoEvmHandler::new();
+
+        StorageCtx::enter_ctx(&mut evm.inner.ctx, || {
+            let mut keychain = AccountKeychain::new();
+
+            keychain.initialize().expect("keychain initialized");
+            keychain
+                .set_transaction_key(Address::ZERO)
+                .expect("root key setup succeeds");
+            keychain
+                .set_tx_origin(caller)
+                .expect("tx.origin setup succeeds");
+            keychain
+                .authorize_key(
+                    caller,
+                    authorizeKeyCall {
+                        keyId: access_key,
+                        signatureType: PrecompileSignatureType::Secp256k1,
+                        config: KeyRestrictions {
+                            expiry: u64::MAX,
+                            enforceLimits: false,
+                            limits: vec![],
+                            allowAnyCalls: false,
+                            allowedCalls: vec![PrecompileCallScope {
+                                target,
+                                selectorRules: vec![PrecompileSelectorRule {
+                                    selector: CALL_SCOPE_SELECTOR.into(),
+                                    recipients: vec![],
+                                }],
+                            }],
+                        },
+                    },
+                )
+                .expect("access key authorization succeeds");
+        });
+
+        let init_gas = handler
+            .validate_initial_tx_gas(&mut evm)
+            .expect("initial gas validation should succeed");
+        assert!(
+            init_gas.floor_gas <= init_gas.initial_gas,
+            "test requires floor gas to not exceed intrinsic gas"
+        );
+
+        evm.inner.ctx.tx.inner.gas_limit = init_gas.initial_gas;
+
+        let err = handler
+            .validate_against_state_and_deduct_caller(&mut evm)
+            .expect_err("scope validation gas should force a gas-limit recheck");
+
+        assert!(
+            matches!(
+                err.as_invalid_tx_err(),
+                Some(TempoInvalidTransaction::EthInvalidTransaction(
+                    InvalidTransaction::CallGasCostMoreThanGasLimit { .. }
+                ))
+            ),
+            "expected CallGasCostMoreThanGasLimit, got: {err:?}"
+        );
     }
 
     #[test]

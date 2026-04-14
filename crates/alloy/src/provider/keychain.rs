@@ -145,7 +145,7 @@ impl From<KeyRestrictions> for AbiKeyRestrictions {
                     period: limit.period,
                 })
                 .collect(),
-            allowAnyCalls: allowed_calls.is_none(),
+            enforceCallRestrictions: allowed_calls.is_some(),
             allowedCalls: allowed_calls
                 .unwrap_or_default()
                 .into_iter()
@@ -408,7 +408,7 @@ mod tests {
         assert_eq!(decoded.config.expiry, u64::MAX);
         assert!(!decoded.config.enforceLimits);
         assert!(decoded.config.limits.is_empty());
-        assert!(decoded.config.allowAnyCalls);
+        assert!(!decoded.config.enforceCallRestrictions);
         assert!(decoded.config.allowedCalls.is_empty());
     }
 
@@ -440,7 +440,7 @@ mod tests {
         assert_eq!(decoded.config.expiry, 123);
         assert!(decoded.config.enforceLimits);
         assert_eq!(decoded.config.limits.len(), 1);
-        assert!(!decoded.config.allowAnyCalls);
+        assert!(decoded.config.enforceCallRestrictions);
         assert_eq!(decoded.config.allowedCalls.len(), 1);
         assert_eq!(decoded.config.allowedCalls[0].selectorRules.len(), 1);
         assert_eq!(

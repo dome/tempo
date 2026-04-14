@@ -63,8 +63,8 @@ interface IAccountKeychain {
         uint64 expiry; // Unix timestamp when key expires (use type(uint64).max for never)
         bool enforceLimits; // Whether spending limits are enforced for this key
         TokenLimit[] limits; // Token spending limits
-        bool allowAnyCalls; // true = unrestricted calls (allowedCalls must be empty)
-        CallScope[] allowedCalls; // Call scopes when allowAnyCalls is false
+        bool enforceCallRestrictions; // true = `allowedCalls` defines the key's full call scope
+        CallScope[] allowedCalls; // Call scopes when enforceCallRestrictions is true
     }
 
     /// @notice Key information structure

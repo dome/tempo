@@ -907,7 +907,7 @@ contract TempoTransactionInvariantTest is InvariantChecker {
                 expiry: expiry,
                 enforceLimits: true,
                 limits: limits,
-                allowAnyCalls: true,
+                enforceCallRestrictions: false,
                 allowedCalls: new IAccountKeychain.CallScope[](0)
             })
         ) {
@@ -1816,7 +1816,7 @@ contract TempoTransactionInvariantTest is InvariantChecker {
                     expiry: expiryA,
                     enforceLimits: false,
                     limits: new IAccountKeychain.TokenLimit[](0),
-                    allowAnyCalls: true,
+                    enforceCallRestrictions: false,
                     allowedCalls: new IAccountKeychain.CallScope[](0)
                 })
             ) {
@@ -1849,7 +1849,7 @@ contract TempoTransactionInvariantTest is InvariantChecker {
                     expiry: expiryB,
                     enforceLimits: true,
                     limits: limitsB,
-                    allowAnyCalls: true,
+                    enforceCallRestrictions: false,
                     allowedCalls: new IAccountKeychain.CallScope[](0)
                 })
             ),
@@ -1982,7 +1982,7 @@ contract TempoTransactionInvariantTest is InvariantChecker {
                     expiry: expiry,
                     enforceLimits: true,
                     limits: limits,
-                    allowAnyCalls: true,
+                    enforceCallRestrictions: false,
                     allowedCalls: new IAccountKeychain.CallScope[](0)
                 })
             )
@@ -2138,7 +2138,7 @@ contract TempoTransactionInvariantTest is InvariantChecker {
                     expiry: expiry,
                     enforceLimits: false,
                     limits: new IAccountKeychain.TokenLimit[](0),
-                    allowAnyCalls: true,
+                    enforceCallRestrictions: false,
                     allowedCalls: new IAccountKeychain.CallScope[](0)
                 })
             ) {
@@ -2210,7 +2210,7 @@ contract TempoTransactionInvariantTest is InvariantChecker {
                     expiry: expiry,
                     enforceLimits: true,
                     limits: new IAccountKeychain.TokenLimit[](0),
-                    allowAnyCalls: true,
+                    enforceCallRestrictions: false,
                     allowedCalls: new IAccountKeychain.CallScope[](0)
                 })
             ) {
@@ -2292,7 +2292,7 @@ contract TempoTransactionInvariantTest is InvariantChecker {
                     expiry: expiry,
                     enforceLimits: false,
                     limits: new IAccountKeychain.TokenLimit[](0),
-                    allowAnyCalls: true,
+                    enforceCallRestrictions: false,
                     allowedCalls: new IAccountKeychain.CallScope[](0)
                 })
             ) {
@@ -3928,7 +3928,7 @@ contract TempoTransactionInvariantTest is InvariantChecker {
                 expiry: expiry,
                 enforceLimits: numLimits > 0,
                 limits: limits,
-                allowAnyCalls: true,
+                enforceCallRestrictions: false,
                 allowedCalls: new IAccountKeychain.CallScope[](0)
             })
         ) {
@@ -4692,7 +4692,7 @@ contract TempoTransactionInvariantTest is InvariantChecker {
                     expiry: expiry,
                     enforceLimits: true,
                     limits: limits,
-                    allowAnyCalls: true,
+                    enforceCallRestrictions: false,
                     allowedCalls: new IAccountKeychain.CallScope[](0)
                 })
             ) {

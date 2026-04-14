@@ -1172,7 +1172,7 @@ where
                     })
                     .unwrap_or_default();
 
-                let allow_any_calls = key_auth.allowed_calls.is_none();
+                let enforce_call_restrictions = key_auth.allowed_calls.is_some();
                 let precompile_allowed_calls = translate_allowed_calls_for_precompile(key_auth);
 
                 // Create the authorize key call
@@ -1183,7 +1183,7 @@ where
                         expiry,
                         enforceLimits: enforce_limits,
                         limits: precompile_limits,
-                        allowAnyCalls: allow_any_calls,
+                        enforceCallRestrictions: enforce_call_restrictions,
                         allowedCalls: precompile_allowed_calls,
                     },
                 };
@@ -3193,7 +3193,7 @@ mod tests {
                             expiry: u64::MAX,
                             enforceLimits: false,
                             limits: vec![],
-                            allowAnyCalls: false,
+                            enforceCallRestrictions: true,
                             allowedCalls: vec![PrecompileCallScope {
                                 target,
                                 selectorRules: vec![PrecompileSelectorRule {
@@ -3321,7 +3321,7 @@ mod tests {
                             expiry: u64::MAX,
                             enforceLimits: false,
                             limits: vec![],
-                            allowAnyCalls: false,
+                            enforceCallRestrictions: true,
                             allowedCalls: vec![PrecompileCallScope {
                                 target,
                                 selectorRules: vec![PrecompileSelectorRule {
@@ -4214,7 +4214,7 @@ mod tests {
                                 expiry: u64::MAX,
                                 enforceLimits: false,
                                 limits: vec![],
-                                allowAnyCalls: true,
+                                enforceCallRestrictions: false,
                                 allowedCalls: vec![],
                             },
                         },

@@ -119,7 +119,7 @@ contract AccountKeychainInvariantTest is InvariantBaseTest {
                 expiry: expiry,
                 enforceLimits: false,
                 limits: new IAccountKeychain.TokenLimit[](0),
-                allowAnyCalls: true,
+                enforceCallRestrictions: false,
                 allowedCalls: new IAccountKeychain.CallScope[](0)
             })
         );
@@ -256,7 +256,7 @@ contract AccountKeychainInvariantTest is InvariantBaseTest {
                 expiry: expiry,
                 enforceLimits: enforceLimits,
                 limits: limits,
-                allowAnyCalls: true,
+                enforceCallRestrictions: false,
                 allowedCalls: new IAccountKeychain.CallScope[](0)
             })
         ) {
@@ -402,7 +402,7 @@ contract AccountKeychainInvariantTest is InvariantBaseTest {
                 expiry: uint64(block.timestamp + 1 days),
                 enforceLimits: false,
                 limits: new IAccountKeychain.TokenLimit[](0),
-                allowAnyCalls: true,
+                enforceCallRestrictions: false,
                 allowedCalls: new IAccountKeychain.CallScope[](0)
             })
         ) {
@@ -481,7 +481,7 @@ contract AccountKeychainInvariantTest is InvariantBaseTest {
                 expiry: uint64(block.timestamp + 1 days),
                 enforceLimits: false,
                 limits: new IAccountKeychain.TokenLimit[](0),
-                allowAnyCalls: true,
+                enforceCallRestrictions: false,
                 allowedCalls: new IAccountKeychain.CallScope[](0)
             })
         ) {
@@ -515,7 +515,7 @@ contract AccountKeychainInvariantTest is InvariantBaseTest {
                 expiry: uint64(block.timestamp + 2 days),
                 enforceLimits: false,
                 limits: new IAccountKeychain.TokenLimit[](0),
-                allowAnyCalls: true,
+                enforceCallRestrictions: false,
                 allowedCalls: new IAccountKeychain.CallScope[](0)
             })
         ) {
@@ -599,7 +599,7 @@ contract AccountKeychainInvariantTest is InvariantBaseTest {
                 expiry: uint64(block.timestamp + 1 days),
                 enforceLimits: true,
                 limits: limits1,
-                allowAnyCalls: true,
+                enforceCallRestrictions: false,
                 allowedCalls: new IAccountKeychain.CallScope[](0)
             })
         );
@@ -629,7 +629,7 @@ contract AccountKeychainInvariantTest is InvariantBaseTest {
                 expiry: uint64(block.timestamp + 2 days),
                 enforceLimits: true,
                 limits: limits2,
-                allowAnyCalls: true,
+                enforceCallRestrictions: false,
                 allowedCalls: new IAccountKeychain.CallScope[](0)
             })
         );
@@ -722,7 +722,7 @@ contract AccountKeychainInvariantTest is InvariantBaseTest {
                 expiry: expiry,
                 enforceLimits: false,
                 limits: new IAccountKeychain.TokenLimit[](0),
-                allowAnyCalls: true,
+                enforceCallRestrictions: false,
                 allowedCalls: new IAccountKeychain.CallScope[](0)
             })
         ) {
@@ -836,7 +836,7 @@ contract AccountKeychainInvariantTest is InvariantBaseTest {
             expiry: expiry,
             enforceLimits: false,
             limits: new IAccountKeychain.TokenLimit[](0),
-            allowAnyCalls: true,
+            enforceCallRestrictions: false,
             allowedCalls: new IAccountKeychain.CallScope[](0)
         });
 

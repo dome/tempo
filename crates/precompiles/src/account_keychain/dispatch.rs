@@ -63,7 +63,7 @@ impl Precompile for AccountKeychain {
                                     period: 0,
                                 })
                                 .collect(),
-                            allowAnyCalls: true,
+                            enforceCallRestrictions: false,
                             allowedCalls: vec![],
                         },
                     };
@@ -208,7 +208,7 @@ mod tests {
                         amount: U256::from(100),
                         period: 0,
                     }],
-                    allowAnyCalls: true,
+                    enforceCallRestrictions: false,
                     allowedCalls: vec![],
                 },
             }

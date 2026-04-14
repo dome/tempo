@@ -61,9 +61,9 @@ crate::sol! {
             uint64 expiry;
             bool enforceLimits;
             TokenLimit[] limits;
-            /// `true` means the key is unrestricted and `allowedCalls` must be empty.
-            /// `false` means `allowedCalls` defines the full call scope (including deny-all with `[]`).
-            bool allowAnyCalls;
+            /// `true` means `allowedCalls` defines the full call scope (including deny-all with `[]`).
+            /// `false` means the key is unrestricted and `allowedCalls` is ignored.
+            bool enforceCallRestrictions;
             CallScope[] allowedCalls;
         }
 

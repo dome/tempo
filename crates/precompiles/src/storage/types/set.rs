@@ -57,12 +57,17 @@ use crate::{
     },
 };
 
-/// An ordered set that preserves insertion order.
+/// Read-only snapshot of a set stored via [`SetHandler`].
 ///
-/// This is a read-only snapshot of set data. To mutate:
+/// Elements are ordered by their position in the underlying storage array.
+/// This order is **not** guaranteed to match insertion order: `SetHandler::remove`
+/// uses swap-and-pop semantics, so removing a non-tail element moves the last
+/// element into the vacated slot.
+///
+/// To mutate:
 /// 1. Convert to `Vec<T>` with `.into()`
 /// 2. Modify the Vec
-/// 3. Convert back with `Set::from(vec)` (deduplicates)
+/// 3. Convert back with `Set::from(vec)` (deduplicates, preserves first-occurrence order)
 /// 4. Write with `handler.write(set)`
 ///
 /// For single-element mutations, use `SetHandler` methods directly.

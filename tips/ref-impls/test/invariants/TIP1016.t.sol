@@ -5,8 +5,8 @@ import { Test } from "forge-std/Test.sol";
 
 import { ITIP20 } from "../../src/interfaces/ITIP20.sol";
 import { InvariantBase } from "../helpers/InvariantBase.sol";
+import { GasLeftChecker, TIP1016Storage } from "../helpers/TIP1016Helpers.sol";
 import { Counter, InitcodeHelper, SimpleStorage } from "../helpers/TestContracts.sol";
-import { TIP1016Storage, GasLeftChecker } from "../helpers/TIP1016Helpers.sol";
 import { TxBuilder } from "../helpers/TxBuilder.sol";
 
 import { VmExecuteTransaction, VmRlp } from "tempo-std/StdVm.sol";

@@ -4,9 +4,9 @@ pragma solidity >=0.8.13 <0.9.0;
 import { Test } from "forge-std/Test.sol";
 
 import { ITIP20 } from "../../src/interfaces/ITIP20.sol";
+import { GasTestStorage } from "../helpers/GasTestStorage.sol";
 import { InvariantBase } from "../helpers/InvariantBase.sol";
 import { Counter, InitcodeHelper, SimpleStorage } from "../helpers/TestContracts.sol";
-import { GasTestStorage } from "../helpers/GasTestStorage.sol";
 import { TxBuilder } from "../helpers/TxBuilder.sol";
 
 import { VmExecuteTransaction, VmRlp } from "tempo-std/StdVm.sol";

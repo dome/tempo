@@ -53,7 +53,7 @@ use reth_ethereum_cli::Cli;
 use reth_network_peers::pk2id;
 use reth_node_builder::{NodeHandle, WithLaunchContext};
 use reth_rpc_server_types::DefaultRpcModuleValidator;
-use std::{sync::Arc, thread};
+use std::{sync::Arc, thread, time::Duration};
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 use tempo_commonware_node::{feed as consensus_feed, run_consensus_stack};
 use tempo_consensus::TempoConsensus;
@@ -81,6 +81,19 @@ struct TempoArgs {
     /// If provided without a value, defaults to the RPC URL for the selected chain.
     #[arg(long, value_name = "URL", default_missing_value = "auto", num_args(0..=1), env = "TEMPO_FOLLOW")]
     pub follow: Option<String>,
+
+    /// HTTP endpoint that returns a JSON object mapping chain IDs to bootnode lists.
+    ///
+    /// The endpoint must return JSON in the format:
+    /// `{ "<chain_id>": ["enode://...", ...] }`
+    ///
+    /// Bootnodes for the current chain are added as peer hints to the discovery service.
+    #[arg(
+        long = "tempo.bootnodes-endpoint",
+        value_name = "URL",
+        env = "TEMPO_BOOTNODES_ENDPOINT"
+    )]
+    pub bootnodes_endpoint: Option<String>,
 
     #[command(flatten)]
     pub telemetry: defaults::TelemetryArgs,
@@ -185,6 +198,42 @@ fn print_extensions_footer() {
             println!("  {b}{name:<22}{r} {desc}");
         }
     }
+}
+
+/// Fetches bootnodes from the given endpoint for the specified chain ID.
+///
+/// The endpoint must return JSON in the format:
+/// `{ "<chain_id>": ["enode://...", ...] }`
+async fn fetch_bootnodes(
+    endpoint: &str,
+    chain_id: u64,
+) -> eyre::Result<Vec<reth_network_peers::TrustedPeer>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .wrap_err("failed to build HTTP client")?;
+
+    let resp: std::collections::HashMap<String, Vec<String>> = client
+        .get(endpoint)
+        .send()
+        .await
+        .wrap_err("request failed")?
+        .error_for_status()
+        .wrap_err("endpoint returned error status")?
+        .json()
+        .await
+        .wrap_err("failed to parse response as JSON")?;
+
+    let key = chain_id.to_string();
+    let enodes = match resp.get(&key) {
+        Some(enodes) => enodes,
+        None => return Ok(Vec::new()),
+    };
+
+    Ok(reth_network_peers::parse_nodes(enodes)
+        .into_iter()
+        .map(Into::into)
+        .collect())
 }
 
 fn main() -> eyre::Result<()> {
@@ -470,6 +519,32 @@ fn main() -> eyre::Result<()> {
             None
         };
 
+        // Fetch bootnodes from the endpoint before launching the node so they
+        // can be injected into the discovery config as boot nodes.
+        let endpoint_bootnodes = if let Some(endpoint) = &args.bootnodes_endpoint {
+            let chain_id = builder.config().chain.chain().id();
+            match fetch_bootnodes(endpoint, chain_id).await {
+                Ok(nodes) if nodes.is_empty() => {
+                    Vec::new()
+                }
+                Ok(nodes) => {
+                    info!(
+                        chain_id,
+                        count = nodes.len(),
+                        endpoint,
+                        "fetched bootnodes from endpoint"
+                    );
+                    nodes
+                }
+                Err(err) => {
+                    warn!(%err, endpoint, "failed to fetch bootnodes from endpoint");
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
         let NodeHandle {
             node,
             node_exit_future,
@@ -482,6 +557,30 @@ fn main() -> eyre::Result<()> {
                     .network
                     .discovery
                     .enable_discv5_discovery = true;
+
+                // Append bootnodes fetched from the endpoint to the discovery boot
+                // nodes. When `--bootnodes` was not explicitly provided we
+                // initialise from the chainspec defaults so we don't replace them.
+                if !endpoint_bootnodes.is_empty() {
+                    if builder.config().network.bootnodes.is_none() {
+                        let chainspec_bootnodes: Vec<reth_network_peers::TrustedPeer> = builder
+                            .config()
+                            .chain
+                            .bootnodes()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(Into::into)
+                            .collect();
+                        builder.config_mut().network.bootnodes = Some(chainspec_bootnodes);
+                    }
+                    builder
+                        .config_mut()
+                        .network
+                        .bootnodes
+                        .as_mut()
+                        .expect("set above")
+                        .extend(endpoint_bootnodes);
+                }
 
                 // Resolve the follow URL:
                 // --follow or --follow=auto -> use chain-specific default

@@ -82,6 +82,7 @@ reth-trie.workspace = true
 reth-trie-db.workspace = true
 clap.workspace = true
 eyre.workspace = true
+reqwest.workspace = true
 jiff.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

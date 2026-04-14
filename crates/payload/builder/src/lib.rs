@@ -993,7 +993,7 @@ mod tests {
             },
         };
         let sealed = Arc::new(SealedBlock::seal_slow(block));
-        let eth = EthBuiltPayload::new(sealed, U256::ZERO, None);
+        let eth = EthBuiltPayload::new(sealed, U256::ZERO, None, None);
         TempoBuiltPayload::new(eth, None)
     }
 

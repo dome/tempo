@@ -50,6 +50,7 @@ use eyre::WrapErr as _;
 use futures::{FutureExt as _, future::FusedFuture as _};
 use reth_ethereum::{chainspec::EthChainSpec as _, cli::Commands, evm::revm::primitives::B256};
 use reth_ethereum_cli::Cli;
+use reth_network_api::Peers;
 use reth_network_peers::pk2id;
 use reth_node_builder::{NodeHandle, WithLaunchContext};
 use reth_rpc_server_types::DefaultRpcModuleValidator;
@@ -588,6 +589,12 @@ fn main() -> eyre::Result<()> {
                             if let Some(discv4) = network.discv4() {
                                 discv4.add_node(*node);
                             }
+                            network.add_peer_kind(
+                                node.id,
+                                None,
+                                node.tcp_addr(),
+                                Some(node.udp_addr()),
+                            );
                         }
                         if let Some(discv5) = network.discv5() {
                             let enr_requests = nodes.iter().filter_map(|node| {

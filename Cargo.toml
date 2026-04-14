@@ -130,6 +130,7 @@ reth-codecs = { version = "0.2.0", default-features = false }
 reth-consensus = { git = "https://github.com/paradigmxyz/reth", rev = "13217d5" }
 reth-consensus-common = { git = "https://github.com/paradigmxyz/reth", rev = "13217d5" }
 reth-db = { git = "https://github.com/paradigmxyz/reth", rev = "13217d5" }
+reth-discv5 = { git = "https://github.com/paradigmxyz/reth", rev = "13217d5" }
 reth-db-api = { git = "https://github.com/paradigmxyz/reth", rev = "13217d5" }
 reth-e2e-test-utils = { git = "https://github.com/paradigmxyz/reth", rev = "13217d5" }
 reth-engine-local = { git = "https://github.com/paradigmxyz/reth", rev = "13217d5" }

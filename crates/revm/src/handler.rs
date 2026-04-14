@@ -1855,9 +1855,11 @@ pub fn calculate_aa_batch_intrinsic_gas<'a>(
         // TIP-1000: Storage pricing updates for launch
         // EIP-7702 authorisation list entries with `auth_list.nonce == 0` require an additional 250,000 gas.
         if auth.nonce == 0 {
-            gas.initial_total_gas += gas_params.tx_tip1000_auth_account_creation_cost();
+            let auth_state_gas = gas_params.tx_tip1000_auth_account_creation_state_gas();
+            gas.initial_total_gas +=
+                gas_params.tx_tip1000_auth_account_creation_cost() + auth_state_gas;
             // TIP-1016: Track state gas for auth account creation
-            gas.initial_state_gas += gas_params.tx_tip1000_auth_account_creation_state_gas();
+            gas.initial_state_gas += auth_state_gas;
         }
     }
 
@@ -1876,15 +1878,16 @@ pub fn calculate_aa_batch_intrinsic_gas<'a>(
 
         // 4b. CREATE-specific costs
         if call.to.is_create() {
+            let create_state_gas =
+                gas_params.new_account_state_gas() + gas_params.create_state_gas();
             // CREATE costs 500,000 gas in TIP-1000 (T1), 32,000 before
-            gas.initial_total_gas += gas_params.create_cost();
+            gas.initial_total_gas += gas_params.create_cost() + create_state_gas;
 
             // EIP-3860: Initcode analysis gas using revm helper
             gas.initial_total_gas += gas_params.tx_initcode_cost(call.input.len());
 
             // TIP-1016: Track predictable state gas for CREATE calls
-            gas.initial_state_gas +=
-                gas_params.new_account_state_gas() + gas_params.create_state_gas();
+            gas.initial_state_gas += create_state_gas;
         }
 
         // Note: Transaction value is not allowed in AA transactions as there is no balances in accounts yet.
@@ -5298,6 +5301,93 @@ mod tests {
         assert_eq!(
             init_gas.initial_state_gas, 0,
             "T1 standard tx with nonce==0 must NOT track state gas"
+        );
+    }
+
+    /// TIP-1016: `initial_total_gas >= initial_state_gas` invariant must hold for
+    /// AA CREATE calls. Without this, `execute_multi_call_with()` computes
+    /// `regular_initial_gas = initial_total_gas.saturating_sub(initial_state_gas)` as 0,
+    /// giving the transaction its full gas_limit for free.
+    #[test]
+    fn test_state_gas_aa_create_total_gas_includes_state_gas() {
+        let gas_params = tempo_gas_params(TempoHardfork::T4);
+        let initcode = Bytes::from(vec![0x60, 0x80]);
+
+        let call = Call {
+            to: TxKind::Create,
+            value: U256::ZERO,
+            input: initcode,
+        };
+
+        let aa_env = TempoBatchCallEnv {
+            signature: TempoSignature::Primitive(PrimitiveSignature::Secp256k1(
+                alloy_primitives::Signature::test_signature(),
+            )),
+            aa_calls: vec![call],
+            key_authorization: None,
+            signature_hash: B256::ZERO,
+            ..Default::default()
+        };
+
+        let gas = calculate_aa_batch_intrinsic_gas(
+            &aa_env,
+            &gas_params,
+            None::<std::iter::Empty<&AccessListItem>>,
+            TempoHardfork::T4,
+        )
+        .unwrap();
+
+        assert!(
+            gas.initial_total_gas >= gas.initial_state_gas,
+            "invariant violated: initial_total_gas ({}) < initial_state_gas ({})",
+            gas.initial_total_gas,
+            gas.initial_state_gas,
+        );
+    }
+
+    /// TIP-1016: `initial_total_gas >= initial_state_gas` invariant must hold for
+    /// AA auth list entries with nonce==0.
+    #[test]
+    fn test_state_gas_aa_auth_nonce_zero_total_gas_includes_state_gas() {
+        let gas_params = tempo_gas_params(TempoHardfork::T4);
+
+        let aa_env = TempoBatchCallEnv {
+            signature: TempoSignature::Primitive(PrimitiveSignature::Secp256k1(
+                alloy_primitives::Signature::test_signature(),
+            )),
+            aa_calls: vec![Call {
+                to: TxKind::Call(Address::random()),
+                value: U256::ZERO,
+                input: Bytes::from(vec![1, 2, 3]),
+            }],
+            tempo_authorization_list: vec![RecoveredTempoAuthorization::new(
+                TempoSignedAuthorization::new_unchecked(
+                    alloy_eips::eip7702::Authorization {
+                        chain_id: U256::from(1),
+                        address: Address::random(),
+                        nonce: 0,
+                    },
+                    TempoSignature::Primitive(PrimitiveSignature::Secp256k1(
+                        alloy_primitives::Signature::test_signature(),
+                    )),
+                ),
+            )],
+            ..Default::default()
+        };
+
+        let gas = calculate_aa_batch_intrinsic_gas(
+            &aa_env,
+            &gas_params,
+            None::<std::iter::Empty<&AccessListItem>>,
+            TempoHardfork::T4,
+        )
+        .unwrap();
+
+        assert!(
+            gas.initial_total_gas >= gas.initial_state_gas,
+            "invariant violated: initial_total_gas ({}) < initial_state_gas ({})",
+            gas.initial_total_gas,
+            gas.initial_state_gas,
         );
     }
 }

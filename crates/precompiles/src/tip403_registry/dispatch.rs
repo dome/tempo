@@ -1,7 +1,7 @@
 //! ABI dispatch for the [`TIP403Registry`] precompile.
 
 use crate::{
-    Precompile, SelectorSchedule, dispatch_call, input_cost, mutate, mutate_void,
+    Precompile, SelectorSchedule, charge_input_cost, dispatch_call, mutate, mutate_void,
     tip403_registry::{AuthRole, TIP403Registry},
     view,
 };
@@ -9,7 +9,7 @@ use alloy::{
     primitives::Address,
     sol_types::{SolCall, SolInterface},
 };
-use revm::precompile::{PrecompileHalt, PrecompileOutput, PrecompileResult};
+use revm::precompile::PrecompileResult;
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_contracts::precompiles::ITIP403Registry::{self, ITIP403RegistryCalls};
 
@@ -23,8 +23,8 @@ const T2_ADDED: &[[u8; 4]] = &[
 
 impl Precompile for TIP403Registry {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
-        if self.storage.deduct_gas(input_cost(calldata.len())).is_err() {
-            return Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, 0));
+        if let Some(err) = charge_input_cost(&mut self.storage, calldata) {
+            return err;
         }
 
         dispatch_call(

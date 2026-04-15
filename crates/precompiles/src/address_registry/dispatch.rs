@@ -3,16 +3,16 @@ use crate::{
     address_registry::{
         AddressRegistry, MasterId, UserTag, decode_virtual_address, is_virtual_address,
     },
-    dispatch_call, input_cost, mutate, view,
+    charge_input_cost, dispatch_call, mutate, view,
 };
 use alloy::{primitives::Address, sol_types::SolInterface};
-use revm::precompile::{PrecompileHalt, PrecompileOutput, PrecompileResult};
+use revm::precompile::PrecompileResult;
 use tempo_contracts::precompiles::IAddressRegistry::IAddressRegistryCalls;
 
 impl Precompile for AddressRegistry {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
-        if self.storage.deduct_gas(input_cost(calldata.len())).is_err() {
-            return Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, 0));
+        if let Some(err) = charge_input_cost(&mut self.storage, calldata) {
+            return err;
         }
 
         dispatch_call(

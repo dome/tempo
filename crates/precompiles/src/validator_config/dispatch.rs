@@ -2,14 +2,14 @@
 
 use super::ValidatorConfig;
 use crate::{
-    Precompile, SelectorSchedule, dispatch_call, error::TempoPrecompileError, input_cost,
+    Precompile, SelectorSchedule, charge_input_cost, dispatch_call, error::TempoPrecompileError,
     mutate_void, view,
 };
 use alloy::{
     primitives::Address,
     sol_types::{SolCall, SolInterface},
 };
-use revm::precompile::{PrecompileHalt, PrecompileOutput, PrecompileResult};
+use revm::precompile::PrecompileResult;
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_contracts::precompiles::IValidatorConfig::{self, IValidatorConfigCalls};
 
@@ -17,8 +17,8 @@ const T1_ADDED: &[[u8; 4]] = &[IValidatorConfig::changeValidatorStatusByIndexCal
 
 impl Precompile for ValidatorConfig {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
-        if self.storage.deduct_gas(input_cost(calldata.len())).is_err() {
-            return Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, 0));
+        if let Some(err) = charge_input_cost(&mut self.storage, calldata) {
+            return err;
         }
 
         dispatch_call(

@@ -1,15 +1,15 @@
 //! ABI dispatch for the [`ValidatorConfigV2`] precompile (T2+).
 
 use super::*;
-use crate::{Precompile, dispatch_call, input_cost, mutate, mutate_void, view};
+use crate::{Precompile, charge_input_cost, dispatch_call, mutate, mutate_void, view};
 use alloy::{primitives::Address, sol_types::SolInterface};
-use revm::precompile::{PrecompileHalt, PrecompileOutput, PrecompileResult};
+use revm::precompile::{PrecompileOutput, PrecompileResult};
 use tempo_contracts::precompiles::IValidatorConfigV2::IValidatorConfigV2Calls;
 
 impl Precompile for ValidatorConfigV2 {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
-        if self.storage.deduct_gas(input_cost(calldata.len())).is_err() {
-            return Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, 0));
+        if let Some(err) = charge_input_cost(&mut self.storage, calldata) {
+            return err;
         }
 
         // Pre-T2: behave like an empty contract (call succeeds, no execution)

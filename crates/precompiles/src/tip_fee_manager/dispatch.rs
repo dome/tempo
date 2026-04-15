@@ -1,7 +1,7 @@
 //! ABI dispatch for the [`TipFeeManager`] precompile.
 
 use crate::{
-    Precompile, dispatch_call, input_cost, metadata, mutate, mutate_void,
+    Precompile, charge_input_cost, dispatch_call, metadata, mutate, mutate_void,
     storage::Handler,
     tip_fee_manager::{
         ITIPFeeAMM, TipFeeManager,
@@ -10,7 +10,7 @@ use crate::{
     view,
 };
 use alloy::{primitives::Address, sol_types::SolInterface};
-use revm::precompile::{PrecompileHalt, PrecompileOutput, PrecompileResult};
+use revm::precompile::PrecompileResult;
 use tempo_contracts::precompiles::{IFeeManager::IFeeManagerCalls, ITIPFeeAMM::ITIPFeeAMMCalls};
 
 /// Unified calldata discriminant for both `IFeeManager` and `ITIPFeeAMM` selectors.
@@ -34,8 +34,8 @@ impl TipFeeManagerCall {
 
 impl Precompile for TipFeeManager {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
-        if self.storage.deduct_gas(input_cost(calldata.len())).is_err() {
-            return Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, 0));
+        if let Some(err) = charge_input_cost(&mut self.storage, calldata) {
+            return err;
         }
 
         dispatch_call(

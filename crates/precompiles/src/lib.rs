@@ -51,7 +51,9 @@ use alloy_evm::precompiles::{DynPrecompile, PrecompilesMap};
 use revm::{
     context::CfgEnv,
     handler::EthPrecompiles,
-    precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult},
+    precompile::{
+        PrecompileError, PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult,
+    },
     primitives::hardfork::SpecId,
 };
 
@@ -307,6 +309,18 @@ fn mutate_void<T: SolCall>(
         ));
     }
     f(sender, call).into_precompile_result(0, |()| Bytes::new())
+}
+
+/// Deducts the calldata input cost, returning an OOG halt result if insufficient gas.
+#[inline]
+pub(crate) fn charge_input_cost(
+    storage: &mut StorageCtx,
+    calldata: &[u8],
+) -> Option<PrecompileResult> {
+    if storage.deduct_gas(input_cost(calldata.len())).is_err() {
+        return Some(Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, 0)));
+    }
+    None
 }
 
 /// Fills gas accounting fields on a [`PrecompileOutput`] from the storage context.

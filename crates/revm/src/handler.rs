@@ -1172,7 +1172,7 @@ where
 
             // T4 gates all TIP-1011 fields. Before activation, transaction semantics must stay
             // unchanged, so periodic limits and call scopes are rejected.
-            if !spec.is_t4() {
+            if !spec.is_t3() {
                 if key_auth.has_periodic_limits() {
                     return Err(TempoInvalidTransaction::KeychainValidationFailed {
                         reason: "periodic token limits are not active before T4".to_string(),
@@ -1182,7 +1182,7 @@ where
 
                 if key_auth.has_call_scopes() {
                     return Err(TempoInvalidTransaction::KeychainValidationFailed {
-                        reason: "call scopes are not active before T4".to_string(),
+                        reason: "call scopes are not active before T3".to_string(),
                     }
                     .into());
                 }

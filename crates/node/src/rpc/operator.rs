@@ -54,9 +54,7 @@ where
                     .collect(),
                 network: alloy_rpc_types_admin::PeerNetworkInfo {
                     remote_address: peer.remote_addr,
-                    local_address: peer
-                        .local_addr
-                        .unwrap_or_else(|| self.network.local_addr()),
+                    local_address: peer.local_addr.unwrap_or_else(|| self.network.local_addr()),
                     inbound: peer.direction.is_incoming(),
                     trusted: peer.kind.is_trusted(),
                     static_node: peer.kind.is_static(),

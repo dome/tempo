@@ -235,7 +235,7 @@ mod tests {
         primitives::{Bytes, U256, address},
         sol_types::{SolCall, SolError, SolInterface, SolValue},
     };
-    use revm::precompile::PrecompileError;
+
     use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_contracts::precompiles::{
         IRolesAuth, RolesAuthError, TIP20Error, UnknownFunctionSelector,
@@ -260,13 +260,14 @@ mod tests {
             Ok(())
         })?;
 
-        // Pre-T1 (T0): insufficient calldata returns error
+        // Pre-T1 (T0): insufficient calldata returns halt
         let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T0);
         StorageCtx::enter(&mut storage, || {
             let mut token = TIP20Setup::create("Test", "TST", sender).apply()?;
 
             let result = token.call(&Bytes::from([0x12, 0x34]), sender);
-            assert!(matches!(result, Err(PrecompileError::Fatal(_))));
+            let output = result.expect("expected Ok(halt) for short calldata");
+            assert!(output.is_halt());
 
             Ok(())
         })

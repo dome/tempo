@@ -483,7 +483,8 @@ mod tests {
 
             let short_data = vec![0x12, 0x34];
             let result = registry.call(&short_data, sender);
-            assert!(result.is_err());
+            let output = result.expect("expected Ok(halt) for short calldata");
+            assert!(output.is_halt());
 
             Ok(())
         })

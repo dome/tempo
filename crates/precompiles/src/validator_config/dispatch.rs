@@ -84,7 +84,7 @@ mod tests {
         primitives::{Address, FixedBytes},
         sol_types::{SolCall, SolValue},
     };
-    use revm::precompile::PrecompileError;
+
     use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_contracts::precompiles::{
         IValidatorConfig, IValidatorConfig::IValidatorConfigCalls, ValidatorConfigError,
@@ -118,7 +118,8 @@ mod tests {
             validator_config.initialize(owner)?;
 
             let result = validator_config.call(&[0x12, 0x34], sender);
-            assert!(matches!(result, Err(PrecompileError::Fatal(_))));
+            let output = result.expect("expected Ok(halt) for short calldata");
+            assert!(output.is_halt());
 
             Ok(())
         })

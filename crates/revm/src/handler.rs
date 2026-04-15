@@ -1022,8 +1022,8 @@ where
                 evm.initial_state_gas += cfg.gas_params().new_account_state_gas();
             }
 
-            // do the gas limit check again.
-            if tx.gas_limit() < evm.initial_gas {
+            // do the gas limit check again (include state gas for T4+).
+            if tx.gas_limit() < evm.initial_gas + evm.initial_state_gas {
                 return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
                     gas_limit: tx.gas_limit(),
                     initial_gas: evm.initial_gas,
@@ -1494,7 +1494,7 @@ where
             evm.key_expiry = stored_key_expiry;
             evm.initial_gas += scope_validation_gas;
 
-            if spec.is_t3() && tx.gas_limit() < evm.initial_gas {
+            if spec.is_t3() && tx.gas_limit() < evm.initial_gas + evm.initial_state_gas {
                 return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
                     gas_limit: tx.gas_limit(),
                     initial_gas: evm.initial_gas,

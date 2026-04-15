@@ -538,13 +538,11 @@ where
     fn finish(
         self,
     ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
-        // TIP-1016: block header `gas_used` = cumulative_tx_gas_used - block_state_gas_used.
-        // State gas (storage creation, account creation, code deposit) is charged
-        // to users via receipts but exempted from block capacity accounting.
-        let header_gas_used = self
-            .inner
-            .cumulative_tx_gas_used
-            .saturating_sub(self.inner.block_state_gas_used);
+        // TIP-1016: block header `gas_used` = block_regular_gas_used.
+        // State gas is charged to users (in receipts) but exempted from block
+        // capacity. block_regular_gas_used is accumulated per-tx as
+        // max(total_spent - state_spent, floor) and is independent of refunds.
+        let header_gas_used = self.inner.block_regular_gas_used;
         let (evm, mut result) = self.inner.finish()?;
         result.gas_used = header_gas_used;
         Ok((evm, result))
@@ -1292,11 +1290,12 @@ mod tests {
 
         executor.apply_pre_execution_changes().unwrap();
 
-        // Manually set state to simulate a committed transaction
+        // Manually set state to simulate a committed transaction (no state gas)
         executor.inner.cumulative_tx_gas_used += 21000;
+        executor.inner.block_regular_gas_used += 21000;
 
         let (_, result) = executor.finish().unwrap();
-        // Block header gas_used = cumulative_tx_gas_used - block_state_gas_used
+        // Block header gas_used = block_regular_gas_used
         assert_eq!(result.gas_used, 21000);
     }
 
@@ -1435,12 +1434,10 @@ mod tests {
 
     /// Regression test: when a transaction earns a gas refund (e.g. clearing
     /// storage), `finish()` must return a `gas_used` that matches the last
-    /// receipt's `cumulative_gas_used` (the post-refund / tx_gas_used value).
-    ///
-    /// TIP-1016: `finish()` returns `cumulative_tx_gas_used - block_state_gas_used`
-    /// for the block header. Receipts track `tx_gas_used` (what the user pays).
-    /// The difference `receipts_total - header_gas_used` is the state gas exempted
-    /// from block capacity.
+    /// TIP-1016: block header `gas_used` = `block_regular_gas_used` (accumulated per-tx).
+    /// Receipts track `tx_gas_used` (what the user pays, including state gas).
+    /// The difference between receipts total and header gas_used is the state gas
+    /// exempted from block capacity.
     #[test]
     fn test_finish_exempts_state_gas_from_header() {
         let chainspec = test_chainspec();
@@ -1451,35 +1448,36 @@ mod tests {
 
         executor.apply_pre_execution_changes().unwrap();
 
-        // Simulate: tx_gas_used=50000, state_gas=10000
-        let tx_gas = 50_000u64;
-        let state_gas = 10_000u64;
-        executor.inner.cumulative_tx_gas_used = tx_gas;
+        // Simulate: tx with total=300k, refund=30k, state=40k
+        // tx_gas_used = max(300k - 30k, floor) = 270k  (receipt gas)
+        // block_regular_gas_used = max(300k - 40k, floor) = 260k  (capacity gas)
+        // block_state_gas_used = 40k
+        let tx_gas_used = 270_000u64;
+        let regular_gas = 260_000u64;
+        let state_gas = 40_000u64;
+
+        executor.inner.cumulative_tx_gas_used = tx_gas_used;
+        executor.inner.block_regular_gas_used = regular_gas;
         executor.inner.block_state_gas_used = state_gas;
 
         executor.inner.receipts.push(TempoReceipt {
             tx_type: TempoTxType::Legacy,
             success: true,
-            cumulative_gas_used: tx_gas,
+            cumulative_gas_used: tx_gas_used,
             logs: vec![],
         });
 
         let (_evm, result) = executor.finish().expect("finish should succeed");
 
-        // Block header gas_used = cumulative_tx_gas_used - block_state_gas_used
+        // Block header gas_used must equal block_regular_gas_used (not cumulative - state)
         assert_eq!(
-            result.gas_used,
-            tx_gas - state_gas,
-            "header gas_used ({}) must equal cumulative_tx_gas_used - block_state_gas_used ({})",
-            result.gas_used,
-            tx_gas - state_gas
+            result.gas_used, regular_gas,
+            "header gas_used ({}) must equal block_regular_gas_used ({})",
+            result.gas_used, regular_gas
         );
 
-        // Receipt tracks total gas including state gas
+        // Receipt tracks total gas (what user pays, including state gas)
         let last_cumulative = result.receipts.last().unwrap().cumulative_gas_used;
-        assert_eq!(last_cumulative, tx_gas);
-
-        // Difference is the exempted state gas
-        assert_eq!(last_cumulative - result.gas_used, state_gas);
+        assert_eq!(last_cumulative, tx_gas_used);
     }
 }

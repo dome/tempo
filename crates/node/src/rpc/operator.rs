@@ -1,8 +1,8 @@
+use alloy_primitives::keccak256;
 use alloy_rpc_types_admin::PeerInfo;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use reth_network_api::{NetworkInfo, Peers};
 use reth_rpc_server_types::ToRpcResult;
-use revm_primitives::keccak256;
 
 /// `operator_` namespace RPC trait.
 ///

@@ -1350,7 +1350,7 @@ async fn test_aa_keychain_revocation_toctou_dos() -> eyre::Result<()> {
     let root_addr = root_signer.address();
 
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-        .wallet(EthereumWallet::new(root_signer.clone()))
+        .wallet(root_signer.clone())
         .connect_http(setup.node.rpc_url());
     let chain_id = provider.get_chain_id().await?;
 
@@ -1645,7 +1645,7 @@ async fn test_aa_keychain_spending_limit_toctou_dos() -> eyre::Result<()> {
     let root_addr = root_signer.address();
 
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-        .wallet(EthereumWallet::new(root_signer.clone()))
+        .wallet(root_signer.clone())
         .connect_http(setup.node.rpc_url());
     let chain_id = provider.get_chain_id().await?;
 
@@ -2183,7 +2183,7 @@ async fn test_aa_keychain_v2_signature() -> eyre::Result<()> {
     let root_signer = MnemonicBuilder::from_phrase(TEST_MNEMONIC).build()?;
     let root_addr = root_signer.address();
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-        .wallet(EthereumWallet::new(root_signer.clone()))
+        .wallet(root_signer.clone())
         .connect_http(setup.node.rpc_url());
     let chain_id = provider.get_chain_id().await?;
 

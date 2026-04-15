@@ -11990,7 +11990,6 @@ dependencies = [
  "reth-node-builder",
  "reth-node-core",
  "reth-node-metrics",
- "reth-payload-primitives",
  "reth-rpc-builder",
  "serde_json",
  "tempfile",

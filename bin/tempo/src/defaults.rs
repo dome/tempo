@@ -252,6 +252,7 @@ pub(crate) fn init_defaults() {
     init_download_urls();
     init_payload_builder_defaults();
     init_txpool_defaults();
+    init_storage_defaults();
     init_engine_defaults();
     init_otlp_defaults();
     init_network_defaults();

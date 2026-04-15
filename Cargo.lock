@@ -12288,7 +12288,6 @@ dependencies = [
  "eyre",
  "p256",
  "proptest",
- "reth-evm",
  "reth-rpc-eth-types",
  "reth-storage-api",
  "revm",

@@ -6,8 +6,8 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use alloy_evm::{EvmError, EvmInternals};
 use alloy_primitives::{Address, TxKind, U256};
-use reth_evm::{EvmError, EvmInternals};
 use revm::{
     Database,
     context::{

@@ -25,7 +25,15 @@ jobs:
           from pathlib import Path
           import re
 
-          targets = {"tempo-alloy", "tempo-primitives", "tempo-contracts"}
+          targets = {
+              "tempo-alloy",
+              "tempo-primitives",
+              "tempo-contracts",
+              "tempo-chainspec",
+              "tempo-precompiles-macros",
+              "tempo-precompiles",
+              "tempo-revm",
+          }
 
           for path in Path(".changelog").glob("*.md"):
               text = path.read_text(encoding="utf-8")
@@ -49,7 +57,7 @@ jobs:
                       kept.append(line if line.endswith("\n") else f"{line}\n")
 
               if not kept:
-                  print(f"Removing {path} (does not target SDK crates)")
+                  print(f"Removing {path} (does not target published crates)")
                   path.unlink()
                   continue
 

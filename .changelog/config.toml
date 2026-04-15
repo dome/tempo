@@ -8,7 +8,6 @@ dependent_bump = "patch"
 ignore = [
     "tempo",
     "tempo-bench",
-    "tempo-chainspec",
     "tempo-commonware-node",
     "tempo-commonware-node-config",
     "tempo-consensus",
@@ -21,9 +20,6 @@ ignore = [
     "tempo-node",
     "tempo-payload-builder",
     "tempo-payload-types",
-    "tempo-precompiles",
-    "tempo-precompiles-macros",
-    "tempo-revm",
     "tempo-sidecar",
     "tempo-telemetry-util",
     "tempo-transaction-pool",
@@ -36,4 +32,17 @@ format = "per-crate"
 
 # The published SDK crates release together and share one version.
 [[fixed]]
-members = ["tempo-contracts", "tempo-primitives", "tempo-alloy"]
+members = [
+    "tempo-contracts",
+    "tempo-primitives",
+    "tempo-alloy"
+]
+
+# The published revm stack releases together and shares one version.
+[[fixed]]
+members = [
+    "tempo-chainspec",
+    "tempo-precompiles-macros",
+    "tempo-precompiles",
+    "tempo-revm",
+]

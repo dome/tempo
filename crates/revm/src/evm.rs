@@ -207,7 +207,7 @@ where
 mod tests {
     use crate::gas_params::tempo_gas_params;
     use alloy_eips::eip7702::Authorization;
-    use alloy_evm::FromRecoveredTx;
+    use alloy_evm::{EvmInternals, FromRecoveredTx};
     use alloy_primitives::{Address, Bytes, TxKind, U256, bytes};
     use alloy_sol_types::SolCall;
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -215,7 +215,6 @@ mod tests {
         ecdsa::{SigningKey, signature::hazmat::PrehashSigner},
         elliptic_curve::rand_core::OsRng,
     };
-    use reth_evm::EvmInternals;
     use revm::{
         Context, DatabaseRef, ExecuteCommitEvm, ExecuteEvm, InspectEvm, MainContext,
         bytecode::opcode,

@@ -24,6 +24,11 @@ def _depth_delta(line):
     return (s.count('{') - s.count('}'), s.count('[') - s.count(']'))
 
 
+def _parse_feature_entries(text):
+    """Return quoted feature entries from a TOML array snippet."""
+    return re.findall(r'"([^"]+)"', text, re.S)
+
+
 def strip_dep_lines(text, should_strip, removed=None):
     """Remove dependency entries (single- or multi-line) where should_strip(name) is True.
 
@@ -174,12 +179,13 @@ def parse_workspace_package(ws_toml_path):
 def parse_workspace_deps(ws_toml_path):
     """Parse [workspace.dependencies] into structured data.
 
-    Returns (ws_deps, ws_no_default, ws_path_deps, ws_pkg_version, ws_git_deps) where:
+    Returns (ws_deps, ws_no_default, ws_path_deps, ws_pkg_version, ws_git_deps, ws_dep_meta) where:
     - ws_deps: {name: version} for all deps with a version
     - ws_no_default: set of dep names with default-features = false
     - ws_path_deps: set of dep names that use path = "..."
     - ws_pkg_version: the workspace package version string
     - ws_git_deps: {name: {"git": url, ...}} for deps using git sources
+    - ws_dep_meta: {name: {"features": [...], "package": str|None, "optional": bool}}
     """
     ws_text = Path(ws_toml_path).read_text(encoding='utf-8')
 
@@ -197,6 +203,7 @@ def parse_workspace_deps(ws_toml_path):
     ws_no_default = set()
     ws_path_deps = set()
     ws_git_deps = {}
+    ws_dep_meta = {}
 
     # Match inline table deps: name = { ... } (possibly multi-line)
     # Use depth-aware extraction
@@ -234,6 +241,7 @@ def parse_workspace_deps(ws_toml_path):
         str_m = re.match(r'^"([^"]+)"', rest)
         if str_m:
             ws_deps[name] = str_m.group(1)
+            ws_dep_meta[name] = {}
             i += 1
             continue
 
@@ -246,6 +254,17 @@ def parse_workspace_deps(ws_toml_path):
                 body += '\n' + lines[i]
                 d, _ = _depth_delta(lines[i])
                 bd += d
+
+            meta = {}
+            features_match = re.search(r'features\s*=\s*\[[^\]]*\]', body, re.S)
+            if features_match:
+                meta['features'] = _parse_feature_entries(features_match.group(0))
+            package_match = re.search(r'package\s*=\s*"([^"]+)"', body)
+            if package_match:
+                meta['package'] = package_match.group(1)
+            if 'optional = true' in body:
+                meta['optional'] = True
+            ws_dep_meta[name] = meta
 
             # Extract version from body (version can appear anywhere)
             ver_m = re.search(r'version\s*=\s*"([^"]+)"', body)
@@ -282,7 +301,7 @@ def parse_workspace_deps(ws_toml_path):
 
         i += 1
 
-    return ws_deps, ws_no_default, ws_path_deps, ws_pkg_version, ws_git_deps
+    return ws_deps, ws_no_default, ws_path_deps, ws_pkg_version, ws_git_deps, ws_dep_meta
 
 
 # ── dot-notation dep matching ─────────────────────────────────────────────────
@@ -359,7 +378,7 @@ def main():
         # Remove internal non-publishable deps (path-only workspace crates, except
         # the crates we're publishing: tempo-contracts and tempo-primitives)
         ws_toml_path = sys.argv[3]
-        _, _, ws_path_deps, _, _ = parse_workspace_deps(ws_toml_path)
+        _, _, ws_path_deps, _, _, _ = parse_workspace_deps(ws_toml_path)
         publish_keep = {'tempo-contracts', 'tempo-primitives', 'tempo-alloy'}
         internal_deps = ws_path_deps - publish_keep
         text = strip_dep_lines(text, lambda n: n in internal_deps)
@@ -371,9 +390,63 @@ def main():
         text = re.sub(r', "rpc"', '', text)
         text = re.sub(r'"rpc", ', '', text)
 
+    elif action == "sanitize_chainspec":
+        removed = set()
+
+        text = strip_dep_lines(
+            text,
+            lambda n: n in (
+                'reth-cli',
+                'reth-chainspec',
+                'reth-network-peers',
+                'eyre',
+                'alloy-genesis',
+                'alloy-primitives',
+                'once_cell',
+                'serde_json',
+                'tempo-primitives',
+            ),
+            removed,
+        )
+        text = strip_feature_blocks(text, ['reth', 'cli'])
+        text = strip_orphaned_feature_entries(text, removed)
+        text = strip_feature_array_entries(text, {
+            'reth',
+            'cli',
+            'tempo-primitives/reth',
+            'tempo-primitives/reth-codec',
+        })
+
+    elif action == "sanitize_precompiles":
+        text = strip_dep_lines(text, lambda n: n in ('tempo-evm', 'rand_08'))
+
+    elif action == "sanitize_revm":
+        removed = set()
+
+        text = strip_dep_lines(
+            text,
+            lambda n: n in ('reth-storage-api', 'reth-rpc-eth-types', 'tempo-evm'),
+            removed,
+        )
+        text = strip_feature_blocks(text, ['reth', 'rpc'])
+        text = strip_orphaned_feature_entries(text, removed)
+        text = strip_feature_array_entries(text, {'reth', 'rpc'})
+
     elif action == "resolve_deps":
         ws_toml_path = sys.argv[3]
-        ws_deps, ws_no_default, _, _, _ = parse_workspace_deps(ws_toml_path)
+        ws_deps, ws_no_default, _, _, _, ws_dep_meta = parse_workspace_deps(ws_toml_path)
+
+        def merged_features(name, body):
+            values = []
+            for entry in ws_dep_meta.get(name, {}).get('features', []):
+                if entry not in values:
+                    values.append(entry)
+            local_match = re.search(r'features\s*=\s*\[[^\]]*\]', body, re.S)
+            if local_match:
+                for entry in _parse_feature_entries(local_match.group(0)):
+                    if entry not in values:
+                        values.append(entry)
+            return values
 
         def resolve_dep_line(line, name, body):
             """Resolve a single workspace dep to a concrete version."""
@@ -390,15 +463,17 @@ def main():
             # Preserve default-features = false from either workspace or local spec
             if name in ws_no_default or 'default-features = false' in body:
                 parts.append('default-features = false')
-            features_match = re.search(r'features\s*=\s*\[[^\]]*\]', body)
-            if features_match:
-                parts.append(features_match.group(0))
-            if 'optional = true' in body:
+            features = merged_features(name, body)
+            if features:
+                rendered = ', '.join(f'"{entry}"' for entry in features)
+                parts.append(f'features = [{rendered}]')
+            if 'optional = true' in body or ws_dep_meta.get(name, {}).get('optional'):
                 parts.append('optional = true')
-            if 'package = ' in body:
-                pkg_match = re.search(r'package\s*=\s*"[^"]*"', body)
-                if pkg_match:
-                    parts.append(pkg_match.group(0))
+            pkg_match = re.search(r'package\s*=\s*"[^"]*"', body)
+            if pkg_match:
+                parts.append(pkg_match.group(0))
+            elif 'package' in ws_dep_meta.get(name, {}):
+                parts.append(f'package = "{ws_dep_meta[name]["package"]}"')
             return f'{name} = {{ {", ".join(parts)} }}'
 
         # Resolve inline table deps: name = { workspace = true, ... }
@@ -444,6 +519,14 @@ def main():
                 parts = [f'version = "{version}"']
                 if dot_name in ws_no_default:
                     parts.append('default-features = false')
+                features = ws_dep_meta.get(dot_name, {}).get('features', [])
+                if features:
+                    rendered = ', '.join(f'"{entry}"' for entry in features)
+                    parts.append(f'features = [{rendered}]')
+                if ws_dep_meta.get(dot_name, {}).get('optional'):
+                    parts.append('optional = true')
+                if 'package' in ws_dep_meta.get(dot_name, {}):
+                    parts.append(f'package = "{ws_dep_meta[dot_name]["package"]}"')
                 result.append(f'{dot_name} = {{ {", ".join(parts)} }}')
                 i += 1
                 continue
@@ -462,7 +545,7 @@ def main():
         out_path = sys.argv[3]
         publish_crates = set(sys.argv[4].split(',')) if len(sys.argv) > 4 else set()
 
-        ws_deps, _, ws_path_deps, _, _ = parse_workspace_deps(ws_toml_path)
+        ws_deps, _, ws_path_deps, _, _, _ = parse_workspace_deps(ws_toml_path)
 
         # Read the [workspace.dependencies] section text
         ws_text = Path(ws_toml_path).read_text(encoding='utf-8')

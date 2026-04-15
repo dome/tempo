@@ -1,5 +1,6 @@
 //! Tempo revm specific implementations.
 
+#![allow(unexpected_cfgs)]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 

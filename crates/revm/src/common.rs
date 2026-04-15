@@ -300,7 +300,7 @@ impl<T: JournalTr> TempoStateAccess<((), ())> for T {
 
 #[cfg(feature = "reth")]
 impl<T: reth_storage_api::StateProvider> TempoStateAccess<((), (), ())> for T {
-    type Error = reth_evm::execute::ProviderError;
+    type Error = reth_storage_api::errors::provider::ProviderError;
 
     fn basic(&mut self, address: Address) -> Result<AccountInfo, Self::Error> {
         self.basic_account(&address)
@@ -447,8 +447,8 @@ where
 mod tests {
     use super::*;
     use crate::{TempoBlockEnv, TempoEvm};
+    use alloy_evm::EvmInternals;
     use alloy_primitives::{address, uint};
-    use reth_evm::EvmInternals;
     use revm::{
         Context, MainContext, context::TxEnv, database::EmptyDB,
         interpreter::instructions::utility::IntoU256,

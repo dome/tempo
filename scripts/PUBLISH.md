@@ -2,12 +2,16 @@
 
 Publishes `tempo-contracts`, `tempo-primitives`, and `tempo-alloy` to crates.io with all reth-specific code and dependencies removed.
 
+The publish entrypoints now live in `scripts/publish/`:
+- `./scripts/publish/alloy.sh` for the SDK crates (`tempo-contracts`, `tempo-primitives`, `tempo-alloy`)
+- `./scripts/publish/revm.sh` for the revm stack (`tempo-chainspec`, `tempo-precompiles-macros`, `tempo-precompiles`, `tempo-revm`)
+
 ## Usage
 
 ```bash
-./scripts/publish-crates.sh                # dry-run (default)
-./scripts/publish-crates.sh --publish      # actually publish
-./scripts/publish-crates.sh --semver-check # dry-run + check for breaking changes
+./scripts/publish/alloy.sh                # dry-run (default)
+./scripts/publish/alloy.sh --publish      # actually publish
+./scripts/publish/alloy.sh --semver-check # dry-run + check for breaking changes
 ```
 
 ## Architecture
@@ -35,7 +39,7 @@ NOTE: the working tree is never modified — all mutations happen on temp copies
 
 ## Scripts
 
-### `publish-crates.sh`
+### `scripts/publish/alloy.sh`
 
 Orchestrator. Copies the 3 crates to a temp directory, runs the sanitization pipeline, verifies compilation, validates invariants, and publishes in dependency order.
 
@@ -91,17 +95,17 @@ Transforms `Cargo.toml` files. Uses depth-aware brace/bracket tracking for robus
 
 **`gen_workspace <ws_toml> <out_toml> [crate1,crate2,...]`** — Generates a temporary workspace `Cargo.toml` for the compilation check step. Dynamically discovers internal path-only crates from the workspace root (no hardcoded list) and filters them out along with `reth-*` deps. Re-adds the specified publish crates as local path overrides.
 
-**`get_version <ws_toml>`** — Prints the workspace package version to stdout. Used by `publish-crates.sh` to avoid duplicating version extraction logic.
+**`get_version <ws_toml>`** — Prints the workspace package version to stdout. Used by `scripts/publish/alloy.sh` to avoid duplicating version extraction logic.
 
 ## CI Workflows
 
 ### `publish-check.yml`
 
-Runs the dry-run pipeline (`publish-crates.sh`) on every PR touching the published crates or scripts. Catches sanitization regressions before merge.
+Runs the dry-run pipeline (`scripts/publish/alloy.sh`) on every PR touching the published crates or scripts. Catches sanitization regressions before merge.
 
 ### `semver-check.yml`
 
-Runs `publish-crates.sh --semver-check` on PRs touching published crates. Sanitizes the crates, then runs `cargo-semver-checks` against the last published version on crates.io. Fails the PR if breaking changes are detected without an appropriate version bump. Skips crates that haven't been published yet.
+Runs `scripts/publish/alloy.sh --semver-check` on PRs touching published crates. Sanitizes the crates, then runs `cargo-semver-checks` against the last published version on crates.io. Fails the PR if breaking changes are detected without an appropriate version bump. Skips crates that haven't been published yet.
 
 ### `changelog.yml`
 
@@ -113,4 +117,4 @@ Triggered on push to `main`. Uses `wevm/changelogs` to create/update a "Version 
 
 ### `publish.yml`
 
-Triggered when the RC PR (from `changelog-release/*` branch) is merged. Runs `publish-crates.sh --publish` to sanitize and publish crates to crates.io via the `CARGO_REGISTRY_TOKEN` secret. The sanitize pipeline is the only publisher — `wevm/changelogs` handles versioning only.
+Triggered when the RC PR (from `changelog-release/*` branch) is merged. Runs `scripts/publish/alloy.sh --publish` to sanitize and publish crates to crates.io via the `CARGO_REGISTRY_TOKEN` secret. The sanitize pipeline is the only publisher — `wevm/changelogs` handles versioning only.

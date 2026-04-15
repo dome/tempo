@@ -276,7 +276,7 @@ def _strip_rust_strings(line):
 def sanitize_alloy(alloy_dir):
     """Strip node-internal code from tempo-alloy source files.
 
-    The reth_compat.rs file is already deleted by the shell script (publish-crates.sh).
+    The reth_compat.rs file is already deleted by the shell script (scripts/publish/alloy.sh).
     This function removes the cfg-gated `mod reth_compat;` declaration from rpc/mod.rs
     so the crate compiles without the file.
     """

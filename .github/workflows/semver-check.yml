@@ -6,10 +6,14 @@ on:
   pull_request:
     branches: [main]
     paths:
+      - crates/chainspec/**
+      - crates/precompiles-macros/**
+      - crates/precompiles/**
+      - crates/revm/**
       - crates/contracts/**
       - crates/primitives/**
       - crates/alloy/**
-      - scripts/publish-crates.sh
+      - scripts/publish/**
       - scripts/sanitize_source.py
       - scripts/sanitize_toml.py
       - Cargo.toml
@@ -45,5 +49,31 @@ jobs:
       - name: Install cargo-semver-checks
         run: cargo binstall -y cargo-semver-checks
 
-      - name: Run semver checks on sanitized crates
-        run: ./scripts/publish-crates.sh --semver-check
+      - name: Detect semver groups in PR
+        if: github.event_name == 'pull_request'
+        id: semver-groups
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 ./scripts/publish/detect_release_groups.py \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --alloy-crates contracts,primitives,alloy \
+            --revm-crates chainspec,precompiles-macros,precompiles,revm \
+            --context pr \
+            --label "Files changed in PR:"
+
+      - name: Validate semver target detection
+        if: github.event_name == 'pull_request' && steps.semver-groups.outputs.alloy != 'true' && steps.semver-groups.outputs.revm != 'true'
+        run: |
+          echo "No published crate groups were detected for semver checks." >&2
+          exit 1
+
+      - name: Run semver checks on sanitized alloy crates
+        if: github.event_name != 'pull_request' || steps.semver-groups.outputs.alloy == 'true'
+        run: ./scripts/publish/alloy.sh --semver-check
+
+      - name: Run semver checks on sanitized revm stack crates
+        if: github.event_name != 'pull_request' || steps.semver-groups.outputs.revm == 'true'
+        run: ./scripts/publish/revm.sh --semver-check

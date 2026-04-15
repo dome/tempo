@@ -4,6 +4,10 @@ on:
   pull_request:
     types: [opened, synchronize]
     paths:
+      - crates/chainspec/**
+      - crates/precompiles-macros/**
+      - crates/precompiles/**
+      - crates/revm/**
       - crates/contracts/**
       - crates/primitives/**
       - crates/alloy/**

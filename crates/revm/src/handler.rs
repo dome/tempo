@@ -543,22 +543,12 @@ where
 
         let gas_limit = evm.ctx().tx().gas_limit();
         let spec = *evm.ctx().cfg().spec();
-        // T4+: reserve the full initial gas (regular + state) upfront.
+        // Reserve the full initial gas (regular + state) upfront.
         // Multi-call bypasses the reservoir, so initial_state_gas must be deducted
         // from the execution budget to prevent subcalls from consuming it.
         // build_result_gas in post_execution adds initial_state_gas to state_gas_spent.
-        //
-        // Pre-T4: deduct only regular initial gas to preserve existing gas semantics.
-        // State gas accounting is not active pre-T4, but initial_state_gas may be
-        // non-zero due to pre_execution synchronization; deducting it would change
-        // live chain gas accounting.
-        let initial_gas_to_deduct = if spec.is_t4() {
-            init_and_floor_gas.initial_total_gas
-        } else {
-            init_and_floor_gas
-                .initial_total_gas
-                .saturating_sub(init_and_floor_gas.initial_state_gas)
-        };
+        // Pre-T4: initial_state_gas is always zero, so this equals regular initial gas.
+        let initial_gas_to_deduct = init_and_floor_gas.initial_total_gas;
         let mut remaining_gas = gas_limit.saturating_sub(initial_gas_to_deduct);
         let mut accumulated_gas_refund = 0i64;
         let mut accumulated_state_gas_spent = 0u64;

@@ -541,7 +541,7 @@ where
         let timestamp = self.evm().block().timestamp.to::<u64>();
         let is_t4 = self.inner.spec.is_t4_active_at_timestamp(timestamp);
 
-        let header_gas_used = self.inner.block_regular_gas_used;
+        let regular_gas_used = self.inner.block_regular_gas_used;
         let (evm, mut result) = self.inner.finish()?;
 
         // TIP-1016 (T4+): block header `gas_used` = block_regular_gas_used.
@@ -553,7 +553,7 @@ where
         // cumulative_tx_gas_used (total_spent - refunded), matching the original
         // block header semantics.
         if is_t4 {
-            result.gas_used = header_gas_used;
+            result.gas_used = regular_gas_used;
         }
 
         Ok((evm, result))

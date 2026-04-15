@@ -20,7 +20,7 @@ use reth_engine_tree::tree::instrumented_state::InstrumentedStateProvider;
 use reth_errors::{ConsensusError, ProviderError};
 use reth_evm::{
     ConfigureEvm, Database, Evm, NextBlockEnvAttributes,
-    block::{BlockExecutionError, BlockExecutor, BlockValidationError},
+    block::{BlockExecutionError, BlockExecutor, BlockValidationError, TxResult},
     execute::{BlockBuilder, BlockBuilderOutcome},
 };
 use reth_execution_types::BlockExecutionOutput;
@@ -312,6 +312,7 @@ where
         );
 
         let mut cumulative_gas_used = 0;
+        let mut cumulative_state_gas_used = 0u64;
         let mut non_payment_gas_used = 0;
         // initial block size usage - size of withdrawals plus 1Kb of overhead for the block header
         let mut block_size_used = attributes
@@ -519,7 +520,13 @@ where
 
             let tx_with_env = pool_tx.transaction.clone().into_with_tx_env();
             let tx_execution_start = Instant::now();
-            let gas_used = match builder.execute_transaction(tx_with_env) {
+            let mut tx_state_gas = 0u64;
+            let gas_used = match builder.execute_transaction_with_result_closure(
+                tx_with_env,
+                |result| {
+                    tx_state_gas = result.result().result.gas().state_gas_spent();
+                },
+            ) {
                 Ok(gas_used) => gas_used,
                 Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
                     error,
@@ -568,6 +575,7 @@ where
                 warn!("no resolved fee token for a pool transaction")
             }
             cumulative_gas_used += gas_used;
+            cumulative_state_gas_used += tx_state_gas;
             if !is_payment {
                 non_payment_gas_used += gas_used;
             }
@@ -612,7 +620,12 @@ where
             let mut subblock_tx_count = 0f64;
 
             for tx in subblock.transactions_recovered() {
-                if let Err(err) = builder.execute_transaction(tx.cloned()) {
+                let mut tx_state_gas = 0u64;
+                if let Err(err) =
+                    builder.execute_transaction_with_result_closure(tx.cloned(), |result| {
+                        tx_state_gas = result.result().result.gas().state_gas_spent();
+                    })
+                {
                     if let BlockExecutionError::Validation(BlockValidationError::InvalidTx {
                         ..
                     }) = &err
@@ -630,6 +643,7 @@ where
                     }
                 }
 
+                cumulative_state_gas_used += tx_state_gas;
                 subblock_tx_count += 1.0;
             }
 
@@ -660,9 +674,13 @@ where
         let _system_txs_span =
             debug_span!(target: "payload_builder", "execute_system_txs").entered();
         for system_tx in system_txs {
+            let mut tx_state_gas = 0u64;
             builder
-                .execute_transaction(system_tx)
+                .execute_transaction_with_result_closure(system_tx, |result| {
+                    tx_state_gas = result.result().result.gas().state_gas_spent();
+                })
                 .map_err(PayloadBuilderError::evm)?;
+            cumulative_state_gas_used += tx_state_gas;
         }
         drop(_system_txs_span);
         let system_txs_execution_elapsed = system_txs_execution_start.elapsed();
@@ -741,6 +759,12 @@ where
         self.metrics.gas_used.record(gas_used as f64);
         self.metrics.gas_used_last.set(gas_used as f64);
         self.metrics
+            .state_gas_used
+            .record(cumulative_state_gas_used as f64);
+        self.metrics
+            .state_gas_used_last
+            .set(cumulative_state_gas_used as f64);
+        self.metrics
             .general_gas_used_last
             .set(non_payment_gas_used as f64);
         self.metrics
@@ -787,6 +811,7 @@ where
             timestamp = sealed_block.timestamp_millis(),
             gas_limit = sealed_block.gas_limit(),
             gas_used,
+            cumulative_state_gas_used,
             extra_data = %sealed_block.extra_data(),
             subblocks_count,
             payment_transactions,

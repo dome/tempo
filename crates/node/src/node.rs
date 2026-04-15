@@ -425,7 +425,6 @@ where
 
         // this store is effectively a noop
         let blob_store = InMemoryBlobStore::default();
-        let evm_config_for_pool = evm_config.clone();
         let validator =
             TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone(), evm_config)
                 .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
@@ -452,7 +451,6 @@ where
         let validator = validator.map(|v| {
             TempoTransactionValidator::new(
                 v,
-                evm_config_for_pool.clone(),
                 self.aa_valid_after_max_secs,
                 self.max_tempo_authorizations,
                 amm_liquidity_cache.clone(),

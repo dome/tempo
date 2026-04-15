@@ -81,8 +81,6 @@ pub struct TempoTransactionValidator<Client> {
     pub(crate) max_tempo_authorizations: usize,
     /// Cache of AMM liquidity for validator tokens.
     pub(crate) amm_liquidity_cache: AmmLiquidityCache,
-    /// EVM configuration, used to derive [`EvmEnv`] on each new tip block.
-    evm_config: TempoEvmConfig,
     /// Cached EVM environment from the latest tip block, updated on each `on_new_head_block`.
     cached_evm_env: RwLock<EvmEnv<TempoHardfork, TempoBlockEnv>>,
 }
@@ -93,7 +91,6 @@ where
 {
     pub fn new(
         inner: EthTransactionValidator<Client, TempoPooledTransaction, TempoEvmConfig>,
-        evm_config: TempoEvmConfig,
         aa_valid_after_max_secs: u64,
         max_tempo_authorizations: usize,
         amm_liquidity_cache: AmmLiquidityCache,
@@ -101,7 +98,8 @@ where
     where
         Client: BlockReaderIdExt<Header = TempoHeader>,
     {
-        let evm_env = evm_config
+        let evm_env = inner
+            .evm_config()
             .evm_env(
                 inner
                     .client()
@@ -116,7 +114,6 @@ where
             aa_valid_after_max_secs,
             max_tempo_authorizations,
             amm_liquidity_cache,
-            evm_config,
             cached_evm_env: parking_lot::RwLock::new(evm_env),
         }
     }
@@ -641,7 +638,8 @@ where
 
         // Cache the EVM environment for the new tip block.
         *self.cached_evm_env.write() = self
-            .evm_config
+            .inner
+            .evm_config()
             .evm_env(new_tip_block.header())
             .expect("invalid block in on_new_head_block");
     }
@@ -768,7 +766,7 @@ mod tests {
         );
 
         let evm_config = TempoEvmConfig::moderato();
-        let inner = EthTransactionValidatorBuilder::new(provider.clone(), evm_config.clone())
+        let inner = EthTransactionValidatorBuilder::new(provider.clone(), evm_config)
             .with_custom_tx_type(TempoTxType::AA as u8)
             .disable_balance_check()
             .build(InMemoryBlobStore::default());
@@ -776,7 +774,6 @@ mod tests {
             AmmLiquidityCache::new(provider).expect("failed to setup AmmLiquidityCache");
         let validator = TempoTransactionValidator::new(
             inner,
-            evm_config,
             DEFAULT_AA_VALID_AFTER_MAX_SECS,
             DEFAULT_MAX_TEMPO_AUTHORIZATIONS,
             amm_cache,

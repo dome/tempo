@@ -1418,7 +1418,6 @@ mod tests {
             AmmLiquidityCache::new(provider.clone()).expect("failed to setup AmmLiquidityCache");
         let validator = TempoTransactionValidator::new(
             inner,
-            TempoEvmConfig::mainnet(),
             crate::validator::DEFAULT_AA_VALID_AFTER_MAX_SECS,
             crate::validator::DEFAULT_MAX_TEMPO_AUTHORIZATIONS,
             amm_cache,

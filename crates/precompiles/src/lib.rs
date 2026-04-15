@@ -342,7 +342,6 @@ fn fill_state_gas(mut output: PrecompileOutput, storage: &StorageCtx) -> Precomp
     output
 }
 
-
 /// A selector schedule at a given hardfork boundary.
 ///
 /// Before the hardfork activates, selectors in `added` are treated as unknown.

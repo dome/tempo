@@ -312,7 +312,6 @@ impl<T> IntoPrecompileResult<T> for Result<T> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

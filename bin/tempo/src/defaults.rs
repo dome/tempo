@@ -207,18 +207,14 @@ fn init_storage_defaults() {
 
 fn init_engine_defaults() {
     DefaultEngineValues::default()
-        // In Commonware consensus, it might happen that a head is notarized (causing it to become
-        // a canonical tip for reth), and immediately nullified (allowing to build a payload on top
-        // of its parent). In that case reth might be asked to build a payload on top of an ancestor
-        // of canonical tip, which is not possible without this flag.
+        // In Commonware consensus, it might happen that a head is notarized (causing it to become a canonical tip for reth),
+        // and immediately nullified (allowing to build a payload on top of its parent). In that case reth might be asked to
+        // build a payload on top an ancestor of canonical tip, which is not possible without this flag.
         //
-        // Another case when this might happen is if we optimistically canonicalize a valid block
-        // that is later getting nullified (reorged). In that case, if we are asked to propose, we
-        // would have to build a payload on top of its parent, which is an ancestor of the canonical
-        // tip as well.
+        // Another case when this might happen is if we optimistically canonicalize a valid block that is later getting nullified (reorged).
+        // In that case, if we are asked to propose, we would have to build a payload on top of its parent, which is an ancestor of the canonical tip as well.
         //
-        // This setting allows reth to process payload attributes even if `headBlockHash` is an
-        // ancestor of the canonical tip.
+        // This setting allows reth to process payload attributes even if `headBlockHash` is an ancestor of the canonical tip.
         .with_always_process_payload_attributes_on_canonical_head(true)
         .try_init()
         .expect("failed to initialize engine defaults");

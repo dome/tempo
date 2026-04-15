@@ -180,6 +180,7 @@ pub static MODERATO: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
         .expect("`./genesis/moderato.json` must be present and deserializable");
     TempoChainSpec::from_genesis(genesis)
         .with_default_follow_url("wss://rpc.moderato.tempo.xyz")
+        .with_default_bootnodes_endpoint("https://testnet.peers.tempo.xyz")
         .into()
 });
 
@@ -188,6 +189,7 @@ pub static PRESTO: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
         .expect("`./genesis/presto.json` must be present and deserializable");
     TempoChainSpec::from_genesis(genesis)
         .with_default_follow_url("wss://rpc.presto.tempo.xyz")
+        .with_default_bootnodes_endpoint("https://mainnet.peers.tempo.xyz")
         .into()
 });
 
@@ -208,12 +210,19 @@ pub struct TempoChainSpec {
     pub info: TempoGenesisInfo,
     /// Default RPC URL for following this chain.
     pub default_follow_url: Option<&'static str>,
+    /// Default HTTP endpoint for fetching bootnodes.
+    pub default_bootnodes_endpoint: Option<&'static str>,
 }
 
 impl TempoChainSpec {
     /// Returns the default RPC URL for following this chain.
     pub fn default_follow_url(&self) -> Option<&'static str> {
         self.default_follow_url
+    }
+
+    /// Returns the default bootnodes endpoint for this chain.
+    pub fn default_bootnodes_endpoint(&self) -> Option<&'static str> {
+        self.default_bootnodes_endpoint
     }
 
     /// Converts the given [`Genesis`] into a [`TempoChainSpec`].
@@ -239,12 +248,19 @@ impl TempoChainSpec {
             }),
             info,
             default_follow_url: None,
+            default_bootnodes_endpoint: None,
         }
     }
 
     /// Sets the default follow URL for this chain spec.
     pub fn with_default_follow_url(mut self, url: &'static str) -> Self {
         self.default_follow_url = Some(url);
+        self
+    }
+
+    /// Sets the default bootnodes endpoint for this chain spec.
+    pub fn with_default_bootnodes_endpoint(mut self, url: &'static str) -> Self {
+        self.default_bootnodes_endpoint = Some(url);
         self
     }
 
@@ -272,6 +288,7 @@ impl From<ChainSpec> for TempoChainSpec {
             }),
             info: TempoGenesisInfo::default(),
             default_follow_url: None,
+            default_bootnodes_endpoint: None,
         }
     }
 }

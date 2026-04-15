@@ -573,7 +573,12 @@ fn main() -> eyre::Result<()> {
 
         // Fetch bootnodes from the endpoint in a background task and inject
         // them into the already-running discovery services.
-        if let Some(endpoint) = args.bootnodes_endpoint.clone() {
+        // Falls back to the chain-specific default endpoint if not explicitly set.
+        let bootnodes_endpoint = args
+            .bootnodes_endpoint
+            .clone()
+            .or_else(|| node.chain_spec().default_bootnodes_endpoint().map(String::from));
+        if let Some(endpoint) = bootnodes_endpoint {
             let network = node.network.clone();
             node.tasks().spawn_task(async move {
                 match fetch_bootnodes(&endpoint, chain_id).await {

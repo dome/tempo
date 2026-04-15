@@ -93,7 +93,7 @@ pub trait Precompile {
     /// `dispatch_call` combined with the `view`, `mutate`, or `mutate_void` helpers.
     ///
     /// Business-logic errors are returned as reverted [`PrecompileOutput`]s with ABI-encoded
-    /// error data, while fatal failures (e.g. out-of-gas) are returned as [`PrecompileError`].
+    /// error data, while fatal failures (e.g. out-of-gas) are returned as [`revm::precompile::PrecompileError`].
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult;
 }
 
@@ -163,12 +163,13 @@ macro_rules! tempo_precompile {
                 return Ok(PrecompileOutput::revert(
                     0,
                     DelegateCallNotAllowed {}.abi_encode().into(),
-                    0,
+                    $input.reservoir,
                 ));
             }
             let mut storage = crate::storage::evm::EvmPrecompileStorageProvider::new(
                 $input.internals,
                 $input.gas,
+                $input.reservoir,
                 spec,
                 $input.is_static,
                 gas_params.clone(),
@@ -262,13 +263,13 @@ impl SignatureVerifier {
 /// Dispatches a parameterless view call, encoding the return via `T`.
 #[inline]
 fn metadata<T: SolCall>(f: impl FnOnce() -> Result<T::Return>) -> PrecompileResult {
-    f().into_precompile_result(0, |ret| T::abi_encode_returns(&ret).into())
+    f().into_precompile_result(0, 0, |ret| T::abi_encode_returns(&ret).into())
 }
 
 /// Dispatches a read-only call with decoded arguments, encoding the return via `T`.
 #[inline]
 fn view<T: SolCall>(call: T, f: impl FnOnce(T) -> Result<T::Return>) -> PrecompileResult {
-    f(call).into_precompile_result(0, |ret| T::abi_encode_returns(&ret).into())
+    f(call).into_precompile_result(0, 0, |ret| T::abi_encode_returns(&ret).into())
 }
 
 /// Dispatches a state-mutating call that returns ABI-encoded data.
@@ -284,10 +285,10 @@ fn mutate<T: SolCall>(
         return Ok(PrecompileOutput::revert(
             0,
             StaticCallNotAllowed {}.abi_encode().into(),
-            0,
+            StorageCtx.reservoir(),
         ));
     }
-    f(sender, call).into_precompile_result(0, |ret| T::abi_encode_returns(&ret).into())
+    f(sender, call).into_precompile_result(0, 0, |ret| T::abi_encode_returns(&ret).into())
 }
 
 /// Dispatches a state-mutating call that returns no data (e.g. `approve`, `transfer`).
@@ -303,10 +304,10 @@ fn mutate_void<T: SolCall>(
         return Ok(PrecompileOutput::revert(
             0,
             StaticCallNotAllowed {}.abi_encode().into(),
-            0,
+            StorageCtx.reservoir(),
         ));
     }
-    f(sender, call).into_precompile_result(0, |()| Bytes::new())
+    f(sender, call).into_precompile_result(0, 0, |()| Bytes::new())
 }
 
 /// Deducts the calldata input cost, returning an OOG halt result if insufficient gas.
@@ -316,22 +317,9 @@ pub(crate) fn charge_input_cost(
     calldata: &[u8],
 ) -> Option<PrecompileResult> {
     if storage.deduct_gas(input_cost(calldata.len())).is_err() {
-        return Some(Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, 0)));
+        return Some(Ok(storage.halt_output(PrecompileHalt::OutOfGas)));
     }
     None
-}
-
-/// Fills gas accounting fields on a [`PrecompileOutput`] from the storage context.
-#[inline]
-fn fill_precompile_output(mut output: PrecompileOutput, storage: &StorageCtx) -> PrecompileOutput {
-    output.gas_used = storage.gas_used();
-    output
-}
-
-/// Returns an ABI-encoded `UnknownFunctionSelector` revert for the given 4-byte selector.
-#[inline]
-pub fn unknown_selector(selector: [u8; 4], gas: u64) -> PrecompileResult {
-    error::TempoPrecompileError::UnknownFunctionSelector(selector).into_precompile_result(gas)
 }
 
 /// A selector schedule at a given hardfork boundary.
@@ -388,8 +376,6 @@ impl<'a> SelectorSchedule<'a> {
 /// Handles missing selectors (revert on T1+, error on earlier forks), hardfork-gated selectors,
 /// unknown selectors (ABI-encoded `UnknownFunctionSelector`), and malformed ABI data (empty
 /// revert).
-///
-/// Gas accounting is applied via [`fill_precompile_output`].
 #[inline]
 pub(crate) fn dispatch_call<T>(
     calldata: &[u8],
@@ -401,18 +387,11 @@ pub(crate) fn dispatch_call<T>(
 
     if calldata.len() < 4 {
         if storage.spec().is_t1() {
-            return Ok(fill_precompile_output(
-                PrecompileOutput::revert(0, Bytes::new(), 0),
-                &storage,
-            ));
+            return Ok(storage.revert_output(Bytes::new()));
         } else {
-            return Ok(fill_precompile_output(
-                PrecompileOutput::halt(
-                    PrecompileHalt::Other("Invalid input: missing function selector".into()),
-                    0,
-                ),
-                &storage,
-            ));
+            return Ok(storage.halt_output(PrecompileHalt::Other(
+                "Invalid input: missing function selector".into(),
+            )));
         }
     }
 
@@ -421,22 +400,24 @@ pub(crate) fn dispatch_call<T>(
         .iter()
         .any(|schedule| schedule.rejects(selector, storage.spec()))
     {
-        return unknown_selector(selector, storage.gas_used())
-            .map(|res| fill_precompile_output(res, &storage));
+        return storage.error_result(error::TempoPrecompileError::UnknownFunctionSelector(
+            selector,
+        ));
     }
 
     let result = decode(calldata);
 
     match result {
-        Ok(call) => f(call).map(|res| fill_precompile_output(res, &storage)),
-        Err(alloy::sol_types::Error::UnknownSelector { selector, .. }) => {
-            unknown_selector(*selector, storage.gas_used())
-                .map(|res| fill_precompile_output(res, &storage))
-        }
-        Err(_) => Ok(fill_precompile_output(
-            PrecompileOutput::revert(0, Bytes::new(), 0),
-            &storage,
-        )),
+        Ok(call) => f(call).map(|mut res| {
+            // TODO: fix this, each precompile handler should either return output with proper gas values or don't return any gas values at all.
+            res.gas_used = storage.gas_used();
+            res.reservoir = storage.reservoir();
+            res
+        }),
+        Err(alloy::sol_types::Error::UnknownSelector { selector, .. }) => storage.error_result(
+            error::TempoPrecompileError::UnknownFunctionSelector(*selector),
+        ),
+        Err(_) => Ok(storage.revert_output(Bytes::new())),
     }
 }
 

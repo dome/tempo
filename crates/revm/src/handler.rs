@@ -289,8 +289,8 @@ fn calculate_key_authorization_gas(
         let sload_cost =
             gas_params.warm_storage_read_cost() + gas_params.cold_storage_additional_cost();
 
-        let limit_slots = if spec.is_t4() {
-            // T4 periodic limits write 2 storage slots per token:
+        let limit_slots = if spec.is_t3() {
+            // T3 periodic limits write 2 storage slots per token:
             // spending_limits[token].remaining + packed {max, period, period_end}
             num_limits.saturating_mul(2)
         } else {

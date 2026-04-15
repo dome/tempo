@@ -11,6 +11,7 @@ use reth_tracing::{
 };
 use tempo_alloy::{
     TempoNetwork, fillers::ExpiringNonceFiller, provider::ext::TempoProviderBuilderExt,
+    rpc::TempoTransactionRequest,
 };
 
 use alloy::{
@@ -524,6 +525,13 @@ impl MaxTpsArgs {
 
         info!(total_txs, "Generating and sending transactions");
 
+        // Warm up gas cache sequentially before spawning concurrent futures.
+        // This prevents a thundering herd of eth_estimateGas calls that would
+        // SYN-flood the node.
+        info!("Warming up gas cache");
+        let gas_estimates = warm_up_gas_cache(&signer_provider_manager, &gen_input).await?;
+        info!("Gas cache warm-up complete");
+
         let counters = TransactionCounters::default();
         let target_count = total_txs as usize;
         let cancel_token = CancellationToken::new();
@@ -539,69 +547,73 @@ impl MaxTpsArgs {
             RateLimiter::direct(Quota::per_second(NonZeroU32::new(self.tps as u32).unwrap()));
         let start_block_number = provider.get_block_number().await?;
 
-        let mut pending_txs =
-            generate_transactions(signer_provider_manager.clone(), gen_input, counters.clone())
-                // Take exactly the required number of transactions to not over-send
-                .take(target_count)
-                // Stop when duration exceeded, no matter if we sent all transactions or not
-                .take_until(sleep(Duration::from_secs(self.duration)))
-                // Keep a buffer of pre-generated transactions to send as fast as possible
-                .buffer_unordered(self.tps as usize)
-                // Filter only successfully generated transactions
-                .filter_map(|result| async {
+        let mut pending_txs = generate_transactions(
+            signer_provider_manager.clone(),
+            gen_input,
+            counters.clone(),
+            gas_estimates,
+        )
+        // Take exactly the required number of transactions to not over-send
+        .take(target_count)
+        // Stop when duration exceeded, no matter if we sent all transactions or not
+        .take_until(sleep(Duration::from_secs(self.duration)))
+        // Keep a buffer of pre-generated transactions to send as fast as possible
+        .buffer_unordered(self.tps as usize)
+        // Filter only successfully generated transactions
+        .filter_map(|result| async {
+            match result {
+                Ok(bytes) => Some(bytes),
+                Err(e) => {
+                    debug!(?e, "Transaction generation failed");
+                    None
+                }
+            }
+        })
+        .boxed()
+        .ratelimit_stream(&rate_limiter)
+        // Pair each transaction with a random provider to send it
+        .zip(stream::repeat_with(|| {
+            signer_provider_manager.random_unsigned_provider()
+        }))
+        // Prepare transaction sending futures
+        .map(|(bytes, provider)| async move {
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                provider.send_raw_transaction(&bytes),
+            )
+            .await
+        })
+        // Send transactions in parallel with up to the specified concurrency limit
+        .buffer_unordered(self.max_concurrent_requests)
+        .filter_map({
+            let counters = counters.clone();
+            move |result| {
+                let counters = counters.clone();
+                async move {
                     match result {
-                        Ok(bytes) => Some(bytes),
-                        Err(e) => {
-                            debug!(?e, "Transaction generation failed");
+                        Ok(Ok(pending_tx)) => {
+                            counters.sent.fetch_add(1, Ordering::Relaxed);
+                            counters.success.fetch_add(1, Ordering::Relaxed);
+                            Some(pending_tx)
+                        }
+                        Ok(Err(err)) => {
+                            counters.sent.fetch_add(1, Ordering::Relaxed);
+                            counters.failed.fetch_add(1, Ordering::Relaxed);
+                            debug!(?err, "Failed to send transaction");
+                            None
+                        }
+                        Err(_) => {
+                            counters.sent.fetch_add(1, Ordering::Relaxed);
+                            counters.timed_out.fetch_add(1, Ordering::Relaxed);
+                            debug!("Transaction sending timed out");
                             None
                         }
                     }
-                })
-                .boxed()
-                .ratelimit_stream(&rate_limiter)
-                // Pair each transaction with a random provider to send it
-                .zip(stream::repeat_with(|| {
-                    signer_provider_manager.random_unsigned_provider()
-                }))
-                // Prepare transaction sending futures
-                .map(|(bytes, provider)| async move {
-                    tokio::time::timeout(
-                        Duration::from_secs(1),
-                        provider.send_raw_transaction(&bytes),
-                    )
-                    .await
-                })
-                // Send transactions in parallel with up to the specified concurrency limit
-                .buffer_unordered(self.max_concurrent_requests)
-                .filter_map({
-                    let counters = counters.clone();
-                    move |result| {
-                        let counters = counters.clone();
-                        async move {
-                            match result {
-                                Ok(Ok(pending_tx)) => {
-                                    counters.sent.fetch_add(1, Ordering::Relaxed);
-                                    counters.success.fetch_add(1, Ordering::Relaxed);
-                                    Some(pending_tx)
-                                }
-                                Ok(Err(err)) => {
-                                    counters.sent.fetch_add(1, Ordering::Relaxed);
-                                    counters.failed.fetch_add(1, Ordering::Relaxed);
-                                    debug!(?err, "Failed to send transaction");
-                                    None
-                                }
-                                Err(_) => {
-                                    counters.sent.fetch_add(1, Ordering::Relaxed);
-                                    counters.timed_out.fetch_add(1, Ordering::Relaxed);
-                                    debug!("Transaction sending timed out");
-                                    None
-                                }
-                            }
-                        }
-                    }
-                })
-                .collect::<VecDeque<_>>()
-                .await;
+                }
+            }
+        })
+        .collect::<VecDeque<_>>()
+        .await;
 
         cancel_token.cancel();
 
@@ -732,11 +744,179 @@ struct GenerateTransactionsInput {
     virtual_master_ids: Vec<MasterId>,
 }
 
+const TX_TYPES: usize = 6;
+
+type GasEstimates = [Arc<OnceLock<(u128, u128, u64)>>; TX_TYPES];
+
+fn tx_weights(input: &GenerateTransactionsInput) -> [u64; TX_TYPES] {
+    [
+        input.tip20_weight,
+        input.tip20_virtual_weight,
+        input.swap_weight,
+        input.place_order_weight,
+        input.erc20_weight,
+        input.mpp_weight,
+    ]
+}
+
+/// Build a transaction request for the given type index.
+///
+/// Both [`warm_up_gas_cache`] and [`generate_transactions`] call this so the
+/// transaction-building logic lives in one place.
+fn build_tx_request(
+    tx_index: usize,
+    provider: &(impl Provider<TempoNetwork> + Clone),
+    token: Address,
+    recipient: Address,
+    virtual_master_id: MasterId,
+    quote_token: Option<Address>,
+    erc20_token: Address,
+    mpp_contract_address: Option<Address>,
+    signer_address: Address,
+    chain_id: u64,
+    tick: i16,
+) -> TempoTransactionRequest {
+    match tx_index {
+        0 => {
+            let token = ITIP20Instance::new(token, provider.clone());
+            token
+                .transfer(recipient, U256::ONE)
+                .into_transaction_request()
+        }
+        1 => {
+            let token = ITIP20Instance::new(token, provider.clone());
+            let to = make_virtual_address(virtual_master_id);
+            token.transfer(to, U256::ONE).into_transaction_request()
+        }
+        2 => {
+            let exchange = IStablecoinDEXInstance::new(STABLECOIN_DEX_ADDRESS, provider.clone());
+            let quote_token = quote_token.expect("quote_token must be set when swap_weight > 0");
+            exchange
+                .quoteSwapExactAmountIn(token, quote_token, 1)
+                .into_transaction_request()
+        }
+        3 => {
+            let exchange = IStablecoinDEXInstance::new(STABLECOIN_DEX_ADDRESS, provider.clone());
+            exchange
+                .place(token, MIN_ORDER_AMOUNT, true, tick)
+                .into_transaction_request()
+        }
+        4 => {
+            let token = erc20::MockERC20::new(erc20_token, provider.clone());
+            token
+                .transfer(recipient, U256::ONE)
+                .into_transaction_request()
+        }
+        5 => {
+            let contract =
+                mpp_contract_address.expect("mpp_contract_address must be set when mpp_weight > 0");
+            let salt = B256::random();
+            let channel_id = mpp::compute_channel_id(
+                signer_address,
+                signer_address,
+                token,
+                salt,
+                Address::ZERO,
+                contract,
+                chain_id,
+            );
+            mpp::build_open_and_close(contract, signer_address, token, salt, channel_id)
+        }
+        _ => unreachable!("Only {TX_TYPES} transaction types are supported"),
+    }
+}
+
+/// Extract gas estimates from a filled transaction.
+fn extract_gas_estimates(filled: &SendableTx<TempoNetwork>) -> eyre::Result<(u128, u128, u64)> {
+    match filled {
+        SendableTx::Builder(builder) => Ok((
+            builder
+                .max_fee_per_gas()
+                .ok_or_eyre("max fee per gas should be filled")?,
+            builder
+                .max_priority_fee_per_gas()
+                .ok_or_eyre("max priority fee per gas should be filled")?,
+            builder
+                .gas_limit()
+                .ok_or_eyre("gas limit should be filled")?,
+        )),
+        SendableTx::Envelope(envelope) => Ok((
+            envelope.max_fee_per_gas(),
+            envelope
+                .max_priority_fee_per_gas()
+                .ok_or_eyre("max priority fee per gas should be filled")?,
+            envelope.gas_limit(),
+        )),
+    }
+}
+
+/// Warm up the gas cache by sequentially filling one transaction per enabled type.
+///
+/// Without this, the first batch of concurrent futures all hit `provider.fill()` before
+/// the cache is populated.
+async fn warm_up_gas_cache<F: TxFiller<TempoNetwork> + 'static>(
+    signer_provider_manager: &SignerProviderManager<F>,
+    input: &GenerateTransactionsInput,
+) -> eyre::Result<GasEstimates> {
+    let gas_estimates: GasEstimates = Default::default();
+    let weights = tx_weights(input);
+
+    for (tx_index, &weight) in weights.iter().enumerate() {
+        if weight == 0 {
+            continue;
+        }
+
+        let provider = signer_provider_manager.random_unsigned_provider();
+        let signer = signer_provider_manager.random_signer();
+        let token = *input
+            .user_tokens
+            .first()
+            .ok_or_eyre("user_tokens must not be empty")?;
+
+        let recipient = match &input.recipients {
+            Some(addrs) => *addrs.first().unwrap(),
+            None => Address::random(),
+        };
+
+        let virtual_master_id = input
+            .virtual_master_ids
+            .first()
+            .copied()
+            .unwrap_or_default();
+        let erc20_token = input.erc20_tokens.first().copied().unwrap_or_default();
+        let tick = (MIN_TICK / TICK_SPACING) * TICK_SPACING;
+
+        let mut tx = build_tx_request(
+            tx_index,
+            &provider,
+            token,
+            recipient,
+            virtual_master_id,
+            input.quote_token,
+            erc20_token,
+            input.mpp_contract_address,
+            signer.address(),
+            input.chain_id,
+            tick,
+        );
+
+        tx.inner.set_from(signer.address());
+
+        let filled = provider.fill(tx).await?;
+        let _ = gas_estimates[tx_index].set(extract_gas_estimates(&filled)?);
+
+        info!(tx_index, "Warmed up gas cache for transaction type");
+    }
+
+    Ok(gas_estimates)
+}
+
 /// Returns an infinite stream of futures, each generating, signing, and encoding one transaction.
 fn generate_transactions<F: TxFiller<TempoNetwork> + 'static>(
     signer_provider_manager: SignerProviderManager<F>,
     input: GenerateTransactionsInput,
     counters: TransactionCounters,
+    gas_estimates: GasEstimates,
 ) -> impl Stream<Item = impl Future<Output = eyre::Result<Vec<u8>>>> {
     let GenerateTransactionsInput {
         tip20_weight,
@@ -755,7 +935,6 @@ fn generate_transactions<F: TxFiller<TempoNetwork> + 'static>(
         virtual_master_ids,
     } = input;
 
-    const TX_TYPES: usize = 6;
     // Weights for random sampling for each transaction type
     let tx_weights: [u64; TX_TYPES] = [
         tip20_weight,
@@ -765,8 +944,6 @@ fn generate_transactions<F: TxFiller<TempoNetwork> + 'static>(
         erc20_weight,
         mpp_weight,
     ];
-    // Cached gas estimates for each transaction type
-    let gas_estimates: [Arc<OnceLock<(u128, u128, u64)>>; TX_TYPES] = Default::default();
     // Global tx counter used to bump priority fee, ensuring unique tx hashes
     // when using expiring nonces (which share nonce=0).
     let tx_id = Arc::new(AtomicUsize::new(0));
@@ -799,98 +976,71 @@ fn generate_transactions<F: TxFiller<TempoNetwork> + 'static>(
                 None => Address::random(),
             };
 
-            let mut tx = match tx_index {
+            // Increment the counter for this transaction type
+            match tx_index {
                 0 => {
                     counters.tip20_transfers.fetch_add(1, Ordering::Relaxed);
-                    let token = ITIP20Instance::new(token, provider.clone());
-
-                    // Transfer minimum possible amount
-                    token
-                        .transfer(recipient, U256::ONE)
-                        .into_transaction_request()
                 }
                 1 => {
-                    // TIP-20 transfer to a virtual address
                     counters
                         .tip20_virtual_transfers
                         .fetch_add(1, Ordering::Relaxed);
-                    let token = ITIP20Instance::new(token, provider.clone());
-                    let master_id = virtual_master_ids
-                        .choose(&mut rand::rng())
-                        .copied()
-                        .unwrap();
-                    let to = make_virtual_address(master_id);
-
-                    token.transfer(to, U256::ONE).into_transaction_request()
                 }
                 2 => {
                     counters.swaps.fetch_add(1, Ordering::Relaxed);
-                    let exchange =
-                        IStablecoinDEXInstance::new(STABLECOIN_DEX_ADDRESS, provider.clone());
-
-                    // Swap minimum possible amount
-                    let quote_token =
-                        quote_token.expect("quote_token must be set when swap_weight > 0");
-                    exchange
-                        .quoteSwapExactAmountIn(token, quote_token, 1)
-                        .into_transaction_request()
                 }
                 3 => {
                     counters.orders.fetch_add(1, Ordering::Relaxed);
-                    let exchange =
-                        IStablecoinDEXInstance::new(STABLECOIN_DEX_ADDRESS, provider.clone());
-
-                    // Place an order at a random tick that's a multiple of `TICK_SPACING`
-                    let tick = random_range(MIN_TICK / TICK_SPACING..=MAX_TICK / TICK_SPACING)
-                        * TICK_SPACING;
-                    exchange
-                        .place(token, MIN_ORDER_AMOUNT, true, tick)
-                        .into_transaction_request()
                 }
                 4 => {
                     counters.erc20_transfers.fetch_add(1, Ordering::Relaxed);
-                    let token_address = erc20_tokens.choose(&mut rand::rng()).copied().unwrap();
-                    let token = erc20::MockERC20::new(token_address, provider.clone());
-
-                    // Transfer minimum possible amount
-                    token
-                        .transfer(recipient, U256::ONE)
-                        .into_transaction_request()
                 }
                 5 => {
                     counters.mpp_open_close.fetch_add(1, Ordering::Relaxed);
-                    let contract = mpp_contract_address
-                        .expect("mpp_channel_address must be set when mpp_weight > 0");
-
-                    // Single Tempo tx with two calls: open a channel, then close it.
-                    // Signer is both payer and payee, so close succeeds immediately.
-                    let salt = B256::random();
-                    let payer = signer.address();
-                    let channel_id = mpp::compute_channel_id(
-                        payer,
-                        payer,
-                        token,
-                        salt,
-                        Address::ZERO,
-                        contract,
-                        chain_id,
-                    );
-                    mpp::build_open_and_close(contract, payer, token, salt, channel_id)
                 }
-                _ => unreachable!("Only {TX_TYPES} transaction types are supported"),
-            };
+                _ => {}
+            }
 
-            // Get a random signer and set it as the sender of the transaction.
+            let virtual_master_id = virtual_master_ids
+                .choose(&mut rand::rng())
+                .copied()
+                .unwrap_or_default();
+            let erc20_token = erc20_tokens
+                .choose(&mut rand::rng())
+                .copied()
+                .unwrap_or_default();
+            let tick =
+                random_range((MIN_TICK / TICK_SPACING)..=(MAX_TICK / TICK_SPACING)) * TICK_SPACING;
+
+            let mut tx = build_tx_request(
+                tx_index,
+                &provider,
+                token,
+                recipient,
+                virtual_master_id,
+                quote_token,
+                erc20_token,
+                mpp_contract_address,
+                signer.address(),
+                chain_id,
+                tick,
+            );
+
             tx.inner.set_from(signer.address());
 
             let gas = &gas_estimates[tx_index];
-            // If we already filled the gas fields once for that transaction type, use it.
-            // This will skip the gas filler.
+            // Use the cached gas fields (populated by warm_up_gas_cache).
+            // If the cache is somehow empty, fall back to RPC estimation.
             if let Some((max_fee_per_gas, max_priority_fee_per_gas, gas_limit)) = gas.get() {
                 tx.inner.set_max_fee_per_gas(*max_fee_per_gas);
                 tx.inner
                     .set_max_priority_fee_per_gas(*max_priority_fee_per_gas);
                 tx.inner.set_gas_limit(*gas_limit);
+            } else {
+                error!(
+                    tx_index,
+                    "Gas cache miss — this causes an RPC call and should not happen after warm-up"
+                );
             }
 
             // Fill the rest of transaction. In case we already filled the gas fields,
@@ -899,28 +1049,9 @@ fn generate_transactions<F: TxFiller<TempoNetwork> + 'static>(
             let filled = provider.fill(tx).await?;
 
             // If we never filled the gas fields for that transaction type, cache the estimated
-            // gas.
+            // gas (fallback for cache misses).
             if gas.get().is_none() {
-                let _ = gas.set(match &filled {
-                    SendableTx::Builder(builder) => (
-                        builder
-                            .max_fee_per_gas()
-                            .ok_or_eyre("max fee per gas should be filled")?,
-                        builder
-                            .max_priority_fee_per_gas()
-                            .ok_or_eyre("max priority fee per gas should be filled")?,
-                        builder
-                            .gas_limit()
-                            .ok_or_eyre("gas limit should be filled")?,
-                    ),
-                    SendableTx::Envelope(envelope) => (
-                        envelope.max_fee_per_gas(),
-                        envelope
-                            .max_priority_fee_per_gas()
-                            .ok_or_eyre("max priority fee per gas should be filled")?,
-                        envelope.gas_limit(),
-                    ),
-                });
+                let _ = gas.set(extract_gas_estimates(&filled)?);
             }
 
             let mut req = filled.try_into_request()?;

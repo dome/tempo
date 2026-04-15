@@ -538,13 +538,24 @@ where
     fn finish(
         self,
     ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
-        // TIP-1016: block header `gas_used` = block_regular_gas_used.
+        let timestamp = self.evm().block().timestamp.to::<u64>();
+        let is_t4 = self.inner.spec.is_t4_active_at_timestamp(timestamp);
+
+        let header_gas_used = self.inner.block_regular_gas_used;
+        let (evm, mut result) = self.inner.finish()?;
+
+        // TIP-1016 (T4+): block header `gas_used` = block_regular_gas_used.
         // State gas is charged to users (in receipts) but exempted from block
         // capacity. block_regular_gas_used is accumulated per-tx as
         // max(total_spent - state_spent, floor) and is independent of refunds.
-        let header_gas_used = self.inner.block_regular_gas_used;
-        let (evm, mut result) = self.inner.finish()?;
-        result.gas_used = header_gas_used;
+        //
+        // Pre-T4: use the standard gas_used from the inner executor which equals
+        // cumulative_tx_gas_used (total_spent - refunded), matching the original
+        // block header semantics.
+        if is_t4 {
+            result.gas_used = header_gas_used;
+        }
+
         Ok((evm, result))
     }
 
@@ -1432,15 +1443,17 @@ mod tests {
         );
     }
 
-    /// Regression test: when a transaction earns a gas refund (e.g. clearing
-    /// storage), `finish()` must return a `gas_used` that matches the last
-    /// TIP-1016: block header `gas_used` = `block_regular_gas_used` (accumulated per-tx).
+    /// TIP-1016 (T4+): block header `gas_used` = `block_regular_gas_used`.
     /// Receipts track `tx_gas_used` (what the user pays, including state gas).
     /// The difference between receipts total and header gas_used is the state gas
     /// exempted from block capacity.
     #[test]
-    fn test_finish_exempts_state_gas_from_header() {
-        let chainspec = test_chainspec();
+    fn test_t4_finish_exempts_state_gas_from_header() {
+        use std::sync::Arc;
+        use tempo_chainspec::spec::DEV;
+
+        // DEV chainspec has T4 active at timestamp 0.
+        let chainspec = Arc::new(TempoChainSpec::from_genesis(DEV.genesis().clone()));
         let mut db = State::builder().with_bundle_update().build();
         let mut executor = TestExecutorBuilder::default()
             .with_parent_beacon_block_root(B256::ZERO)
@@ -1469,15 +1482,58 @@ mod tests {
 
         let (_evm, result) = executor.finish().expect("finish should succeed");
 
-        // Block header gas_used must equal block_regular_gas_used (not cumulative - state)
+        // T4: Block header gas_used must equal block_regular_gas_used
         assert_eq!(
             result.gas_used, regular_gas,
-            "header gas_used ({}) must equal block_regular_gas_used ({})",
+            "T4 header gas_used ({}) must equal block_regular_gas_used ({})",
             result.gas_used, regular_gas
         );
 
         // Receipt tracks total gas (what user pays, including state gas)
         let last_cumulative = result.receipts.last().unwrap().cumulative_gas_used;
         assert_eq!(last_cumulative, tx_gas_used);
+    }
+
+    /// Pre-T4: block header `gas_used` must use cumulative_tx_gas_used (post-refund),
+    /// not block_regular_gas_used (pre-refund). This is a regression test for a bug
+    /// where `finish()` unconditionally used block_regular_gas_used, causing re-execution
+    /// of historical blocks to produce a gas mismatch when transactions had SSTORE refunds.
+    #[test]
+    fn test_pre_t4_finish_uses_cumulative_gas_with_refunds() {
+        let chainspec = test_chainspec(); // MODERATO, T4 not active at timestamp 0
+
+        let mut db = State::builder().with_bundle_update().build();
+        let mut executor = TestExecutorBuilder::default()
+            .with_parent_beacon_block_root(B256::ZERO)
+            .build(&mut db, &chainspec);
+
+        executor.apply_pre_execution_changes().unwrap();
+
+        // Simulate: tx with total_spent=276078, refund=2800, state_gas=0 (pre-T4)
+        // tx_gas_used = 276078 - 2800 = 273278 (post-refund, what goes in receipts)
+        // block_regular_gas_used = 276078 (pre-refund, no state gas to subtract)
+        let cumulative = 273_278u64; // post-refund
+        let regular = 276_078u64; // pre-refund (no state gas subtraction pre-T4)
+
+        executor.inner.cumulative_tx_gas_used = cumulative;
+        executor.inner.block_regular_gas_used = regular;
+
+        executor.inner.receipts.push(TempoReceipt {
+            tx_type: TempoTxType::Legacy,
+            success: true,
+            cumulative_gas_used: cumulative,
+            logs: vec![],
+        });
+
+        let (_evm, result) = executor.finish().expect("finish should succeed");
+
+        // Pre-T4: header gas_used must equal cumulative_tx_gas_used (post-refund),
+        // NOT block_regular_gas_used (pre-refund).
+        assert_eq!(
+            result.gas_used, cumulative,
+            "pre-T4 header gas_used ({}) must equal cumulative_tx_gas_used ({}), \
+             not block_regular_gas_used ({})",
+            result.gas_used, cumulative, regular
+        );
     }
 }

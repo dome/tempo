@@ -156,7 +156,7 @@ fn init_download_urls() {
         ],
         default_base_url: Cow::Borrowed(DEFAULT_DOWNLOAD_URL),
         default_chain_aware_base_url: None,
-        snapshot_api_url: Cow::Borrowed("https://snapshots.reth.rs/api/snapshots"),
+        snapshot_api_url: Cow::Borrowed("https://snapshots.tempoxyz.dev/api/snapshots"),
         long_help: None,
     };
 
@@ -259,16 +259,25 @@ pub(crate) fn init_defaults() {
 
 #[cfg(test)]
 mod tests {
+    use reth_cli_commands::download::DownloadDefaults;
     use reth_ethereum::node::core::args::EngineArgs;
 
     #[test]
-    fn engine_defaults_enable_payload_attributes_on_canonical_head() {
+    fn init_defaults_sets_tempo_overrides() {
         super::init_defaults();
+
         let args = EngineArgs::default();
         assert!(
             args.always_process_payload_attributes_on_canonical_head,
             "Commonware consensus requires always_process_payload_attributes_on_canonical_head=true \
              so that FCU on a canonical ancestor still returns a payload_id"
+        );
+
+        let download = DownloadDefaults::get_global();
+        assert!(
+            download.snapshot_api_url.contains("tempoxyz.dev"),
+            "snapshot_api_url must point to Tempo's snapshot API, got: {}",
+            download.snapshot_api_url
         );
     }
 }

@@ -402,11 +402,8 @@ mod tests {
 
     #[test]
     fn test_into_precompile_result_revert() {
-        let gas_limit = 100_000;
-        let gas_used = 1_000;
-
         let error = TempoPrecompileError::StablecoinDEX(StablecoinDEXError::order_does_not_exist());
-        let result = error.into_precompile_result(gas_limit, gas_used);
+        let result = error.into_precompile_result(0, 0);
 
         let output = result.expect("business-logic revert should be Ok");
         assert!(output.status.is_revert());
@@ -414,11 +411,8 @@ mod tests {
 
     #[test]
     fn test_into_precompile_result_trait_success() {
-        let gas_limit = 100_000;
-        let gas_used = 500;
-
         let result: Result<u64> = Ok(42);
-        let precompile_result = result.into_precompile_result(gas_limit, gas_used, |val| {
+        let precompile_result = result.into_precompile_result(0, 0, |val| {
             alloy::primitives::Bytes::from(val.to_be_bytes().to_vec())
         });
 

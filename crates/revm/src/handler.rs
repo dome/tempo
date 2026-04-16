@@ -1820,8 +1820,7 @@ pub fn calculate_aa_batch_intrinsic_gas<'a>(
 
         // 4b. CREATE-specific costs
         if call.to.is_create() {
-            let create_state_gas =
-                gas_params.new_account_state_gas() + gas_params.create_state_gas();
+            let create_state_gas = gas_params.create_state_gas();
             // CREATE costs 500,000 gas in TIP-1000 (T1), 32,000 before
             gas.initial_total_gas += gas_params.create_cost() + create_state_gas;
 

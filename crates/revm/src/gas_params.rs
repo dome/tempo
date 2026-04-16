@@ -36,7 +36,6 @@ const EIP7702_PER_EMPTY_ACCOUNT_COST_T1: u64 = 12_500;
 // For SSTORE: revm decomposes the cost as sstore_static(WARM_STORAGE_READ=100) +
 // sstore_set_without_load_cost. So the GasId value = 20,000 - 100 = 19,900.
 const T4_SSTORE_SET_REGULAR: u64 = 20_000;
-const T4_SSTORE_SET_WITHOUT_LOAD: u64 = T4_SSTORE_SET_REGULAR - 100; // minus warm_storage_read
 const T4_NEW_ACCOUNT_REGULAR: u64 = 25_000;
 const T4_CREATE_REGULAR: u64 = 32_000;
 const T4_CODE_DEPOSIT_REGULAR: u64 = 200;
@@ -64,10 +63,7 @@ pub fn tempo_gas_params(spec: TempoHardfork) -> GasParams {
         // State gas (permanent storage burden) = total - regular.
         overrides.extend([
             // SSTORE (zero → non-zero): 20k regular + 230k state
-            (
-                GasId::sstore_set_without_load_cost(),
-                T4_SSTORE_SET_WITHOUT_LOAD,
-            ),
+            (GasId::sstore_set_without_load_cost(), T4_SSTORE_SET_REGULAR),
             (GasId::sstore_set_state_gas(), T4_SSTORE_SET_STATE),
             (GasId::sstore_set_refund(), T4_SSTORE_SET_REFUND),
             // Contract metadata (CREATE base): 32k regular + 468k state

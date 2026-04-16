@@ -336,7 +336,7 @@ fn fill_state_gas(output: &mut PrecompileOutput, storage: &StorageCtx) {
         // wrapper can apply them with record_refund. Pre-T4 blocks were executed
         // without refund propagation, so we cannot change their gas accounting.
         if output.is_success() && storage.gas_refunded() != 0 {
-            output.reservoir = storage.gas_refunded() as u64;
+            output.gas_refunded = storage.gas_refunded();
         }
     }
 }

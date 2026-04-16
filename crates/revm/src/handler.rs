@@ -1216,7 +1216,7 @@ where
                 .validate_chain_id(cfg.chain_id(), spec.is_t1c())
                 .map_err(TempoInvalidTransaction::from)?;
 
-            // T4 gates all TIP-1011 fields. Before activation, transaction semantics must stay
+            // T3 gates all TIP-1011 fields. Before activation, transaction semantics must stay
             // unchanged, so periodic limits and call scopes are rejected.
             if !spec.is_t3() {
                 if key_auth.has_periodic_limits() {
@@ -1422,7 +1422,7 @@ where
                 tx,
                 |mut keychain: AccountKeychain| {
                     let key_expiry = if is_authorizing_this_key {
-                        if spec.is_t4()
+                        if spec.is_t3()
                             && tempo_tx_env
                                 .key_authorization
                                 .as_ref()
@@ -1481,14 +1481,6 @@ where
             )?;
 
             evm.key_expiry = stored_key_expiry;
-
-            if spec.is_t3() && tx.gas_limit() < evm.initial_gas + evm.initial_state_gas {
-                return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
-                    gas_limit: tx.gas_limit(),
-                    initial_gas: evm.initial_gas,
-                }
-                .into());
-            }
         }
 
         // Short-circuit if there is no spending for this transaction and `collectFeePreTx`

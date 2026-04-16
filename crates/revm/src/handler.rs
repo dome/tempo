@@ -214,63 +214,21 @@ fn call_scope_extra_gas(auth: &tempo_primitives::transaction::KeyAuthorization) 
 /// one top-level transaction result instead, so the gas field must be normalized to the full tx
 /// budget. Reverts preserve the exact gas spent across prior successful steps plus the failed step,
 /// while halts such as OOG consume the entire remaining transaction budget.
-fn normalize_failed_batch_result_gas(
-    frame_result: &mut FrameResult,
-    gas_limit: u64,
-    remaining_gas: u64,
-) {
-    let gas_spent_by_failed_step = frame_result.gas().total_gas_spent();
-    let total_gas_spent = (gas_limit - remaining_gas) + gas_spent_by_failed_step;
-
+fn normalize_failed_batch_result_gas(frame_result: &mut FrameResult, final_gas_limit: u64) {
     // Create new Gas with correct limit, because Gas does not have a set_limit method
     // (the frame_result limit only covers the failed step).
-    let mut corrected_gas = Gas::new(gas_limit);
+    let mut corrected_gas = Gas::new_spent(final_gas_limit);
     if frame_result.instruction_result().is_revert() {
-        corrected_gas.set_spent(total_gas_spent);
-    } else {
-        corrected_gas.spend_all();
+        corrected_gas.erase_cost(frame_result.gas().remaining());
     }
-    corrected_gas.set_refund(0); // No refunds when batch fails and all state is reverted.
-    *frame_result.gas_mut() = corrected_gas;
-}
-
-/// Reconstructs the [`Gas`] object for a failed AA batch after `checkpoint_revert`.
-///
-/// Since `checkpoint_revert` rolls back ALL state changes from prior successful subcalls,
-/// no state was actually grown and state gas must be excluded from the result.
-///
-/// Batch subcalls run with `reservoir=0` (`InitialAndFloorGas::new(0,0)`), so all state gas
-/// was paid from `gas_left`. `remaining_gas` was decremented by each prior call's full
-/// `total_gas_spent` (regular + state), so `(gas_limit - remaining_gas)` includes
-/// `accumulated_state_gas_spent`. We subtract it to avoid reclassifying reverted state gas
-/// as regular gas in `block_regular_gas_used`.
-///
-/// For the failed call: `last_frame_result` zeros `state_gas_spent` on revert/halt and moves
-/// it to the reservoir. Since the subcall started with `reservoir=0`,
-/// `failed_call_reservoir` equals the failed call's refunded state gas.
-fn reconstruct_failed_batch_gas(
-    gas_limit: u64,
-    remaining_gas: u64,
-    accumulated_state_gas_spent: u64,
-    gas_spent_by_failed_call: u64,
-    failed_call_reservoir: u64,
-    initial_state_gas: u64,
-    is_revert: bool,
-) -> Gas {
-    let mut total_gas_spent = (gas_limit - remaining_gas) + gas_spent_by_failed_call;
-    total_gas_spent = total_gas_spent.saturating_add(initial_state_gas);
-    // Subtract all state gas (prior calls + failed call) from total.
-    total_gas_spent = total_gas_spent
-        .saturating_sub(accumulated_state_gas_spent)
-        .saturating_sub(failed_call_reservoir);
-
-    let mut corrected_gas = Gas::new_spent(gas_limit);
-    if is_revert {
-        corrected_gas.erase_cost(gas_limit - total_gas_spent);
-    }
+    // No refunds when batch fails and all state is reverted.
     corrected_gas.set_refund(0);
+    // No state gas spending for failed calls
     corrected_gas.set_state_gas_spent(0);
+    // Reservoir and state gas are refunded on failure
     corrected_gas
+        .set_reservoir(frame_result.gas().reservoir() + frame_result.gas().state_gas_spent());
+    *frame_result.gas_mut() = corrected_gas;
 }
 
 fn translate_allowed_calls_for_precompile(
@@ -510,7 +468,8 @@ where
     fn execute_single_call_with<F>(
         &mut self,
         evm: &mut TempoEvm<DB, I>,
-        init_and_floor_gas: &InitialAndFloorGas,
+        gas_limit: u64,
+        reservoir: u64,
         mut run_loop: F,
     ) -> Result<FrameResult, EVMError<DB::Error, TempoInvalidTransaction>>
     where
@@ -520,16 +479,8 @@ where
             <<TempoEvm<DB, I> as EvmTr>::Frame as FrameTr>::FrameInit,
         ) -> Result<FrameResult, EVMError<DB::Error, TempoInvalidTransaction>>,
     {
-        // Deduct only the regular (non-state) portion of initial gas.
-        // State gas is handled separately by first_frame_input's reservoir logic.
-        // This matches revm's Handler::execution() which computes:
-        //   regular_initial_gas = initial_total_gas - initial_state_gas
-        //   gas_limit = tx.gas_limit - regular_initial_gas
-        let regular_initial_gas = init_and_floor_gas.initial_regular_gas();
-        let gas_limit = evm.ctx().tx().gas_limit() - regular_initial_gas;
-
         // Create first frame action
-        let first_frame_input = self.first_frame_input(evm, gas_limit, init_and_floor_gas)?;
+        let first_frame_input = self.first_frame_input(evm, gas_limit, reservoir)?;
 
         // Run execution loop (standard or inspector)
         let mut frame_result = run_loop(self, evm, first_frame_input)?;
@@ -546,9 +497,10 @@ where
     fn execute_single_call(
         &mut self,
         evm: &mut TempoEvm<DB, I>,
-        init_and_floor_gas: &InitialAndFloorGas,
+        gas_limit: u64,
+        reservoir: u64,
     ) -> Result<FrameResult, EVMError<DB::Error, TempoInvalidTransaction>> {
-        self.execute_single_call_with(evm, init_and_floor_gas, Self::run_exec_loop)
+        self.execute_single_call_with(evm, gas_limit, reservoir, Self::run_exec_loop)
     }
 
     /// Generic multi-call execution that works with both standard and inspector exec loops.
@@ -569,7 +521,8 @@ where
     fn execute_multi_call_with<F>(
         &mut self,
         evm: &mut TempoEvm<DB, I>,
-        init_and_floor_gas: &InitialAndFloorGas,
+        mut remaining_gas: u64,
+        mut reservoir: u64,
         calls: Vec<tempo_primitives::transaction::Call>,
         mut execute_single: F,
     ) -> Result<FrameResult, EVMError<DB::Error, TempoInvalidTransaction>>
@@ -577,21 +530,12 @@ where
         F: FnMut(
             &mut Self,
             &mut TempoEvm<DB, I>,
-            &InitialAndFloorGas,
+            u64,
+            u64,
         ) -> Result<FrameResult, EVMError<DB::Error, TempoInvalidTransaction>>,
     {
         // Create checkpoint for atomic execution - captures state before any calls
         let checkpoint = evm.ctx().journal_mut().checkpoint();
-
-        let gas_limit = evm.ctx().tx().gas_limit();
-        let spec = *evm.ctx().cfg().spec();
-        // Reserve the full initial gas (regular + state) upfront.
-        // Multi-call bypasses the reservoir, so initial_state_gas must be deducted
-        // from the execution budget to prevent subcalls from consuming it.
-        // build_result_gas in post_execution adds initial_state_gas to state_gas_spent.
-        // Pre-T4: initial_state_gas is always zero, so this equals regular initial gas.
-        let initial_gas_to_deduct = init_and_floor_gas.initial_total_gas;
-        let mut remaining_gas = gas_limit - initial_gas_to_deduct;
         let mut accumulated_gas_refund = 0i64;
         let mut accumulated_state_gas_spent = 0u64;
 
@@ -599,6 +543,7 @@ where
         let original_kind = evm.ctx().tx().kind();
         let original_value = evm.ctx().tx().value();
         let original_data = evm.ctx().tx().input().clone();
+        let original_gas_limit = evm.ctx().tx().gas_limit();
 
         let mut final_result = None;
 
@@ -607,7 +552,7 @@ where
         {
             // This path only runs for keychain batches that already passed the structural CREATE
             // rejection in validation, so there is no first-call CREATE nonce to preserve here.
-            normalize_failed_batch_result_gas(&mut frame_result, gas_limit, remaining_gas);
+            normalize_failed_batch_result_gas(&mut frame_result, evm.ctx().tx().gas_limit());
             return Ok(frame_result);
         }
 
@@ -622,8 +567,7 @@ where
             }
 
             // Execute call with NO additional initial gas (already deducted upfront in validation)
-            let zero_init_gas = InitialAndFloorGas::new(0, 0);
-            let frame_result = execute_single(self, evm, &zero_init_gas);
+            let frame_result = execute_single(self, evm, remaining_gas, reservoir);
 
             // Restore original TxEnv immediately after execution, even if execution failed
             {
@@ -631,7 +575,7 @@ where
                 tx.inner.kind = original_kind;
                 tx.inner.value = original_value;
                 tx.inner.data = original_data.clone();
-                tx.inner.gas_limit = gas_limit;
+                tx.inner.gas_limit = original_gas_limit;
             }
 
             let mut frame_result = frame_result?;
@@ -667,35 +611,20 @@ where
                     }
                 }
 
-                // Pre-T4: initial_state_gas was not reserved upfront, add it back.
-                let initial_state_gas = if spec.is_t4() {
-                    0
-                } else {
-                    init_and_floor_gas.initial_state_gas
-                };
-
-                *frame_result.gas_mut() = reconstruct_failed_batch_gas(
-                    gas_limit,
-                    remaining_gas,
-                    accumulated_state_gas_spent,
-                    frame_result.gas().total_gas_spent(),
-                    frame_result.gas().reservoir(),
-                    initial_state_gas,
-                    frame_result.instruction_result().is_revert(),
-                );
+                normalize_failed_batch_result_gas(&mut frame_result, evm.ctx().tx().gas_limit());
 
                 return Ok(frame_result);
             }
 
             // Call succeeded - accumulate gas usage, refunds, and state gas
-            let gas_spent = frame_result.gas().total_gas_spent();
-            let gas_refunded = frame_result.gas().refunded();
-
-            accumulated_gas_refund = accumulated_gas_refund.saturating_add(gas_refunded);
+            accumulated_gas_refund =
+                accumulated_gas_refund.saturating_add(frame_result.gas().refunded());
             accumulated_state_gas_spent =
                 accumulated_state_gas_spent.saturating_add(frame_result.gas().state_gas_spent());
-            // Subtract only execution gas (intrinsic gas already deducted upfront)
-            remaining_gas = remaining_gas.saturating_sub(gas_spent);
+
+            // Update gas limit and reservoir to remaining values
+            remaining_gas = frame_result.gas().remaining();
+            reservoir = frame_result.gas().reservoir();
 
             final_result = Some(frame_result);
         }
@@ -707,21 +636,14 @@ where
         let mut result =
             final_result.ok_or_else(|| EVMError::Custom("No calls executed".into()))?;
 
-        // T4+: initial_total_gas was reserved upfront, so (gas_limit - remaining_gas)
-        // already includes both regular and state intrinsic gas.
-        // Pre-T4: only regular initial gas was reserved; add initial_state_gas back.
-        let mut total_gas_spent = gas_limit - remaining_gas;
-        if !spec.is_t4() {
-            total_gas_spent = total_gas_spent.saturating_add(init_and_floor_gas.initial_state_gas);
-        }
-
-        // Use flattened gas reconstruction (Gas::new_spent + erase_cost) for robustness
-        // under the EIP-8037 reservoir model. state_gas_spent holds only execution-phase
-        // state gas; build_result_gas in post_execution adds initial_state_gas.
-        let mut corrected_gas = Gas::new_spent(gas_limit);
-        corrected_gas.erase_cost(gas_limit - total_gas_spent);
+        // Create new Gas with correct limit, because Gas does not have a set_limit method
+        // (the frame_result has the limit from just the last call)
+        let mut corrected_gas = Gas::new(evm.ctx().tx().gas_limit());
+        corrected_gas.set_remaining(result.gas().remaining());
         corrected_gas.set_refund(accumulated_gas_refund);
         corrected_gas.set_state_gas_spent(accumulated_state_gas_spent);
+        corrected_gas.set_reservoir(reservoir);
+
         *result.gas_mut() = corrected_gas;
 
         Ok(result)
@@ -731,10 +653,11 @@ where
     fn execute_multi_call(
         &mut self,
         evm: &mut TempoEvm<DB, I>,
-        init_and_floor_gas: &InitialAndFloorGas,
+        gas_limit: u64,
+        reservoir: u64,
         calls: Vec<tempo_primitives::transaction::Call>,
     ) -> Result<FrameResult, EVMError<DB::Error, TempoInvalidTransaction>> {
-        self.execute_multi_call_with(evm, init_and_floor_gas, calls, Self::execute_single_call)
+        self.execute_multi_call_with(evm, gas_limit, reservoir, calls, Self::execute_single_call)
     }
 
     /// Executes a standard single-call transaction with inspector support.
@@ -744,12 +667,13 @@ where
     fn inspect_execute_single_call(
         &mut self,
         evm: &mut TempoEvm<DB, I>,
-        init_and_floor_gas: &InitialAndFloorGas,
+        gas_limit: u64,
+        reservoir: u64,
     ) -> Result<FrameResult, EVMError<DB::Error, TempoInvalidTransaction>>
     where
         I: Inspector<TempoContext<DB>, EthInterpreter>,
     {
-        self.execute_single_call_with(evm, init_and_floor_gas, Self::inspect_run_exec_loop)
+        self.execute_single_call_with(evm, gas_limit, reservoir, Self::inspect_run_exec_loop)
     }
 
     /// Executes a multi-call AA transaction atomically with inspector support.
@@ -759,7 +683,8 @@ where
     fn inspect_execute_multi_call(
         &mut self,
         evm: &mut TempoEvm<DB, I>,
-        init_and_floor_gas: &InitialAndFloorGas,
+        gas_limit: u64,
+        reservoir: u64,
         calls: Vec<tempo_primitives::transaction::Call>,
     ) -> Result<FrameResult, EVMError<DB::Error, TempoInvalidTransaction>>
     where
@@ -767,51 +692,11 @@ where
     {
         self.execute_multi_call_with(
             evm,
-            init_and_floor_gas,
+            gas_limit,
+            reservoir,
             calls,
             Self::inspect_execute_single_call,
         )
-    }
-
-    /// Inspector-aware execution with a custom exec loop for standard (non-AA) transactions.
-    ///
-    /// Dispatches based on transaction type:
-    /// - AA transactions (type 0x76): Use batch execution path with calls field
-    /// - All other transactions: Use standard single-call execution
-    ///
-    /// This mirrors the logic in [`Handler::execution`] but uses inspector-aware execution methods.
-    ///
-    /// Additionally, delegates the standard single-call execution to the `exec_loop` closure.
-    /// This allows downstream consumers like the `FoundryHandler` to inject custom execution
-    /// loop logic (such as CREATE2 factory routing) while preserving all Tempo-specific
-    /// behavior as a single source of truth.
-    pub fn inspect_execution_with<F>(
-        &mut self,
-        evm: &mut TempoEvm<DB, I>,
-        init_and_floor_gas: &InitialAndFloorGas,
-        mut exec_loop: F,
-    ) -> Result<FrameResult, EVMError<DB::Error, TempoInvalidTransaction>>
-    where
-        F: FnMut(
-            &mut Self,
-            &mut TempoEvm<DB, I>,
-            <<TempoEvm<DB, I> as EvmTr>::Frame as FrameTr>::FrameInit,
-        ) -> Result<FrameResult, EVMError<DB::Error, TempoInvalidTransaction>>,
-        I: Inspector<TempoContext<DB>, EthInterpreter>,
-    {
-        let spec = *evm.ctx_ref().cfg().spec();
-        let tx = evm.tx();
-
-        if let Some(oog) = check_gas_limit(spec, tx, init_and_floor_gas) {
-            return Ok(oog);
-        }
-
-        if let Some(tempo_tx_env) = tx.tempo_tx_env.as_ref() {
-            let calls = tempo_tx_env.aa_calls.clone();
-            return self.inspect_execute_multi_call(evm, init_and_floor_gas, calls);
-        }
-
-        self.execute_single_call_with(evm, init_and_floor_gas, &mut exec_loop)
     }
 }
 
@@ -847,11 +732,17 @@ where
             return Ok(oog);
         }
 
-        if let Some(tempo_tx_env) = tx.tempo_tx_env.as_ref() {
+        let (gas_limit, reservoir) = init_and_floor_gas.initial_gas_and_reservoir(
+            tx.gas_limit,
+            evm.ctx().cfg().tx_gas_limit_cap(),
+            evm.ctx.cfg().is_amsterdam_eip8037_enabled(),
+        );
+
+        if let Some(tempo_tx_env) = evm.ctx().tx().tempo_tx_env.as_ref() {
             let calls = tempo_tx_env.aa_calls.clone();
-            self.execute_multi_call(evm, init_and_floor_gas, calls)
+            self.execute_multi_call(evm, gas_limit, reservoir, calls)
         } else {
-            self.execute_single_call(evm, init_and_floor_gas)
+            self.execute_single_call(evm, gas_limit, reservoir)
         }
     }
 
@@ -2118,11 +2009,17 @@ where
             return Ok(oog);
         }
 
-        if let Some(tempo_tx_env) = tx.tempo_tx_env.as_ref() {
+        let (gas_limit, reservoir) = init_and_floor_gas.initial_gas_and_reservoir(
+            tx.gas_limit,
+            evm.ctx().cfg().tx_gas_limit_cap(),
+            evm.ctx.cfg().is_amsterdam_eip8037_enabled(),
+        );
+
+        if let Some(tempo_tx_env) = evm.ctx().tx().tempo_tx_env.as_ref() {
             let calls = tempo_tx_env.aa_calls.clone();
-            self.inspect_execute_multi_call(evm, init_and_floor_gas, calls)
+            self.inspect_execute_multi_call(evm, gas_limit, reservoir, calls)
         } else {
-            self.inspect_execute_single_call(evm, init_and_floor_gas)
+            self.inspect_execute_single_call(evm, gas_limit, reservoir)
         }
     }
 }
@@ -3639,14 +3536,15 @@ mod tests {
         let (mut call_idx, calls_gas) = (0, [(SPENT.0, REFUND.0), (SPENT.1, REFUND.1)]);
         let result = handler.execute_multi_call_with(
             &mut evm,
-            &InitialAndFloorGas::new(INTRINSIC_GAS, 0),
+            GAS_LIMIT - INTRINSIC_GAS,
+            0,
             calls,
-            |_handler, _evm, _gas| {
+            |_handler, _evm, gas, _reservoir| {
                 let (spent, refund) = calls_gas[call_idx];
                 call_idx += 1;
 
                 // Create gas with specific spent and refund values
-                let mut gas = Gas::new(GAS_LIMIT);
+                let mut gas = Gas::new(gas);
                 gas.set_spent(spent);
                 gas.record_refund(refund);
 
@@ -5040,69 +4938,6 @@ mod tests {
             corrected_gas.reservoir(),
             0,
             "Flattened gas must have zero reservoir"
-        );
-    }
-
-    /// TIP-1016: On AA batch failure, checkpoint_revert rolls back ALL state
-    /// changes from prior successful subcalls. Since no state was actually
-    /// grown, state_gas_spent must be zero and the reverted state gas must NOT
-    /// be reclassified as regular gas.
-    ///
-    /// Exercises [`reconstruct_failed_batch_gas`] which encapsulates the gas
-    /// reconstruction logic from the failure path of `execute_multi_call_with`.
-    #[test]
-    fn test_state_gas_multi_call_failure_zeros_state_gas() {
-        // Model a two-call AA batch:
-        //   Call 1 (success): 20k regular + 230k state = 250k total gas
-        //   Call 2 (revert):  50k regular gas
-        //
-        // Multi-call subcalls run with reservoir=0 (InitialAndFloorGas::new(0,0)),
-        // so all state gas is paid from gas_left. This means remaining_gas is
-        // decremented by the full total_gas_spent (regular + state) of each call.
-        let gas_limit: u64 = 1_000_000;
-        let prior_regular_gas: u64 = 20_000;
-        let prior_state_gas: u64 = 230_000;
-        let prior_total_gas = prior_regular_gas + prior_state_gas;
-        let failed_call_gas: u64 = 50_000; // regular only (last_frame_result zeros state on revert)
-        let failed_call_reservoir: u64 = 10_000; // state gas refunded to reservoir on revert
-
-        // After call 1 succeeds: remaining_gas -= prior_total_gas
-        let remaining_gas = gas_limit - prior_total_gas;
-
-        let corrected_gas = reconstruct_failed_batch_gas(
-            gas_limit,
-            remaining_gas,
-            prior_state_gas,
-            failed_call_gas,
-            failed_call_reservoir,
-            0,    // initial_state_gas (T4: already reserved)
-            true, // is_revert
-        );
-
-        let expected_regular = prior_regular_gas + failed_call_gas - failed_call_reservoir;
-
-        assert_eq!(
-            corrected_gas.total_gas_spent(),
-            expected_regular,
-            "Failed batch total_gas_spent must exclude reverted state gas"
-        );
-        assert_eq!(
-            corrected_gas.state_gas_spent(),
-            0,
-            "Failed batch must have zero state_gas_spent (no state persisted)"
-        );
-
-        // Verify block_regular_gas_used via ResultGas
-        let result_gas = revm::context::result::ResultGas::default()
-            .with_total_gas_spent(corrected_gas.total_gas_spent())
-            .with_refunded(0)
-            .with_floor_gas(0)
-            .with_state_gas_spent(corrected_gas.state_gas_spent());
-
-        assert_eq!(
-            result_gas.block_regular_gas_used(),
-            expected_regular,
-            "block_regular_gas_used must equal regular gas only, not inflated by reverted state gas"
         );
     }
 

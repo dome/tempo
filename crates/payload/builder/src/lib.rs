@@ -92,8 +92,14 @@ pub struct TempoPayloadBuilder<Provider> {
     /// last height at which we've seen an invalid subblock, and not including any subblocks
     /// at this height for any payloads.
     highest_invalid_subblock: Arc<AtomicU64>,
-    /// Whether the node is configured in `--dev` miner mode.
-    is_dev: bool,
+    /// In `--dev` mode, the duration the payload builder will keep polling the
+    /// transaction pool before returning the best payload. Mirrors the
+    /// `--consensus.minimum-time-before-propose` sleep that the consensus actor
+    /// performs before interrupting the builder in production.
+    ///
+    /// `None` when running with the real consensus stack (the external
+    /// interrupt handle is used instead).
+    dev_build_duration: Option<Duration>,
     /// Whether to enable state provider metrics.
     state_provider_metrics: bool,
     /// Whether to disable state cache.
@@ -105,7 +111,7 @@ impl<Provider> TempoPayloadBuilder<Provider> {
         pool: TempoTransactionPool<Provider>,
         provider: Provider,
         evm_config: TempoEvmConfig,
-        is_dev: bool,
+        dev_build_duration: Option<Duration>,
         state_provider_metrics: bool,
         disable_state_cache: bool,
     ) -> Self {
@@ -115,7 +121,7 @@ impl<Provider> TempoPayloadBuilder<Provider> {
             evm_config,
             metrics: TempoPayloadBuilderMetrics::default(),
             highest_invalid_subblock: Default::default(),
-            is_dev,
+            dev_build_duration,
             state_provider_metrics,
             disable_state_cache,
         }
@@ -250,8 +256,10 @@ where
         let build_until_interrupt =
             // When trie handle is provided, we only build the payload once, until the interrupt is triggered
             trie_handle.is_some()
-            // `--dev` mode doesn't have payload building interrupts
-            && !self.is_dev;
+            // In `--dev` mode, use a deadline to simulate the consensus interrupt
+            || self.dev_build_duration.is_some();
+
+        let start = Instant::now();
 
         macro_rules! check_cancel {
             () => {
@@ -260,10 +268,17 @@ where
                 }
             };
         }
+        macro_rules! check_interrupt {
+            () => {
+                if attributes.is_interrupted()
+                    || self.dev_build_duration.is_some_and(|d| start.elapsed() > d)
+                {
+                    break;
+                }
+            };
+        }
 
         check_cancel!();
-
-        let start = Instant::now();
 
         let block_time_millis =
             (attributes.timestamp_millis() - parent_header.timestamp_millis()) as f64;
@@ -437,11 +452,8 @@ where
         let execution_start = Instant::now();
         let _block_fill_span = debug_span!(target: "payload_builder", "block_fill").entered();
         loop {
-            if attributes.is_interrupted() {
-                break;
-            }
-
             check_cancel!();
+            check_interrupt!();
 
             let Some(pool_tx) = best_txs.next() else {
                 if build_until_interrupt && cumulative_gas_used < non_shared_gas_limit {
@@ -486,11 +498,9 @@ where
             }
 
             // check if the job was interrupted, if so we can skip remaining transactions
-            if attributes.is_interrupted() {
-                break;
-            }
-
             check_cancel!();
+            check_interrupt!();
+
             let is_payment = pool_tx.transaction.is_payment();
             if is_payment {
                 payment_transactions += 1;

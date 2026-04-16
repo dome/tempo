@@ -6,7 +6,6 @@ tempo-dev-up:
 		--chain genesis/staccato.json \
 		--datadir data \
 		--dev \
-		--dev.block-time 1sec \
 		--http \
 		--http.addr 0.0.0.0 \
 		--http.port 8545 \

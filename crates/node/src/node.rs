@@ -35,7 +35,7 @@ use reth_rpc_eth_api::{
 };
 use reth_tracing::tracing::{debug, info};
 use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
-use std::default::Default;
+use std::{default::Default, time::Duration};
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_consensus::TempoConsensus;
 use tempo_evm::TempoEvmConfig;
@@ -81,8 +81,12 @@ impl TempoNodeArgs {
     }
 
     /// Returns a [`TempoPayloadBuilderBuilder`] configured from these args.
-    pub fn payload_builder_builder(&self) -> TempoPayloadBuilderBuilder {
+    pub fn payload_builder_builder(
+        &self,
+        dev_build_duration: Option<Duration>,
+    ) -> TempoPayloadBuilderBuilder {
         TempoPayloadBuilderBuilder {
+            dev_build_duration,
             state_provider_metrics: self.builder_state_provider_metrics,
             disable_state_cache: self.builder_disable_state_cache,
         }
@@ -103,10 +107,14 @@ pub struct TempoNode {
 
 impl TempoNode {
     /// Create new instance of a Tempo node
-    pub fn new(args: &TempoNodeArgs, validator_key: Option<B256>) -> Self {
+    pub fn new(
+        args: &TempoNodeArgs,
+        validator_key: Option<B256>,
+        dev_build_duration: Option<Duration>,
+    ) -> Self {
         Self {
             pool_builder: args.pool_builder(),
-            payload_builder_builder: args.payload_builder_builder(),
+            payload_builder_builder: args.payload_builder_builder(dev_build_duration),
             validator_key,
         }
     }
@@ -490,6 +498,10 @@ where
 #[derive(Debug, Default, Clone, Copy)]
 #[non_exhaustive]
 pub struct TempoPayloadBuilderBuilder {
+    /// In `--dev` mode, the duration the payload builder will keep polling the
+    /// transaction pool before returning. Uses the same value as
+    /// `--consensus.minimum-time-before-propose`.
+    pub dev_build_duration: Option<Duration>,
     /// Enable state provider metrics for the payload builder.
     pub state_provider_metrics: bool,
     /// Disable state cache for the payload builder.
@@ -513,7 +525,7 @@ where
             pool,
             ctx.provider().clone(),
             evm_config,
-            ctx.is_dev(),
+            self.dev_build_duration,
             self.state_provider_metrics,
             self.disable_state_cache,
         ))

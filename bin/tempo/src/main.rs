@@ -544,13 +544,29 @@ fn main() -> eyre::Result<()> {
             None
         };
         let chain_id = builder.config().chain.chain().id();
+        let dev_build_duration = builder
+            .config()
+            .dev
+            .dev
+            .then(|| args.consensus.minimum_time_before_propose.into_duration());
 
         let NodeHandle {
             node,
             node_exit_future,
         } = builder
-            .node(TempoNode::new(&args.node_args, validator_key))
+            .node(TempoNode::new(
+                &args.node_args,
+                validator_key,
+                dev_build_duration,
+            ))
             .apply(|mut builder: WithLaunchContext<_>| {
+                // Default `--dev.block-time` to `--consensus.minimum-time-before-propose`
+                // so the mining interval matches the payload builder's interrupt deadline.
+                // An explicit `--dev.block-time` on the CLI takes precedence.
+                if let Some(duration) = dev_build_duration {
+                    builder.config_mut().dev.block_time.get_or_insert(duration);
+                }
+
                 // Enable discv5 peer discovery
                 builder
                     .config_mut()

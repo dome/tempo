@@ -1227,7 +1227,6 @@ def build-base-args [genesis_path: string, datadir: string, log_dir: string, bin
 def build-dev-args [] {
     [
         "--dev"
-        "--dev.block-time" "1sec"
         "--builder.gaslimit" "3000000000"
         "--builder.deadline" "3"
     ]

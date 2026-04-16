@@ -162,6 +162,7 @@ pub struct TempoAddOns<N: FullNodeTypes<Types = TempoNode>> {
         NoopEngineApiBuilder,
         BasicEngineValidatorBuilder<TempoEngineValidatorBuilder>,
         Identity,
+        Identity,
     >,
     validator_key: Option<B256>,
 }
@@ -178,6 +179,7 @@ where
                 TempoEngineValidatorBuilder,
                 NoopEngineApiBuilder::default(),
                 BasicEngineValidatorBuilder::default(),
+                Identity::default(),
                 Identity::default(),
             ),
             validator_key,

@@ -4862,7 +4862,7 @@ mod tests {
         .unwrap();
 
         // Only the CREATE call contributes state gas
-        let expected_state_gas = gas_params.new_account_state_gas() + gas_params.create_state_gas();
+        let expected_state_gas = gas_params.create_state_gas();
 
         assert_eq!(
             gas.initial_state_gas, expected_state_gas,

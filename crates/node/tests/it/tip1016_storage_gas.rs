@@ -335,14 +335,18 @@ async fn test_tip1016_tip20_transfer_existing_no_storage_creation() -> eyre::Res
     let signer = MnemonicBuilder::from_phrase(TEST_MNEMONIC)
         .index(0)?
         .build()?;
+    let signer2 = MnemonicBuilder::from_phrase(TEST_MNEMONIC)
+        .index(1)?
+        .build()?;
     let provider = ProviderBuilder::new().connect_http(setup.node.rpc_url());
     let chain_id = provider.get_chain_id().await?;
 
     let sender = signer.address();
+    let receiver = signer2.address();
     let token =
         tempo_precompiles::tip20::ITIP20::new(tempo_precompiles::PATH_USD_ADDRESS, &provider);
 
-    // Mint tokens to sender
+    // Mint tokens to both signers
     let mint_calldata: Bytes = token.mint(sender, U256::from(1_000_000)).calldata().clone();
     let mint_raw = build_call_tx(
         &signer,
@@ -353,14 +357,27 @@ async fn test_tip1016_tip20_transfer_existing_no_storage_creation() -> eyre::Res
         mint_calldata,
     );
     setup.node.rpc.inject_tx(mint_raw).await?;
-    setup.node.advance_block().await?;
-
-    // Transfer to self (existing account, existing balance slot) -- no storage creation
-    let transfer_calldata: Bytes = token.transfer(sender, U256::from(100)).calldata().clone();
-    let transfer_raw = build_call_tx(
+    let mint_calldata: Bytes = token
+        .mint(receiver, U256::from(1_000_000))
+        .calldata()
+        .clone();
+    let mint_raw2 = build_call_tx(
         &signer,
         chain_id,
         1,
+        5_000_000,
+        tempo_precompiles::PATH_USD_ADDRESS,
+        mint_calldata,
+    );
+    setup.node.rpc.inject_tx(mint_raw2).await?;
+    setup.node.advance_block().await?;
+
+    // Transfer to second receiver (existing account, existing balance slot) -- no storage creation
+    let transfer_calldata: Bytes = token.transfer(receiver, U256::from(100)).calldata().clone();
+    let transfer_raw = build_call_tx(
+        &signer,
+        chain_id,
+        2,
         5_000_000,
         tempo_precompiles::PATH_USD_ADDRESS,
         transfer_calldata,

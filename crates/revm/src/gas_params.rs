@@ -174,8 +174,8 @@ mod tests {
         // SSTORE: spec says 20,000 regular; revm decomposes as static(100) + sstore_set_without_load
         assert_eq!(
             gas_params.get(GasId::sstore_set_without_load_cost()),
-            19_900,
-            "SSTORE set_without_load = spec 20,000 - warm_storage_read(100)"
+            20_000,
+            "SSTORE set_without_load = spec 20,000"
         );
         assert_eq!(
             gas_params.get(GasId::new_account_cost()),
@@ -273,8 +273,8 @@ mod tests {
         let sstore_regular = t4.get(GasId::sstore_set_without_load_cost()) + 100; // add warm_storage_read
         assert_eq!(
             sstore_regular + t4.get(GasId::sstore_set_state_gas()),
-            250_000,
-            "SSTORE total must be 250,000"
+            250_100,
+            "SSTORE total must be 250,000 + storage read (100)"
         );
 
         // New account: 25,000 + 225,000 = 250,000

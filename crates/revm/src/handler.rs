@@ -870,43 +870,6 @@ where
             .map(|result| result.map_haltreason(Into::into))
     }
 
-    /// Overridden pre_execution to synchronize `init_and_floor_gas` with state-dependent
-    /// gas adjustments made during `validate_against_state_and_deduct_caller`.
-    ///
-    /// After the parent's pre_execution runs, `evm.initial_gas` and `evm.initial_state_gas`
-    /// may have been updated (e.g., 2D nonce account creation, key authorization, scope
-    /// validation). We propagate these into `init_and_floor_gas` so that `post_execution`'s
-    /// `build_result_gas` uses the same gas values as `execution`, ensuring deterministic
-    /// state gas accounting between payload building and validation.
-    #[inline]
-    fn pre_execution(
-        &self,
-        evm: &mut Self::Evm,
-        init_and_floor_gas: &mut InitialAndFloorGas,
-    ) -> Result<u64, Self::Error> {
-        // Run the standard pre_execution pipeline (validate_against_state, load_accounts,
-        // apply_eip7702_auth_list).
-        self.validate_against_state_and_deduct_caller(evm)?;
-        self.load_accounts(evm)?;
-        let gas = self.apply_eip7702_auth_list(evm, init_and_floor_gas)?;
-
-        // TIP-1016: Synchronize init_and_floor_gas with state-dependent gas adjustments.
-        // evm.initial_gas includes regular gas additions (key_auth delta, scope validation).
-        // evm.initial_state_gas includes state gas additions (account creation state gas).
-        // Both must be reflected in init_and_floor_gas so that post_execution's
-        // build_result_gas produces the same ResultGas as the execution path used.
-        let spec = evm.ctx_ref().cfg().spec();
-        if spec.is_t1() && init_and_floor_gas.initial_total_gas > 0 {
-            // Propagate evm.initial_state_gas into init_and_floor_gas.
-            // evm.initial_gas already contains init_and_floor_gas.initial_total_gas as base,
-            // plus regular gas additions. Adding evm.initial_state_gas gives the full total.
-            init_and_floor_gas.initial_state_gas += evm.initial_state_gas;
-            init_and_floor_gas.initial_total_gas = evm.initial_gas + evm.initial_state_gas;
-        }
-
-        Ok(gas)
-    }
-
     /// Override apply_eip7702_auth_list to support AA transactions with authorization lists.
     ///
     /// The default implementation only processes authorization lists for TransactionType::Eip7702 (0x04).
@@ -962,6 +925,7 @@ where
     fn validate_against_state_and_deduct_caller(
         &self,
         evm: &mut Self::Evm,
+        init_and_floor_gas: &mut InitialAndFloorGas,
     ) -> Result<(), Self::Error> {
         self.seed_tx_origin(evm)?;
 
@@ -1030,17 +994,20 @@ where
             && tx.first_call().is_some_and(|(kind, _)| kind.is_create())
             && caller_account.nonce() == 0
         {
-            evm.initial_gas += cfg.gas_params().get(GasId::new_account_cost());
-            // TIP-1016: Track state gas for new account creation (T4+ only)
-            if spec.is_t4() {
-                evm.initial_state_gas += cfg.gas_params().new_account_state_gas();
-            }
-
+            let account_cost = cfg.gas_params.get(GasId::new_account_cost());
+            let account_state_gas = if spec.is_t4() {
+                cfg.gas_params.new_account_state_gas()
+            } else {
+                0
+            };
+            init_and_floor_gas.initial_total_gas += account_cost + account_state_gas;
+            init_and_floor_gas.initial_state_gas += account_state_gas;
+            
             // do the gas limit check again (include state gas for T4+).
-            if tx.gas_limit() < evm.initial_gas + evm.initial_state_gas {
+            if tx.gas_limit() < init_and_floor_gas.initial_total_gas {
                 return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
                     gas_limit: tx.gas_limit(),
-                    initial_gas: evm.initial_gas,
+                    initial_gas: init_and_floor_gas.initial_total_gas,
                 }
                 .into());
             }
@@ -1249,7 +1216,7 @@ where
             // unlimited gas also eliminates the OOG path that caused the CREATE
             // nonce replay vulnerability (protocol nonce not bumped on OOG).
             let gas_limit = if spec.is_t1() && !spec.is_t1b() {
-                tx.gas_limit() - evm.initial_gas
+                tx.gas_limit() - init_and_floor_gas.initial_total_gas
             } else {
                 u64::MAX
             };
@@ -1368,10 +1335,10 @@ where
                 if spec.is_t1b() {
                     journal.checkpoint_commit();
                 } else if out_of_gas {
-                    evm.initial_gas = u64::MAX;
+                    init_and_floor_gas.initial_total_gas = u64::MAX;
                     journal.checkpoint_revert(keychain_checkpoint);
                 } else {
-                    evm.initial_gas += gas_used;
+                    init_and_floor_gas.initial_total_gas += gas_used;
                     journal.checkpoint_commit();
                 };
             }
@@ -1798,9 +1765,6 @@ where
 
             init_gas
         };
-
-        // used to calculate key_authorization gas spending limit.
-        evm.initial_gas = init_gas.initial_total_gas;
 
         Ok(init_gas)
     }
@@ -2289,7 +2253,8 @@ mod tests {
             (),
         );
 
-        let result = handler.validate_against_state_and_deduct_caller(&mut evm);
+        let result =
+            handler.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default());
 
         assert!(
             matches!(
@@ -3429,7 +3394,7 @@ mod tests {
         evm.inner.ctx.tx.inner.gas_limit = init_gas.initial_total_gas;
 
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .expect("scope validation no longer runs during state validation");
 
         let result = handler
@@ -3551,7 +3516,7 @@ mod tests {
             .expect("initial gas validation should succeed");
 
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .expect("scope validation no longer runs during state validation");
 
         let result = handler
@@ -4450,7 +4415,7 @@ mod tests {
             let (mut evm, h) = make_evm(user, key, Some(signed), TempoHardfork::T2, None, true);
 
             assert!(matches!(
-                h.validate_against_state_and_deduct_caller(&mut evm),
+                h.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default()),
                 Err(EVMError::Transaction(
                     TempoInvalidTransaction::KeyAuthorizationNotSignedByRoot { .. }
                 ))
@@ -4470,7 +4435,7 @@ mod tests {
             let (mut evm, h) = make_evm(user, tx_key, Some(signed), TempoHardfork::T2, None, true);
 
             assert!(matches!(
-                h.validate_against_state_and_deduct_caller(&mut evm),
+                h.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default()),
                 Err(EVMError::Transaction(
                     TempoInvalidTransaction::AccessKeyCannotAuthorizeOtherKeys
                 ))
@@ -4488,7 +4453,7 @@ mod tests {
                 );
                 let (mut evm, h) = make_evm(user, key, Some(signed), spec, None, false);
 
-                let result = h.validate_against_state_and_deduct_caller(&mut evm);
+                let result = h.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default());
                 if !spec.is_t1c() {
                     assert!(
                         result.is_ok(),
@@ -4516,7 +4481,7 @@ mod tests {
                 );
                 let (mut evm, h) = make_evm(user, key, Some(signed), spec, None, true);
                 assert!(
-                    h.validate_against_state_and_deduct_caller(&mut evm)
+                    h.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
                         .is_err(),
                     "{spec:?}: wrong chain_id should be rejected"
                 );
@@ -4529,7 +4494,7 @@ mod tests {
                     KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, key),
                 );
                 let (mut evm, h) = make_evm(user, key, Some(signed), spec, None, true);
-                let result = h.validate_against_state_and_deduct_caller(&mut evm);
+                let result = h.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default());
                 assert!(
                     !matches!(&result, Err(EVMError::Transaction(TempoInvalidTransaction::KeychainValidationFailed { reason })) if reason.contains("chain_id")),
                     "{spec:?}: matching chain_id should be accepted, got: {result:?}"
@@ -4550,7 +4515,7 @@ mod tests {
             );
             let (mut evm, h) = make_evm(user, key, Some(signed), TempoHardfork::T2, None, false);
 
-            let _ = h.validate_against_state_and_deduct_caller(&mut evm);
+            let _ = h.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default());
             assert_eq!(evm.key_expiry, Some(expiry));
         }
 
@@ -4565,7 +4530,7 @@ mod tests {
                 true,
             );
 
-            let result = h.validate_against_state_and_deduct_caller(&mut evm);
+            let result = h.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default());
             assert!(
                 !matches!(
                     result,
@@ -4626,7 +4591,7 @@ mod tests {
             );
             let (mut evm, h) = make_evm(user, key, Some(signed), TempoHardfork::T2, None, false);
 
-            let result = h.validate_against_state_and_deduct_caller(&mut evm);
+            let result = h.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default());
             assert!(
                 !matches!(
                     result,

@@ -357,4 +357,15 @@ vergen-git2 = "9.1.0"
 # reth-trie-sparse = { path = "../reth/crates/trie/sparse" }
 # reth-trie-sparse-parallel = { path = "../reth/crates/trie/sparse-parallel" }
 
-# [patch.crates-io]
+[patch.crates-io]
+revm = { git = "https://github.com/bluealloy/revm", rev = "a1a1824" }
+revm-bytecode = { git = "https://github.com/bluealloy/revm", rev = "a1a1824" }
+revm-database = { git = "https://github.com/bluealloy/revm", rev = "a1a1824" }
+revm-state = { git = "https://github.com/bluealloy/revm", rev = "a1a1824" }
+revm-primitives = { git = "https://github.com/bluealloy/revm", rev = "a1a1824" }
+revm-interpreter = { git = "https://github.com/bluealloy/revm", rev = "a1a1824" }
+revm-database-interface = { git = "https://github.com/bluealloy/revm", rev = "a1a1824" }
+reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth-core", rev = "6b12498" }
+reth-codecs = { git = "https://github.com/paradigmxyz/reth-core", rev = "6b12498" }
+reth-codecs-derive = { git = "https://github.com/paradigmxyz/reth-core", rev = "6b12498" }
+reth-zstd-compressors = { git = "https://github.com/paradigmxyz/reth-core", rev = "6b12498" }

@@ -104,10 +104,6 @@ pub struct TempoEvm<DB: Database, I> {
     >,
     /// The fee collected in `collectFeePreTx` call.
     pub(crate) collected_fee: U256,
-    /// Initial gas cost. Used for key_authorization validation in collectFeePreTx.
-    ///
-    /// Additional initial gas cost is added for authorization_key setting in pre execution.
-    pub(crate) initial_gas: u64,
     /// The fee token used to pay fees for the current transaction.
     pub(crate) fee_token: Option<Address>,
     /// The expiry timestamp of the access key used by the current transaction.
@@ -123,9 +119,6 @@ pub struct TempoEvm<DB: Database, I> {
     /// The transaction pool sets this because it performs its own liquidity
     /// validation against a cached view of the AMM state.
     pub skip_liquidity_check: bool,
-    /// Initial state gas accumulated during validate_against_state_and_deduct_caller.
-    /// Tracks state gas from runtime checks (e.g. 2D nonce account creation, CREATE state gas).
-    pub(crate) initial_state_gas: u64,
 }
 
 impl<DB: Database, I> TempoEvm<DB, I> {
@@ -160,12 +153,10 @@ impl<DB: Database, I> TempoEvm<DB, I> {
         Self {
             inner,
             collected_fee: U256::ZERO,
-            initial_gas: 0,
             fee_token: None,
             key_expiry: None,
             skip_valid_after_check: false,
             skip_liquidity_check: false,
-            initial_state_gas: 0,
         }
     }
 }
@@ -188,8 +179,6 @@ impl<DB: Database, I> TempoEvm<DB, I> {
 
     /// Clears all intermediate state from the EVM.
     pub fn clear(&mut self) {
-        self.initial_gas = 0;
-        self.initial_state_gas = 0;
         self.fee_token = None;
         self.key_expiry = None;
     }
@@ -1752,21 +1741,6 @@ mod tests {
     }
 
     // ==================== TIP-1000 EVM Configuration Tests ====================
-
-    /// Test that TempoEvm preserves initial fields when using with_inspector.
-    #[test]
-    fn test_tempo_evm_with_inspector_preserves_fields() {
-        let evm = create_evm();
-
-        // Use with_inspector to get a new EVM with CountInspector
-        let evm_with_inspector = evm.with_inspector(CountInspector::new());
-
-        // Verify fields are still initialized correctly
-        assert_eq!(
-            evm_with_inspector.initial_gas, 0,
-            "initial_gas should be 0 after with_inspector"
-        );
-    }
 
     /// Test AA transaction gas usage for simple identity precompile call.
     /// This establishes a baseline for gas comparison.

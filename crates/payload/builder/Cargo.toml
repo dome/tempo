@@ -24,6 +24,7 @@ reth-chainspec.workspace = true
 reth-consensus-common.workspace = true
 reth-engine-tree.workspace = true
 reth-errors.workspace = true
+reth-execution-cache.workspace = true
 reth-execution-types.workspace = true
 reth-evm.workspace = true
 reth-metrics.workspace = true

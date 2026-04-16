@@ -143,6 +143,7 @@ reth-ethereum-cli = { git = "https://github.com/paradigmxyz/reth", rev = "199b74
 reth-ethereum-consensus = { git = "https://github.com/paradigmxyz/reth", rev = "199b746" }
 reth-ethereum-engine-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "199b746" }
 reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "199b746", default-features = false }
+reth-execution-cache = { git = "https://github.com/paradigmxyz/reth", rev = "199b746" }
 reth-execution-types = { git = "https://github.com/paradigmxyz/reth", rev = "199b746" }
 reth-evm = { git = "https://github.com/paradigmxyz/reth", rev = "199b746" }
 reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "199b746" }

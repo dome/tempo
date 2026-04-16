@@ -12708,6 +12708,7 @@ dependencies = [
  "reth-engine-tree",
  "reth-errors",
  "reth-evm",
+ "reth-execution-cache",
  "reth-execution-types",
  "reth-metrics",
  "reth-payload-builder",

@@ -23,6 +23,7 @@ use reth_evm::{
     block::{BlockExecutionError, BlockExecutor, BlockValidationError},
     execute::{BlockBuilder, BlockBuilderOutcome},
 };
+use reth_execution_cache::{CachedStateMetrics, CachedStateMetricsSource};
 use reth_execution_types::BlockExecutionOutput;
 use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
 use reth_payload_primitives::{BuiltPayload, BuiltPayloadExecutedBlock};
@@ -82,6 +83,7 @@ pub struct TempoPayloadBuilder<Provider> {
     provider: Provider,
     evm_config: TempoEvmConfig,
     metrics: TempoPayloadBuilderMetrics,
+    cache_metrics: CachedStateMetrics,
     /// Height at which we've seen an invalid subblock.
     ///
     /// We pre-validate all of the subblock transactions when collecting subblocks, so this
@@ -117,6 +119,7 @@ impl<Provider> TempoPayloadBuilder<Provider> {
             provider,
             evm_config,
             metrics: TempoPayloadBuilderMetrics::default(),
+            cache_metrics: CachedStateMetrics::zeroed(CachedStateMetricsSource::Builder),
             highest_invalid_subblock: Default::default(),
             is_dev,
             state_provider_metrics,
@@ -284,7 +287,7 @@ where
             state_provider = Box::new(CachedStateProvider::new(
                 state_provider,
                 execution_cache.cache().clone(),
-                execution_cache.metrics().clone(),
+                self.cache_metrics.clone(),
             ));
         }
         state_provider = if self.state_provider_metrics {

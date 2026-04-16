@@ -1400,7 +1400,7 @@ mod tests {
         let info = acc.account_info();
         assert!(
             info.is_none() || info.unwrap().is_empty_code_hash(),
-            "SignatureVerifier code should not be deployed before T4"
+            "SignatureVerifier code should not be deployed before T3"
         );
     }
 

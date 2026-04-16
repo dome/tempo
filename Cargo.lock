@@ -12759,7 +12759,7 @@ dependencies = [
 
 [[package]]
 name = "tempo-precompiles"
-version = "1.6.0"
+version = "1.5.3"
 dependencies = [
  "alloy",
  "alloy-evm",
@@ -12789,7 +12789,7 @@ dependencies = [
 
 [[package]]
 name = "tempo-precompiles-macros"
-version = "1.6.0"
+version = "1.5.3"
 dependencies = [
  "alloy",
  "proc-macro2",
@@ -12837,7 +12837,7 @@ dependencies = [
 
 [[package]]
 name = "tempo-revm"
-version = "1.6.0"
+version = "1.5.3"
 dependencies = [
  "alloy-consensus",
  "alloy-eips 2.0.0",

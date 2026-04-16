@@ -1002,7 +1002,7 @@ where
             };
             init_and_floor_gas.initial_total_gas += account_cost + account_state_gas;
             init_and_floor_gas.initial_state_gas += account_state_gas;
-            
+
             // do the gas limit check again (include state gas for T4+).
             if tx.gas_limit() < init_and_floor_gas.initial_total_gas {
                 return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
@@ -4453,7 +4453,8 @@ mod tests {
                 );
                 let (mut evm, h) = make_evm(user, key, Some(signed), spec, None, false);
 
-                let result = h.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default());
+                let result =
+                    h.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default());
                 if !spec.is_t1c() {
                     assert!(
                         result.is_ok(),
@@ -4494,7 +4495,8 @@ mod tests {
                     KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, key),
                 );
                 let (mut evm, h) = make_evm(user, key, Some(signed), spec, None, true);
-                let result = h.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default());
+                let result =
+                    h.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default());
                 assert!(
                     !matches!(&result, Err(EVMError::Transaction(TempoInvalidTransaction::KeychainValidationFailed { reason })) if reason.contains("chain_id")),
                     "{spec:?}: matching chain_id should be accepted, got: {result:?}"
@@ -4530,7 +4532,8 @@ mod tests {
                 true,
             );
 
-            let result = h.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default());
+            let result =
+                h.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default());
             assert!(
                 !matches!(
                     result,
@@ -4591,7 +4594,8 @@ mod tests {
             );
             let (mut evm, h) = make_evm(user, key, Some(signed), TempoHardfork::T2, None, false);
 
-            let result = h.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default());
+            let result =
+                h.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default());
             assert!(
                 !matches!(
                     result,

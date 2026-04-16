@@ -5,11 +5,10 @@ use revm::{
     Context, Inspector,
     context::{CfgEnv, ContextError, Evm, FrameStack},
     handler::{
-        EthFrame, EvmTr, FrameInitOrResult, FrameTr, ItemOrResult,
-        instructions::EthInstructions,
+        EthFrame, EvmTr, FrameInitOrResult, FrameTr, ItemOrResult, instructions::EthInstructions,
     },
     inspector::InspectorEvmTr,
-    interpreter::{interpreter::EthInterpreter},
+    interpreter::interpreter::EthInterpreter,
 };
 use tempo_chainspec::hardfork::TempoHardfork;
 

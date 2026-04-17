@@ -3364,7 +3364,7 @@ mod tests {
         assert!(
             matches!(
                 result.instruction_result(),
-                revm::interpreter::InstructionResult::OutOfGas
+                revm::interpreter::InstructionResult::PrecompileOOG
             ),
             "expected scope validation to fail during execution with OOG, got: {:?}",
             result.instruction_result()

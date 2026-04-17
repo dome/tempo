@@ -222,7 +222,11 @@ fn call_scope_extra_gas(auth: &tempo_primitives::transaction::KeyAuthorization) 
 /// one top-level transaction result instead, so the gas field must be normalized to the full tx
 /// budget. Reverts preserve the exact gas spent across prior successful steps plus the failed step,
 /// while halts such as OOG consume the entire remaining transaction budget.
-fn normalize_failed_batch_result_gas(frame_result: &mut FrameResult, final_gas_limit: u64) {
+fn normalize_failed_batch_result_gas(
+    frame_result: &mut FrameResult,
+    final_gas_limit: u64,
+    accumulated_state_gas_spent: u64,
+) {
     // Create new Gas with correct limit, because Gas does not have a set_limit method
     // (the frame_result limit only covers the failed step).
     let mut corrected_gas = Gas::new_spent(final_gas_limit);
@@ -234,8 +238,11 @@ fn normalize_failed_batch_result_gas(frame_result: &mut FrameResult, final_gas_l
     // No state gas spending for failed calls
     corrected_gas.set_state_gas_spent(0);
     // Reservoir and state gas are refunded on failure
-    corrected_gas
-        .set_reservoir(frame_result.gas().reservoir() + frame_result.gas().state_gas_spent());
+    corrected_gas.set_reservoir(
+        frame_result.gas().reservoir()
+            + frame_result.gas().state_gas_spent()
+            + accumulated_state_gas_spent,
+    );
     *frame_result.gas_mut() = corrected_gas;
 }
 
@@ -576,7 +583,11 @@ where
         {
             // This path only runs for keychain batches that already passed the structural CREATE
             // rejection in validation, so there is no first-call CREATE nonce to preserve here.
-            normalize_failed_batch_result_gas(&mut frame_result, evm.ctx().tx().gas_limit());
+            normalize_failed_batch_result_gas(
+                &mut frame_result,
+                evm.ctx().tx().gas_limit(),
+                accumulated_state_gas_spent,
+            );
             return Ok(frame_result);
         }
 
@@ -635,7 +646,11 @@ where
                     }
                 }
 
-                normalize_failed_batch_result_gas(&mut frame_result, evm.ctx().tx().gas_limit());
+                normalize_failed_batch_result_gas(
+                    &mut frame_result,
+                    evm.ctx().tx().gas_limit(),
+                    accumulated_state_gas_spent,
+                );
 
                 return Ok(frame_result);
             }
@@ -1452,7 +1467,10 @@ where
         let effective_gas_price = tx.effective_gas_price(basefee);
         let gas = exec_result.gas();
 
-        let actual_spending = calc_gas_balance_spending(gas.used(), effective_gas_price);
+        let actual_spending = calc_gas_balance_spending(
+            gas.used().saturating_sub(gas.reservoir()),
+            effective_gas_price,
+        );
         let refund_amount = tx.effective_balance_spending(
             context.block.basefee.into(),
             context.block.blob_gasprice().unwrap_or_default(),

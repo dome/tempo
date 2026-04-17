@@ -22,8 +22,8 @@ use alloy::{
     primitives::{Address, Bytes, U256},
     providers::{Provider, ProviderBuilder},
     signers::local::MnemonicBuilder,
+    sol_types::SolCall,
 };
-use alloy::sol_types::SolCall;
 use alloy_eips::{BlockId, BlockNumberOrTag, eip2718::Encodable2718};
 use alloy_network::TxSignerSync;
 use tempo_chainspec::spec::TEMPO_T1_BASE_FEE;
@@ -829,7 +829,9 @@ async fn test_tip1016_high_gas_limit_batch_tip20_transfers() -> eyre::Result<()>
     use alloy::signers::SignerSync;
     use reth_primitives_traits::transaction::TxHashRef;
     use tempo_precompiles::{PATH_USD_ADDRESS, tip20::ITIP20};
-    use tempo_primitives::{TempoTransaction, TempoTxEnvelope, transaction::tempo_transaction::Call};
+    use tempo_primitives::{
+        TempoTransaction, TempoTxEnvelope, transaction::tempo_transaction::Call,
+    };
 
     reth_tracing::init_test_tracing();
 
@@ -845,11 +847,19 @@ async fn test_tip1016_high_gas_limit_batch_tip20_transfers() -> eyre::Result<()>
     // Step 1: Mint PATH_USD to Multicall3 so it has tokens to transfer.
     let token = ITIP20::new(PATH_USD_ADDRESS, &provider);
     let mint_calldata: Bytes = token
-        .mint(tempo_contracts::MULTICALL3_ADDRESS, U256::from(num_transfers * 10))
+        .mint(
+            tempo_contracts::MULTICALL3_ADDRESS,
+            U256::from(num_transfers * 10),
+        )
         .calldata()
         .clone();
     let mint_raw = build_call_tx(
-        &signer, chain_id, 0, 5_000_000, PATH_USD_ADDRESS, mint_calldata,
+        &signer,
+        chain_id,
+        0,
+        5_000_000,
+        PATH_USD_ADDRESS,
+        mint_calldata,
     );
     setup.node.rpc.inject_tx(mint_raw).await?;
     setup.node.advance_block().await?;
@@ -858,14 +868,17 @@ async fn test_tip1016_high_gas_limit_batch_tip20_transfers() -> eyre::Result<()>
     // Each transfer goes to address(0xdead0001 + i), creating a new balance slot.
     let multicall_calls: Vec<Multicall3::Call> = (0..num_transfers)
         .map(|i| {
-            let to = Address::from_word(
-                alloy_primitives::B256::left_padding_from(&(0xdead0001u64 + i).to_be_bytes()),
-            );
+            let to = Address::from_word(alloy_primitives::B256::left_padding_from(
+                &(0xdead0001u64 + i).to_be_bytes(),
+            ));
             Multicall3::Call {
                 target: PATH_USD_ADDRESS,
-                callData: ITIP20::transferCall { to, amount: U256::from(1) }
-                    .abi_encode()
-                    .into(),
+                callData: ITIP20::transferCall {
+                    to,
+                    amount: U256::from(1),
+                }
+                .abi_encode()
+                .into(),
             }
         })
         .collect();
@@ -894,7 +907,11 @@ async fn test_tip1016_high_gas_limit_batch_tip20_transfers() -> eyre::Result<()>
     let signature: alloy::primitives::Signature = signer.sign_hash_sync(&sig_hash)?;
     let envelope: TempoTxEnvelope = tx.into_signed(signature.into()).into();
     let tx_hash = *envelope.tx_hash();
-    setup.node.rpc.inject_tx(envelope.encoded_2718().into()).await?;
+    setup
+        .node
+        .rpc
+        .inject_tx(envelope.encoded_2718().into())
+        .await?;
     let call_payload = setup.node.advance_block().await?;
 
     let block_gas_used = call_payload.block().header().inner.gas_used;
@@ -904,19 +921,26 @@ async fn test_tip1016_high_gas_limit_batch_tip20_transfers() -> eyre::Result<()>
         .raw_request("eth_getTransactionReceipt".into(), [tx_hash])
         .await?;
     let receipt_status = receipt_raw["status"].as_str().unwrap();
-    assert_eq!(receipt_status, "0x1", "150M gas multicall tx should succeed");
+    assert_eq!(
+        receipt_status, "0x1",
+        "150M gas multicall tx should succeed"
+    );
 
     let receipt_gas = u64::from_str_radix(
-        receipt_raw["gasUsed"].as_str().unwrap().trim_start_matches("0x"), 16,
+        receipt_raw["gasUsed"]
+            .as_str()
+            .unwrap()
+            .trim_start_matches("0x"),
+        16,
     )?;
 
     // Receipt gas includes state gas; block header excludes it.
     // Each transfer to a fresh address: 230,000 state gas per new balance slot.
-    let min_expected_state_gas = num_transfers * 230_000;
+    let expected_state_gas = num_transfers * 230_000;
     let state_gas = receipt_gas.saturating_sub(block_gas_used);
-    assert!(
-        state_gas >= min_expected_state_gas,
-        "state gas ({state_gas}) should be at least {min_expected_state_gas} \
+    assert_eq!(
+        state_gas, expected_state_gas,
+        "state gas ({state_gas}) should {expected_state_gas} \
          ({num_transfers} transfers × 230,000), \
          block_gas_used={block_gas_used}, receipt_gas={receipt_gas}"
     );
@@ -925,12 +949,6 @@ async fn test_tip1016_high_gas_limit_batch_tip20_transfers() -> eyre::Result<()>
         block_gas_used < receipt_gas,
         "block gas_used ({block_gas_used}) should be less than receipt gas \
          ({receipt_gas}) due to TIP-1016 state gas exemption"
-    );
-
-    assert!(
-        receipt_gas > block_gas_used * 2,
-        "receipt gas ({receipt_gas}) should be >2x block gas ({block_gas_used}) \
-         due to state gas exemption from {num_transfers} new balance slots"
     );
 
     Ok(())

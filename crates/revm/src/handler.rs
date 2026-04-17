@@ -750,18 +750,18 @@ where
         evm: &mut Self::Evm,
         init_and_floor_gas: &InitialAndFloorGas,
     ) -> Result<FrameResult, Self::Error> {
-        let spec = evm.ctx_ref().cfg().spec();
-        let tx = evm.tx();
-
-        if let Some(oog) = check_gas_limit(*spec, tx, init_and_floor_gas) {
-            return Ok(oog);
-        }
+        let (_, tx, cfg, _, _, _, _) = evm.ctx_ref().all();
+        let spec = cfg.spec();
 
         let (gas_limit, reservoir) = init_and_floor_gas.initial_gas_and_reservoir(
             tx.gas_limit,
-            evm.ctx().cfg().tx_gas_limit_cap(),
-            evm.ctx.cfg().is_amsterdam_eip8037_enabled(),
+            cfg.tx_gas_limit_cap(),
+            cfg.is_amsterdam_eip8037_enabled(),
         );
+
+        if let Some(oog) = check_gas_limit(*spec, tx, init_and_floor_gas, reservoir) {
+            return Ok(oog);
+        }
 
         if let Some(tempo_tx_env) = evm.ctx().tx().tempo_tx_env.as_ref() {
             let calls = tempo_tx_env.aa_calls.clone();
@@ -2041,18 +2041,18 @@ where
         evm: &mut Self::Evm,
         init_and_floor_gas: &InitialAndFloorGas,
     ) -> Result<FrameResult, Self::Error> {
-        let spec = evm.ctx_ref().cfg().spec();
-        let tx = evm.tx();
-
-        if let Some(oog) = check_gas_limit(*spec, tx, init_and_floor_gas) {
-            return Ok(oog);
-        }
+        let (_, tx, cfg, _, _, _, _) = evm.ctx_ref().all();
+        let spec = cfg.spec();
 
         let (gas_limit, reservoir) = init_and_floor_gas.initial_gas_and_reservoir(
             tx.gas_limit,
-            evm.ctx().cfg().tx_gas_limit_cap(),
-            evm.ctx.cfg().is_amsterdam_eip8037_enabled(),
+            cfg.tx_gas_limit_cap(),
+            cfg.is_amsterdam_eip8037_enabled(),
         );
+
+        if let Some(oog) = check_gas_limit(*spec, tx, init_and_floor_gas, reservoir) {
+            return Ok(oog);
+        }
 
         if let Some(tempo_tx_env) = evm.ctx().tx().tempo_tx_env.as_ref() {
             let calls = tempo_tx_env.aa_calls.clone();
@@ -2084,13 +2084,16 @@ fn check_gas_limit(
     spec: tempo_chainspec::hardfork::TempoHardfork,
     tx: &TempoTxEnv,
     adjusted_gas: &InitialAndFloorGas,
+    reservoir: u64,
 ) -> Option<FrameResult> {
     if spec.is_t0() && tx.gas_limit() < adjusted_gas.initial_total_gas {
         let kind = *tx
             .first_call()
             .expect("we already checked that there is at least one call in aa tx")
             .0;
-        return Some(oog_frame_result(kind, tx.gas_limit()));
+        let mut output = oog_frame_result(kind, tx.gas_limit());
+        output.gas_mut().set_reservoir(reservoir);
+        return Some(output);
     }
     None
 }

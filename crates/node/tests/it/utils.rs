@@ -440,6 +440,7 @@ impl TestNodeBuilder {
             );
         node_config.txpool.max_account_slots = usize::MAX;
         node_config.dev.block_time = Some(Duration::from_millis(100));
+        node_config.dev.payload_wait_time = Some(Duration::from_millis(100));
 
         let node_handle = NodeBuilder::new(node_config.clone())
             .testing_node(runtime.clone())

@@ -23,6 +23,7 @@ use alloy::{
     providers::{Provider, ProviderBuilder},
     signers::local::MnemonicBuilder,
 };
+use alloy::sol_types::SolCall;
 use alloy_eips::{BlockId, BlockNumberOrTag, eip2718::Encodable2718};
 use alloy_network::TxSignerSync;
 use tempo_chainspec::spec::TEMPO_T1_BASE_FEE;
@@ -805,6 +806,195 @@ async fn test_tip1016_inner_call_revert_no_state_gas_exemption() -> eyre::Result
         block_gas_used, receipts_total_gas,
         "block gas_used ({block_gas_used}) should equal total receipt gas \
          ({receipts_total_gas}) -- inner reverted CALL should NOT exempt state gas"
+    );
+
+    Ok(())
+}
+
+/// Stress test: a single transaction at the 30M gas limit cap that does many TIP-20
+/// transfers to fresh addresses, each creating a new balance storage slot.
+///
+/// Under TIP-1016, each transfer to a new address creates a SSTORE zero->non-zero
+/// (230,000 state gas) that is exempted from block gas accounting. This means a 30M
+/// gas limit tx can create far more storage than 30M / 250,000 = 120 slots would
+/// suggest pre-TIP-1016, because only the ~20,000 regular gas per SSTORE counts
+/// toward the limit.
+///
+/// This tests that:
+/// 1. A tx with gas_limit=30M doing 50 TIP-20 transfers to fresh addresses succeeds.
+/// 2. The receipt gas_used includes all gas (execution + state creation).
+/// 3. The block header gas_used excludes state gas (TIP-1016 exemption).
+/// 4. The state gas from many TIP-20 balance slot creations is correctly exempted.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tip1016_high_gas_limit_batch_tip20_transfers() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut setup = TestNodeBuilder::new().build_with_node_access().await?;
+    let signer = MnemonicBuilder::from_phrase(TEST_MNEMONIC)
+        .index(0)?
+        .build()?;
+    let provider = ProviderBuilder::new().connect_http(setup.node.rpc_url());
+    let chain_id = provider.get_chain_id().await?;
+
+    let token =
+        tempo_precompiles::tip20::ITIP20::new(tempo_precompiles::PATH_USD_ADDRESS, &provider);
+
+    let num_transfers: u64 = 50;
+
+    // Step 1: Mint PATH_USD to signer so the batch contract can receive tokens.
+    let mint_calldata: Bytes = token
+        .mint(signer.address(), U256::from(num_transfers * 10))
+        .calldata()
+        .clone();
+    let mint_raw = build_call_tx(
+        &signer,
+        chain_id,
+        0,
+        5_000_000,
+        tempo_precompiles::PATH_USD_ADDRESS,
+        mint_calldata,
+    );
+    setup.node.rpc.inject_tx(mint_raw).await?;
+    setup.node.advance_block().await?;
+
+    // Step 2: Deploy a batch transfer contract via CreateX.
+    //
+    // Runtime loops N times, calling PATH_USD.transfer(address(0xdead0001+i), 1).
+    // Each transfer to a fresh address creates a new balance storage slot
+    // (SSTORE zero->non-zero), incurring 230,000 state gas.
+    let path_usd_bytes = tempo_precompiles::PATH_USD_ADDRESS.0 .0;
+    let transfer_selector = &tempo_precompiles::tip20::ITIP20::transferCall::SELECTOR;
+
+    let mut runtime = Vec::new();
+    // Preamble: N = calldataload(0), i = 0. Stack: [N, i]
+    runtime.extend_from_slice(&[
+        0x60, 0x00, 0x35,       // PUSH1 0, CALLDATALOAD -> N
+        0x60, 0x00,             // PUSH1 0 -> i
+    ]);
+    // Loop header (JUMPDEST @ offset 5). Stack: [N, i]
+    runtime.extend_from_slice(&[
+        0x5b,                   // JUMPDEST (loop_start)
+        0x81, 0x81, 0x10,      // DUP2(N), DUP2(i), LT -> i < N
+    ]);
+    let jumpi_offset = runtime.len();
+    runtime.extend_from_slice(&[
+        0x60, 0x00,             // PUSH1 <body> (placeholder)
+        0x57, 0x00,             // JUMPI, STOP
+    ]);
+    // Loop body
+    let body_offset = runtime.len();
+    runtime[jumpi_offset + 1] = body_offset as u8;
+    runtime.push(0x5b);        // JUMPDEST
+
+    // mstore(0, selector << 224)
+    runtime.push(0x63);
+    runtime.extend_from_slice(transfer_selector);
+    runtime.extend_from_slice(&[0x60, 0xe0, 0x1b, 0x60, 0x00, 0x52]);
+
+    // mstore(4, 0xdead0001 + i) — recipient address
+    runtime.extend_from_slice(&[
+        0x80,                               // DUP1 (i)
+        0x63, 0xde, 0xad, 0x00, 0x01,      // PUSH4 0xdead0001
+        0x01,                               // ADD
+        0x60, 0x04, 0x52,                   // PUSH1 4, MSTORE
+    ]);
+
+    // mstore(0x24, 1) — amount
+    runtime.extend_from_slice(&[0x60, 0x01, 0x60, 0x24, 0x52]);
+
+    // CALL(GAS, PATH_USD, 0, 0, 68, 68, 32)
+    runtime.extend_from_slice(&[
+        0x60, 0x20, 0x60, 0x44, 0x60, 0x44, 0x60, 0x00, 0x60, 0x00,
+        0x73,
+    ]);
+    runtime.extend_from_slice(&path_usd_bytes);
+    runtime.extend_from_slice(&[0x5a, 0xf1, 0x50]); // GAS, CALL, POP
+
+    // i++, jump to loop_start
+    runtime.extend_from_slice(&[0x60, 0x01, 0x01, 0x60, 0x05, 0x56]);
+
+    // Wrap in init code
+    let runtime_len = runtime.len();
+    assert!(runtime_len < 256);
+    let mut init_code = vec![
+        0x60, runtime_len as u8, 0x60, 0x0c, 0x60, 0x00, 0x39,
+        0x60, runtime_len as u8, 0x60, 0x00, 0xf3,
+    ];
+    init_code.extend_from_slice(&runtime);
+
+    let createx = CreateX::new(CREATEX_ADDRESS, &provider);
+    let deploy_calldata: Bytes = createx.deployCreate(Bytes::from(init_code)).calldata().clone();
+    let deploy_raw = build_call_tx(&signer, chain_id, 1, 5_000_000, CREATEX_ADDRESS, deploy_calldata);
+    setup.node.rpc.inject_tx(deploy_raw).await?;
+    let deploy_payload = setup.node.advance_block().await?;
+    let contract_addr = get_createx_deployed_address(
+        &provider, deploy_payload.block().header().inner.number,
+    ).await?;
+
+    // Step 3: Transfer PATH_USD to the batch contract.
+    let fund_calldata: Bytes = token
+        .transfer(contract_addr, U256::from(num_transfers * 10))
+        .calldata()
+        .clone();
+    let fund_raw = build_call_tx(
+        &signer, chain_id, 2, 5_000_000,
+        tempo_precompiles::PATH_USD_ADDRESS, fund_calldata,
+    );
+    setup.node.rpc.inject_tx(fund_raw).await?;
+    setup.node.advance_block().await?;
+
+    // Step 4: Call the batch contract with gas_limit=30M, requesting N transfers.
+    // The 30M cap covers regular gas only; state gas (230k per transfer) is exempted
+    // from block accounting by TIP-1016, so 50 transfers fit easily.
+    let calldata: Bytes = alloy_primitives::B256::left_padding_from(&num_transfers.to_be_bytes())
+        .as_slice()
+        .to_vec()
+        .into();
+    let call_raw = build_call_tx(&signer, chain_id, 3, 30_000_000, contract_addr, calldata);
+    setup.node.rpc.inject_tx(call_raw).await?;
+    let call_payload = setup.node.advance_block().await?;
+
+    let call_blk = call_payload.block().header().inner.number;
+    let block_gas_used = call_payload.block().header().inner.gas_used;
+
+    let block_id = BlockId::Number(BlockNumberOrTag::Number(call_blk));
+    let receipts = loop {
+        if let Some(r) = provider.get_block_receipts(block_id).await? {
+            break r;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    let user_receipt = receipts
+        .iter()
+        .find(|r| r.gas_used > 100_000)
+        .expect("should have a user tx receipt with significant gas");
+
+    assert!(user_receipt.status(), "30M gas batch transfer tx should succeed");
+
+    let receipt_gas = user_receipt.gas_used;
+    let receipts_total_gas: u64 = receipts.iter().map(|r| r.gas_used).sum();
+
+    // Receipt gas includes state gas; block header excludes it.
+    // Each transfer to a fresh address: 230,000 state gas per new balance slot.
+    let min_expected_state_gas = num_transfers * 230_000;
+    let state_gas = receipts_total_gas - block_gas_used;
+    assert!(
+        state_gas >= min_expected_state_gas,
+        "state gas ({state_gas}) should be at least {min_expected_state_gas} \
+         ({num_transfers} transfers × 230,000), \
+         block_gas_used={block_gas_used}, receipts_total_gas={receipts_total_gas}"
+    );
+
+    assert!(
+        block_gas_used < receipts_total_gas,
+        "block gas_used ({block_gas_used}) should be less than receipts_total_gas \
+         ({receipts_total_gas}) due to TIP-1016 state gas exemption"
+    );
+
+    assert!(
+        receipt_gas > block_gas_used * 2,
+        "receipt gas ({receipt_gas}) should be >2x block gas ({block_gas_used}) \
+         due to state gas exemption from {num_transfers} new balance slots"
     );
 
     Ok(())

@@ -23,6 +23,19 @@ PUBLISH_GROUPS = {
 }
 
 
+# Extra file patterns (beyond crate dirs) that trigger a specific group.
+GROUP_EXTRA_PATHS = {
+    "alloy": [r"^scripts/sanitize_source\.py$"],
+    "revm": [],
+}
+
+# File patterns that trigger ALL groups when changed.
+SHARED_PATHS = [
+    r"^scripts/publish/",
+    r"^scripts/sanitize_toml\.py$",
+    r"^Cargo\.toml$",
+]
+
 EXTRA_WORKSPACE_DEPS = {
     "alloy": [],
     "revm": ["contracts", "primitives"],
@@ -45,18 +58,26 @@ def group_config(group):
 
 
 def detect_groups(files_text):
-    """Print group=true/false lines for each group with changed crate files.
+    """Print group=true/false lines for each group with changed files.
 
     Reads a newline-separated file list (e.g. from git diff --name-only).
+    Checks crate dirs, per-group extra paths, and shared paths.
     Exits 1 if no published group is affected.
     """
+    files = files_text.strip().splitlines()
+
+    shared = any(re.search(p, f) for p in SHARED_PATHS for f in files)
+
     results = {}
     for group, dirs in GROUP_DIRS.items():
-        pattern = re.compile(rf"^crates/({'|'.join(re.escape(d) for d in dirs)})/")
-        results[group] = any(pattern.match(f) for f in files_text.strip().splitlines())
+        crate_pat = re.compile(rf"^crates/({'|'.join(re.escape(d) for d in dirs)})/")
+        extra_pats = GROUP_EXTRA_PATHS.get(group, [])
+        results[group] = shared or \
+            any(crate_pat.match(f) for f in files) or \
+            any(re.search(p, f) for p in extra_pats for f in files)
 
     if not any(results.values()):
-        print("No published crate groups detected in release PR.", file=sys.stderr)
+        print("No published crate groups detected.", file=sys.stderr)
         sys.exit(1)
 
     for group, matched in sorted(results.items()):

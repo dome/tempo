@@ -84,11 +84,7 @@ Transforms `Cargo.toml` files. Uses depth-aware brace/bracket tracking for robus
 
 ### `publish-check.yml`
 
-Runs dry-run pipelines on every PR touching published crates or scripts. Detects which groups (alloy/revm) are affected and runs only those.
-
-### `semver-check.yml`
-
-Runs `--semver-check` for affected groups. Sanitizes crates, then runs `cargo-semver-checks` against the last published version on crates.io.
+Runs dry-run pipelines and semver checks on every PR touching published crates or scripts. Detects which groups (alloy/revm) are affected, verifies they are publishable, then runs `cargo-semver-checks` against the last published version on crates.io.
 
 ### `changelog.yml`
 

@@ -9,7 +9,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-source "$REPO_ROOT/scripts/publish/common.sh"
+source "$REPO_ROOT/scripts/publish/utils.sh"
 
 GROUP="${1:-}"
 shift || true
@@ -17,28 +17,7 @@ parse_publish_mode "${1:-}"
 
 SANITIZE_PY="$REPO_ROOT/scripts/sanitize_toml.py"
 SANITIZE_RS="$REPO_ROOT/scripts/sanitize_source.py"
-ALL_PUBLISHED="tempo-contracts,tempo-primitives,tempo-alloy,tempo-chainspec,tempo-precompiles-macros,tempo-precompiles,tempo-revm"
-
-# ── Group configuration ────────────────────────────────────────────────────────
-case "$GROUP" in
-    alloy)
-        CRATE_DIRS=(contracts primitives alloy)
-        PUBLISH_CRATE_NAMES_CSV="tempo-contracts,tempo-primitives,tempo-alloy"
-        EXTRA_WORKSPACE_DEPS=()
-        ;;
-    revm)
-        CRATE_DIRS=(chainspec precompiles-macros precompiles revm)
-        PUBLISH_CRATE_NAMES_CSV="tempo-chainspec,tempo-precompiles-macros,tempo-precompiles,tempo-revm"
-        # revm crates depend on alloy crates at compile time
-        EXTRA_WORKSPACE_DEPS=(contracts primitives)
-        ;;
-    *)
-        echo "Usage: $0 <alloy|revm> [--publish|--semver-check]" >&2
-        exit 1
-        ;;
-esac
-
-# ── Create temp workspace ──────────────────────────────────────────────────────
+eval "$(python3 "$UTILS_PY" group_config "$GROUP")"
 setup_tmp_workspace "${CRATE_DIRS[@]}"
 
 # ── 1. Source & manifest sanitization ──────────────────────────────────────────
@@ -71,8 +50,7 @@ if [ "${#EXTRA_WORKSPACE_DEPS[@]}" -gt 0 ]; then
     done
     sanitize_base_manifests "$SANITIZE_PY" "$WS_VERSION" "$REPO_ROOT/Cargo.toml" "${extra_manifests[@]}"
     # Primitives needs its own reth-stripping pass
-    [ -d "$TMP_WORK_DIR/primitives" ] && \
-        python3 "$SANITIZE_PY" sanitize_primitives "$TMP_WORK_DIR/primitives/Cargo.toml"
+    [ -d "$TMP_WORK_DIR/primitives" ] && python3 "$SANITIZE_PY" sanitize_primitives "$TMP_WORK_DIR/primitives/Cargo.toml"
 fi
 
 case "$GROUP" in
@@ -90,39 +68,35 @@ esac
 # ── 2. Initial compilation check ──────────────────────────────────────────────
 log "Verifying compilation …"
 
-write_workspace_manifest "$TMP_WORK_DIR/Cargo.toml" "$MEMBERS_CSV"
+python3 "$UTILS_PY" write_workspace_manifest "$TMP_CARGO_TOML" "$MEMBERS_CSV"
 
 GEN_WS_CRATES="$PUBLISH_CRATE_NAMES_CSV"
 for d in "${EXTRA_WORKSPACE_DEPS[@]+"${EXTRA_WORKSPACE_DEPS[@]}"}"; do
     GEN_WS_CRATES="$GEN_WS_CRATES,tempo-$d"
 done
-python3 "$SANITIZE_PY" gen_workspace "$REPO_ROOT/Cargo.toml" "$TMP_WORK_DIR/Cargo.toml" \
-    "$GEN_WS_CRATES"
+python3 "$SANITIZE_PY" gen_workspace "$REPO_ROOT/Cargo.toml" "$TMP_CARGO_TOML" "$GEN_WS_CRATES"
 
-run_workspace_checks \
-    "$TMP_WORK_DIR/Cargo.toml" \
-    "Stripped crates failed to compile!" \
-    "Stripped crates failed to compile with --all-features!" \
-    "Compilation verified ✓"
+run_workspace_checks "$TMP_CARGO_TOML" \
+    "Stripped crates failed to compile!" "Stripped crates failed to compile with --all-features!" "Compilation verified ✓"
 
 # ── 3. Pre-resolve validation ─────────────────────────────────────────────────
 log "Pre-resolve validation …"
 
-INTERNAL_PATH_DEPS=$(get_internal_path_deps "$SANITIZE_PY" "$REPO_ROOT/Cargo.toml" "$ALL_PUBLISHED")
-validate_no_reth_or_internal_deps "$INTERNAL_PATH_DEPS" "${CRATE_MANIFESTS[@]}"
+INTERNAL_PATH_DEPS=$(python3 "$UTILS_PY" internal_path_deps "$REPO_ROOT/Cargo.toml" "$ALL_PUBLISHED")
+python3 "$UTILS_PY" validate_no_reth_or_internal "$INTERNAL_PATH_DEPS" "${CRATE_MANIFESTS[@]}"
 
 case "$GROUP" in
     alloy)
-        assert_no_features "$TMP_WORK_DIR/primitives/Cargo.toml" reth reth-codec serde-bincode-compat rpc
-        assert_no_features "$TMP_WORK_DIR/alloy/Cargo.toml" reth
-        assert_no_source_refs "$TMP_WORK_DIR/primitives" 'feature = "reth"' 'feature = "reth-codec"' 'reth_codecs' 'feature = "rpc"'
-        assert_no_source_refs "$TMP_WORK_DIR/alloy" 'feature = "reth"'
+        python3 "$UTILS_PY" assert_no_features "$TMP_WORK_DIR/primitives/Cargo.toml" reth reth-codec serde-bincode-compat rpc
+        python3 "$UTILS_PY" assert_no_features "$TMP_WORK_DIR/alloy/Cargo.toml" reth
+        python3 "$UTILS_PY" assert_no_source_refs "$TMP_WORK_DIR/primitives" 'feature = "reth"' 'feature = "reth-codec"' 'reth_codecs' 'feature = "rpc"'
+        python3 "$UTILS_PY" assert_no_source_refs "$TMP_WORK_DIR/alloy" 'feature = "reth"'
         ;;
     revm)
-        assert_no_features "$TMP_WORK_DIR/chainspec/Cargo.toml" reth cli
-        assert_no_features "$TMP_WORK_DIR/revm/Cargo.toml" reth rpc
-        assert_no_dep "$TMP_WORK_DIR/precompiles/Cargo.toml" tempo-evm
-        assert_no_dep "$TMP_WORK_DIR/revm/Cargo.toml" tempo-evm
+        python3 "$UTILS_PY" assert_no_features "$TMP_WORK_DIR/chainspec/Cargo.toml" reth cli
+        python3 "$UTILS_PY" assert_no_features "$TMP_WORK_DIR/revm/Cargo.toml" reth rpc
+        python3 "$UTILS_PY" assert_no_dep "$TMP_WORK_DIR/precompiles/Cargo.toml" tempo-evm
+        python3 "$UTILS_PY" assert_no_dep "$TMP_WORK_DIR/revm/Cargo.toml" tempo-evm
         ;;
 esac
 
@@ -137,29 +111,25 @@ if [ "${#EXTRA_WORKSPACE_DEPS[@]}" -gt 0 ]; then
     resolve_workspace_dependencies "$SANITIZE_PY" "$REPO_ROOT/Cargo.toml" "${extra_manifests[@]}"
 fi
 
-# ── 5. Post-resolve validation ────────────────────────────────────────────────
 log "Post-resolve validation …"
-
-validate_resolved_manifests "${CRATE_MANIFESTS[@]}"
-
+python3 "$UTILS_PY" validate_resolved "${CRATE_MANIFESTS[@]}"
 log "Post-resolve validation passed ✓"
 
-# ── 6. Final build check on resolved manifests ───────────────────────────────
+# ── 5. Final build check on resolved manifests ───────────────────────────────
 log "Final build check on resolved manifests …"
 
 FINAL_PATCHES="$PATCHES_CSV"
 for d in "${EXTRA_WORKSPACE_DEPS[@]+"${EXTRA_WORKSPACE_DEPS[@]}"}"; do
     FINAL_PATCHES="$FINAL_PATCHES,tempo-$d=$d"
 done
-write_workspace_manifest "$TMP_WORK_DIR/Cargo.toml" "$MEMBERS_CSV" "$FINAL_PATCHES"
+python3 "$UTILS_PY" write_workspace_manifest "$TMP_CARGO_TOML" "$MEMBERS_CSV" "$FINAL_PATCHES"
 
-run_workspace_checks \
-    "$TMP_WORK_DIR/Cargo.toml" \
+run_workspace_checks "$TMP_CARGO_TOML" \
     "Resolved crates failed to compile!" \
     "Resolved crates failed to compile with --all-features!" \
     "Final build check passed ✓"
 
-# ── 7. Semver check (optional) ────────────────────────────────────────────────
+# ── 6. Semver check (optional) ────────────────────────────────────────────────
 if $SEMVER_CHECK; then
     SEMVER_PREP=noop_semver_prep
     if [ "$GROUP" = "alloy" ]; then
@@ -181,12 +151,8 @@ EOF
         SEMVER_PREP=prepare_alloy_semver
     fi
 
-    run_semver_checks \
-        "$TMP_WORK_DIR/Cargo.toml" \
-        "$SEMVER_PREP" \
-        "$PUBLISH_CRATE_NAMES_CSV" \
-        "${CRATE_PATHS[@]}"
+    run_semver_checks "$TMP_CARGO_TOML" "$SEMVER_PREP" "$PUBLISH_CRATE_NAMES_CSV" "${CRATE_PATHS[@]}"
 fi
 
-# ── 8. Publish ─────────────────────────────────────────────────────────────────
+# ── 7. Publish ─────────────────────────────────────────────────────────────────
 publish_crates "All $GROUP crates published successfully! 🎉" "${CRATE_PATHS[@]}"

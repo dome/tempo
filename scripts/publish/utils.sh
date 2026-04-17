@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+UTILS_PY="$( cd "$(dirname "${BASH_SOURCE[0]}")" && pwd )/utils.py"
+
 log() { printf '  \033[1;34m→\033[0m %s\n' "$*"; }
 err() { printf '  \033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 
@@ -44,45 +46,6 @@ sanitize_base_manifests() {
     done
 }
 
-write_workspace_manifest() {
-    local out_path="$1"
-    local members_csv="$2"
-    local patches_csv="${3:-}"
-    local members=()
-    local patches=()
-    local first=true
-    local member
-    local patch
-
-    IFS=, read -r -a members <<< "$members_csv"
-    if [ -n "$patches_csv" ]; then
-        IFS=, read -r -a patches <<< "$patches_csv"
-    fi
-
-    {
-        printf '[workspace]\n'
-        printf 'members = ['
-        for member in "${members[@]}"; do
-            [ -z "$member" ] && continue
-            if $first; then
-                first=false
-            else
-                printf ', '
-            fi
-            printf '"%s"' "$member"
-        done
-        printf ']\n'
-        printf 'resolver = "3"\n'
-
-        if [ "${#patches[@]}" -gt 0 ]; then
-            printf '\n[patch.crates-io]\n'
-            for patch in "${patches[@]}"; do
-                printf '%s = { path = "%s" }\n' "${patch%%=*}" "${patch#*=}"
-            done
-        fi
-    } > "$out_path"
-}
-
 run_workspace_checks() {
     local manifest_path="$1"
     local check_err="$2"
@@ -102,86 +65,12 @@ run_workspace_checks() {
     log "$success_message"
 }
 
-get_internal_path_deps() {
-    local sanitize_py="$1"
-    local workspace_toml="$2"
-    local keep_csv="$3"
-
-    python3 -c '
-import sys
-sys.path.insert(0, sys.argv[1])
-from sanitize_toml import parse_workspace_deps
-_, _, ws_path_deps, _, _, _ = parse_workspace_deps(sys.argv[2])
-keep = {entry for entry in sys.argv[3].split(",") if entry}
-for dep in sorted(ws_path_deps - keep):
-    print(dep)
-' "$(dirname "$sanitize_py")" "$workspace_toml" "$keep_csv"
-}
-
-validate_no_reth_or_internal_deps() {
-    local internal_path_deps="$1"
-    shift
-
-    local crate_toml
-    local crate_name
-    local dep
-    for crate_toml in "$@"; do
-        crate_name=$(basename "$(dirname "$crate_toml")")
-        grep -qE '^\s*reth-' "$crate_toml" && \
-            err "reth dependency still in $crate_name/Cargo.toml"
-        for dep in $internal_path_deps; do
-            grep -qE "^\s*${dep}[\s.=]" "$crate_toml" && \
-                err "Internal dep '$dep' still in $crate_name/Cargo.toml"
-        done
-    done
-
-    return 0
-}
-
-# assert_no_features <toml> <feat...>
-#   Fails if any listed feature is still defined in the manifest.
-assert_no_features() {
-    local toml="$1"; shift
-    local crate_name
-    crate_name=$(basename "$(dirname "$toml")")
-    local feat
-    for feat in "$@"; do
-        grep -qE "^\s*${feat}\s*=" "$toml" && \
-            err "Feature '$feat' still defined in $crate_name/Cargo.toml"
-    done
-    return 0
-}
-
-# assert_no_dep <toml> <dep>
-#   Fails if the dependency is still present in the manifest.
-assert_no_dep() {
-    local toml="$1" dep="$2"
-    local crate_name
-    crate_name=$(basename "$(dirname "$toml")")
-    grep -qE "^\s*${dep}[\s.=]" "$toml" && \
-        err "Dependency '$dep' still in $crate_name/Cargo.toml"
-    return 0
-}
-
-# assert_no_source_refs <dir> <pattern...>
-#   Fails if any pattern is found in .rs files under dir.
-assert_no_source_refs() {
-    local dir="$1"; shift
-    local crate_name
-    crate_name=$(basename "$dir")
-    local pat
-    for pat in "$@"; do
-        grep -rq "$pat" "$dir/src/" && \
-            err "Forbidden pattern '$pat' still in $crate_name source"
-    done
-    return 0
-}
-
 # setup_tmp_workspace <crate_dir...>
 #   Creates a temp directory, copies crates, and sets:
-#   TMP_WORK_DIR, CRATE_MANIFESTS, CRATE_PATHS, MEMBERS_CSV, PATCHES_CSV
+#   TMP_WORK_DIR, TMP_CARGO_TOML, CRATE_MANIFESTS, CRATE_PATHS, MEMBERS_CSV, PATCHES_CSV
 setup_tmp_workspace() {
     TMP_WORK_DIR=$(mktemp -d)
+    TMP_CARGO_TOML="$TMP_WORK_DIR/Cargo.toml"
     trap 'rm -rf "$TMP_WORK_DIR"' EXIT
 
     copy_crates_to_tmp "$TMP_WORK_DIR" "$@"
@@ -211,85 +100,6 @@ resolve_workspace_dependencies() {
     done
 }
 
-validate_resolved_manifests() {
-    local crate_toml
-    local crate_name
-    for crate_toml in "$@"; do
-        crate_name=$(basename "$(dirname "$crate_toml")")
-        grep -q 'workspace = true' "$crate_toml" && \
-            err "Unresolved 'workspace = true' in $crate_name/Cargo.toml"
-        grep -q 'path = ' "$crate_toml" && \
-            err "Unresolved 'path = ' dep in $crate_name/Cargo.toml"
-        grep -q 'git = ' "$crate_toml" && \
-            err "Unresolved 'git = ' dep in $crate_name/Cargo.toml"
-    done
-
-    return 0
-}
-
-release_type_for_crate() {
-    local crate_name="$1"
-    python3 - "$crate_name" "$REPO_ROOT" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover
-    import tomli as tomllib
-
-crate_name, repo_root = sys.argv[1], Path(sys.argv[2])
-config_path = repo_root / ".changelog" / "config.toml"
-
-bump_rank = {"patch": 0, "minor": 1, "major": 2}
-
-fixed_groups = []
-if config_path.exists():
-    with config_path.open("rb") as fh:
-        config = tomllib.load(fh)
-    for group in config.get("fixed", []):
-        members = group.get("members", [])
-        if isinstance(members, list):
-            fixed_groups.append(set(members))
-
-explicit = {}
-for changelog in sorted((repo_root / ".changelog").glob("*.md")):
-    lines = changelog.read_text(encoding="utf-8").splitlines()
-    if not lines or lines[0].strip() != "---":
-        continue
-    try:
-        end = next(i for i, line in enumerate(lines[1:], start=1) if line.strip() == "---")
-    except StopIteration:
-        continue
-
-    for line in lines[1:end]:
-        match = re.match(r'^\s*"?([A-Za-z0-9_-]+)"?\s*:\s*(patch|minor|major)\s*$', line)
-        if not match:
-            continue
-        name, bump = match.groups()
-        current = explicit.get(name)
-        if current is None or bump_rank[bump] > bump_rank[current]:
-            explicit[name] = bump
-
-selected = explicit.get(crate_name)
-for members in fixed_groups:
-    if crate_name not in members:
-        continue
-    group_bump = None
-    for member in members:
-        bump = explicit.get(member)
-        if bump is None:
-            continue
-        if group_bump is None or bump_rank[bump] > bump_rank[group_bump]:
-            group_bump = bump
-    if group_bump is not None:
-        selected = group_bump if selected is None or bump_rank[group_bump] > bump_rank[selected] else selected
-
-print(selected or "")
-PY
-}
-
 crate_name_from_dir() {
     local crate_dir="$1"
     grep -m1 'name = ' "$crate_dir/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/'
@@ -302,8 +112,7 @@ crate_version_from_dir() {
 
 latest_published_version() {
     local crate_name="$1"
-    curl -sL "https://crates.io/api/v1/crates/$crate_name" \
-        -H "User-Agent: tempo-publish-script" | \
+    curl -sL "https://crates.io/api/v1/crates/$crate_name" -H "User-Agent: tempo-publish-script" | \
         python3 -c "import sys,json; d=json.load(sys.stdin); print(d['crate']['max_stable_version'] or d['crate']['max_version'])" 2>/dev/null
 }
 
@@ -337,7 +146,7 @@ run_semver_checks() {
         crate_ver=$(crate_version_from_dir "$crate_dir")
         log "Checking $crate_name@$crate_ver …"
 
-        release_type=$(release_type_for_crate "$crate_name")
+        release_type=$(python3 "$UTILS_PY" release_type "$crate_name" "$REPO_ROOT")
         if [ -z "$release_type" ]; then
             log "$crate_name has no pending changelog release type, skipping semver-check"
             continue

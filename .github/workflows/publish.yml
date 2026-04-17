@@ -34,16 +34,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          files=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
-          alloy=false; revm=false
-          echo "$files" | grep -qE '^crates/(contracts|primitives|alloy)/' && alloy=true
-          echo "$files" | grep -qE '^crates/(chainspec|precompiles-macros|precompiles|revm)/' && revm=true
-          echo "alloy=$alloy" >> "$GITHUB_OUTPUT"
-          echo "revm=$revm" >> "$GITHUB_OUTPUT"
-          if [ "$alloy" = "false" ] && [ "$revm" = "false" ]; then
-            echo "No published crate groups detected in release PR." >&2; exit 1
-          fi
+        run: git diff --name-only "$BASE_SHA" "$HEAD_SHA" | python3 scripts/publish/utils.py detect_groups >> "$GITHUB_OUTPUT"
 
       - name: Publish alloy crates via sanitize pipeline
         if: steps.release-groups.outputs.alloy == 'true'

@@ -7,8 +7,8 @@ on:
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 jobs:
-  release-pr:
-    name: Release PR
+  alloy:
+    name: Alloy Release PR
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -19,54 +19,34 @@ jobs:
           token: ${{ secrets.TEMPO_GITHUB_PAT }}
           persist-credentials: true
 
-      - name: Keep only SDK changelog entries
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          targets = {
-              "tempo-alloy",
-              "tempo-primitives",
-              "tempo-contracts",
-              "tempo-chainspec",
-              "tempo-precompiles-macros",
-              "tempo-precompiles",
-              "tempo-revm",
-          }
-
-          for path in Path(".changelog").glob("*.md"):
-              text = path.read_text(encoding="utf-8")
-              lines = text.splitlines(keepends=True)
-
-              if not lines or lines[0].strip() != "---":
-                  print(f"Removing {path} (missing changelog frontmatter)")
-                  path.unlink()
-                  continue
-
-              end = next((i for i, line in enumerate(lines[1:], start=1) if line.strip() == "---"), None)
-              if end is None:
-                  print(f"Removing {path} (unterminated changelog frontmatter)")
-                  path.unlink()
-                  continue
-
-              kept = []
-              for line in lines[1:end]:
-                  match = re.match(r'^\s*"?([A-Za-z0-9_-]+)"?\s*:', line)
-                  if match and match.group(1) in targets:
-                      kept.append(line if line.endswith("\n") else f"{line}\n")
-
-              if not kept:
-                  print(f"Removing {path} (does not target published crates)")
-                  path.unlink()
-                  continue
-
-              body = "".join(lines[end + 1:])
-              path.write_text("---\n" + "".join(kept) + "---\n" + body, encoding="utf-8")
-          PY
+      - name: Keep only alloy changelog entries
+        run: python3 scripts/publish/utils.py filter_changelogs alloy
 
       - uses: tempoxyz/changelogs@master
         with:
+          branch: changelog-release/alloy
+          conventional-commit: true
+          post-version-command: cargo update -w
+          github-token: ${{ secrets.TEMPO_GITHUB_PAT }}
+
+  revm:
+    name: Revm Release PR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.TEMPO_GITHUB_PAT }}
+          persist-credentials: true
+
+      - name: Keep only revm changelog entries
+        run: python3 scripts/publish/utils.py filter_changelogs revm
+
+      - uses: tempoxyz/changelogs@master
+        with:
+          branch: changelog-release/revm
           conventional-commit: true
           post-version-command: cargo update -w
           github-token: ${{ secrets.TEMPO_GITHUB_PAT }}

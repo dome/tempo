@@ -272,12 +272,17 @@ contract BlockGasLimitsInvariantTest is InvariantBase {
         uint256 requiredStateGas = CREATE_STATE_GAS
             + (initcode.length * CODE_DEPOSIT_STATE_PER_BYTE) + ACCOUNT_CREATION_STATE_GAS;
 
-        uint256 totalGas = requiredRegularGas + requiredStateGas;
+        uint64 nonce = uint64(vm.getNonce(sender));
+
+        // Nonce-0 senders incur an additional account creation cost
+        uint256 nonceCost = nonce == 0
+            ? ACCOUNT_CREATION_REGULAR_GAS + ACCOUNT_CREATION_STATE_GAS
+            : 0;
+
+        uint256 totalGas = requiredRegularGas + requiredStateGas + nonceCost;
 
         // totalGas can exceed TX_GAS_CAP — state gas is exempt from the cap
         uint64 gasLimit = uint64(totalGas);
-
-        uint64 nonce = uint64(vm.getNonce(sender));
         bytes memory createTx =
             TxBuilder.buildLegacyCreateWithGas(vmRlp, vm, initcode, nonce, gasLimit, privateKey);
 

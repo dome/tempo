@@ -85,6 +85,10 @@ contract TIP1016InvariantTest is InvariantBase {
     /// @dev Gas tolerance for measurements
     uint256 internal constant GAS_TOLERANCE = 50_000;
 
+    /// @dev Account creation cost (regular + state) for nonce-0 senders
+    uint256 internal constant ACCOUNT_CREATION_COST =
+        ACCOUNT_CREATION_REGULAR_GAS + ACCOUNT_CREATION_STATE_GAS;
+
     /*//////////////////////////////////////////////////////////////
                             TEST STATE
     //////////////////////////////////////////////////////////////*/
@@ -254,8 +258,11 @@ contract TIP1016InvariantTest is InvariantBase {
         bytes memory callData = abi.encodeCall(TIP1016Storage.storeValue, (slot, 1));
         uint64 nonce = uint64(vm.getNonce(sender));
 
-        // Provide total gas for SSTORE (regular + state)
-        uint64 gasLimit = uint64(BASE_TX_GAS + CALL_OVERHEAD + SSTORE_SET_GAS + GAS_TOLERANCE);
+        // Provide total gas for SSTORE (regular + state).
+        // Nonce-0 senders incur an additional account creation cost (25k regular + 225k state).
+        uint256 nonceCost = nonce == 0 ? ACCOUNT_CREATION_COST : 0;
+        uint64 gasLimit =
+            uint64(BASE_TX_GAS + CALL_OVERHEAD + SSTORE_SET_GAS + GAS_TOLERANCE + nonceCost);
         bytes memory signedTx = TxBuilder.buildLegacyCallWithGas(
             vmRlp, vm, address(storageContract), callData, nonce, gasLimit, privateKey
         );
@@ -294,7 +301,9 @@ contract TIP1016InvariantTest is InvariantBase {
         bytes memory setupData = abi.encodeCall(TIP1016Storage.storeValue, (slot, 1));
         uint64 nonce = uint64(vm.getNonce(sender));
 
-        uint64 setupGas = uint64(BASE_TX_GAS + CALL_OVERHEAD + SSTORE_SET_GAS + GAS_TOLERANCE);
+        uint256 nonceCost = nonce == 0 ? ACCOUNT_CREATION_COST : 0;
+        uint64 setupGas =
+            uint64(BASE_TX_GAS + CALL_OVERHEAD + SSTORE_SET_GAS + GAS_TOLERANCE + nonceCost);
         bytes memory setupTx = TxBuilder.buildLegacyCallWithGas(
             vmRlp, vm, address(storageContract), setupData, nonce, setupGas, privateKey
         );
@@ -347,6 +356,8 @@ contract TIP1016InvariantTest is InvariantBase {
         uint256 targetSize = bound(sizeSeed, 1000, 8000);
         bytes memory initcode = _createInitcodeOfSize(targetSize);
 
+        uint64 nonce = uint64(vm.getNonce(sender));
+
         // Compute total gas with TIP-1016 split
         uint256 regularGas = 53_000 + CREATE_REGULAR_GAS
             + (initcode.length * CODE_DEPOSIT_REGULAR_PER_BYTE) + ACCOUNT_CREATION_REGULAR_GAS
@@ -359,8 +370,10 @@ contract TIP1016InvariantTest is InvariantBase {
         uint256 expectedExemptedStateGas = (targetSize * CODE_DEPOSIT_STATE_PER_BYTE)
             + CREATE_STATE_GAS + ACCOUNT_CREATION_STATE_GAS;
 
-        uint64 gasLimit = uint64(regularGas + stateGas);
-        uint64 nonce = uint64(vm.getNonce(sender));
+        // Nonce-0 senders incur an additional account creation cost
+        uint256 nonceCost = nonce == 0 ? ACCOUNT_CREATION_COST : 0;
+
+        uint64 gasLimit = uint64(regularGas + stateGas + nonceCost);
 
         bytes memory createTx =
             TxBuilder.buildLegacyCreateWithGas(vmRlp, vm, initcode, nonce, gasLimit, privateKey);
@@ -440,9 +453,11 @@ contract TIP1016InvariantTest is InvariantBase {
         bytes memory callData = abi.encodeCall(TIP1016Storage.storeValue, (slot, 1));
         uint64 nonce = uint64(vm.getNonce(sender));
 
-        // tx.gas above the limit, but the excess covers state gas
+        // tx.gas above the limit, but the excess covers state gas.
+        // Nonce-0 senders need additional account creation gas.
+        uint256 nonceCost = nonce == 0 ? ACCOUNT_CREATION_COST : 0;
         extraGas = bound(extraGas, SSTORE_STATE_GAS, SSTORE_STATE_GAS + 1_000_000);
-        uint64 gasLimit = uint64(MAX_TX_GAS_LIMIT + extraGas);
+        uint64 gasLimit = uint64(MAX_TX_GAS_LIMIT + extraGas + nonceCost);
 
         bytes memory signedTx = TxBuilder.buildLegacyCallWithGas(
             vmRlp, vm, address(storageContract), callData, nonce, gasLimit, privateKey
@@ -481,7 +496,9 @@ contract TIP1016InvariantTest is InvariantBase {
         bytes memory stateCallData = abi.encodeCall(TIP1016Storage.storeValue, (slot, 1));
         uint64 nonce = uint64(vm.getNonce(sender));
 
-        uint64 stateGas = uint64(BASE_TX_GAS + CALL_OVERHEAD + SSTORE_SET_GAS + GAS_TOLERANCE);
+        uint256 nonceCost = nonce == 0 ? ACCOUNT_CREATION_COST : 0;
+        uint64 stateGas =
+            uint64(BASE_TX_GAS + CALL_OVERHEAD + SSTORE_SET_GAS + GAS_TOLERANCE + nonceCost);
         bytes memory stateTx = TxBuilder.buildLegacyCallWithGas(
             vmRlp, vm, address(storageContract), stateCallData, nonce, stateGas, privateKey
         );
@@ -502,7 +519,8 @@ contract TIP1016InvariantTest is InvariantBase {
         uint256 recipientIdx = (senderIdx + 1) % actors.length;
         bytes memory transferData = abi.encodeCall(ITIP20.transfer, (actors[recipientIdx], 1e6));
 
-        uint64 regularGas = uint64(BASE_TX_GAS + CALL_OVERHEAD + GAS_TOLERANCE);
+        nonceCost = nonce == 0 ? ACCOUNT_CREATION_COST : 0;
+        uint64 regularGas = uint64(BASE_TX_GAS + CALL_OVERHEAD + GAS_TOLERANCE + nonceCost);
         bytes memory regularTx = TxBuilder.buildLegacyCallWithGas(
             vmRlp, vm, address(feeToken), transferData, nonce, regularGas, privateKey
         );
@@ -545,8 +563,11 @@ contract TIP1016InvariantTest is InvariantBase {
         // Gas needs: SSTORE 0→NZ (250k) + SSTORE NZ→0 (refund) + overhead
         // After refund the net cost should be ~GAS_WARM_ACCESS (100)
         // But we need enough upfront for the full SSTORE before the refund
-        uint64 gasLimit =
-            uint64(BASE_TX_GAS + CALL_OVERHEAD + SSTORE_SET_GAS + SSTORE_HOT_GAS + GAS_TOLERANCE);
+        uint256 nonceCost = nonce == 0 ? ACCOUNT_CREATION_COST : 0;
+        uint64 gasLimit = uint64(
+            BASE_TX_GAS + CALL_OVERHEAD + SSTORE_SET_GAS + SSTORE_HOT_GAS + GAS_TOLERANCE
+                + nonceCost
+        );
         bytes memory signedTx = TxBuilder.buildLegacyCallWithGas(
             vmRlp, vm, address(storageContract), callData, nonce, gasLimit, privateKey
         );

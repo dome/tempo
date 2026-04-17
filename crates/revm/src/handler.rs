@@ -2032,9 +2032,6 @@ where
     type IT = EthInterpreter;
 
     /// Overridden execution method with inspector support that handles AA vs standard transactions.
-    ///
-    /// Delegates to [`inspect_execution_with`](TempoEvmHandler::inspect_execution_with) with
-    /// the default [`inspect_run_exec_loop`](Self::inspect_run_exec_loop).
     #[inline]
     fn inspect_execution(
         &mut self,

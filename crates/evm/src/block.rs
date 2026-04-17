@@ -284,7 +284,15 @@ where
                 Vec::new()
             };
 
-            let reserved_gas = transactions.iter().map(|tx| tx.gas_limit()).sum::<u64>();
+            let reserved_gas = transactions
+                .iter()
+                .map(|tx| {
+                    core::cmp::min(
+                        tx.gas_limit(),
+                        self.inner.evm.cfg.tx_gas_limit_cap.unwrap_or(u64::MAX),
+                    )
+                })
+                .sum::<u64>();
 
             let signature_hash = SubBlock {
                 version: metadata.version,

@@ -526,14 +526,41 @@ where
 
             let tx_with_env = pool_tx.transaction.clone().into_with_tx_env();
             let tx_execution_start = Instant::now();
-            let mut gas_used = 0;
             if let Err(err) =
                 builder.execute_transaction_with_result_closure(tx_with_env, |result| {
-                    gas_used = if is_t4 {
+                    // Compute gas usage as either regular-only gas spending (T4+) or total gas spending (pre-T4)
+                    let gas_used = if is_t4 {
                         result.result().result.gas().block_regular_gas_used()
                     } else {
                         result.result().result.tx_gas_used()
                     };
+
+                    cumulative_gas_used += gas_used;
+                    if !is_payment {
+                        non_payment_gas_used += gas_used;
+                    }
+
+                    // Score payload value by actual validator payout, applying the AMM
+                    // haircut when the transaction's fee token differs from the validator's.
+                    let nominal_spending = calc_gas_balance_spending(
+                        result.result().result.tx_gas_used(),
+                        effective_gas_price,
+                    );
+                    if let Some(fee_token) = pool_tx.transaction.resolved_fee_token() {
+                        if fee_token == validator_fee_token {
+                            total_fees += nominal_spending;
+                        } else {
+                            total_fees +=
+                                tempo_precompiles::tip_fee_manager::amm::compute_amount_out(
+                                    nominal_spending,
+                                )
+                                .expect(
+                                    "execution succeeded, so compute_amount_out should not fail",
+                                );
+                        }
+                    } else {
+                        warn!("no resolved fee token for a pool transaction")
+                    }
                 })
             {
                 if let BlockExecutionError::Validation(BlockValidationError::InvalidTx {
@@ -568,25 +595,6 @@ where
                 .record(elapsed);
             trace!(?elapsed, "Transaction executed");
 
-            // Score payload value by actual validator payout, applying the AMM
-            // haircut when the transaction's fee token differs from the validator's.
-            let nominal_spending = calc_gas_balance_spending(gas_used, effective_gas_price);
-            if let Some(fee_token) = pool_tx.transaction.resolved_fee_token() {
-                if fee_token == validator_fee_token {
-                    total_fees += nominal_spending;
-                } else {
-                    total_fees += tempo_precompiles::tip_fee_manager::amm::compute_amount_out(
-                        nominal_spending,
-                    )
-                    .map_err(PayloadBuilderError::other)?;
-                }
-            } else {
-                warn!("no resolved fee token for a pool transaction")
-            }
-            cumulative_gas_used += gas_used;
-            if !is_payment {
-                non_payment_gas_used += gas_used;
-            }
             block_size_used += tx_rlp_length;
         }
         drop(_block_fill_span);

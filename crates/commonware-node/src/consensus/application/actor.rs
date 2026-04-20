@@ -371,23 +371,31 @@ impl Inner<Init> {
             "constructed proposal",
         );
 
+        // If re-proposing, then don't store the parent for broadcasting and
+        // don't touch the execution layer.
+        if proposal_digest == parent_digest {
+            response.send(proposal_digest).map_err(|_| {
+                eyre!(
+                    "failed returning proposal to consensus engine: response \
+                    channel was already closed"
+                )
+            })?;
+            return Ok(());
+        }
+
+        // Update latest_proposed_block BEFORE sending response to avoid race condition
+        // where broadcast is requested before the state is updated
+        {
+            let mut lock = self.state.latest_proposed_block.write().await;
+            *lock = Some((round, proposal.clone()));
+        }
+
         response.send(proposal_digest).map_err(|_| {
             eyre!(
                 "failed returning proposal to consensus engine: response \
                 channel was already closed"
             )
         })?;
-
-        // If re-proposing, then don't store the parent for broadcasting and
-        // don't touch the execution layer.
-        if proposal_digest == parent_digest {
-            return Ok(());
-        }
-
-        {
-            let mut lock = self.state.latest_proposed_block.write().await;
-            *lock = Some((round, proposal.clone()));
-        }
 
         Ok(())
     }
